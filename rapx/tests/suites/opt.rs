@@ -1,3 +1,12 @@
+// ================ Quadratic String concatenation ================
+#[test]
+fn opt_string_add() {
+    let output = run_with_args("opt/string_add", &["opt"]);
+    assert_not_contain(&output, "RAPx|ERROR|");
+    assert_contain(&output, "Quadratic string concatenation detected");
+    assert_contain(&output, "Suboptimal: 1");
+}
+
 
 #[test]
 fn opt_bounds_len() {
