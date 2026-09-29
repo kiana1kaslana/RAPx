@@ -11,6 +11,7 @@
 #[rapx::verify]
 #[rapx::requires(ValidPtr(ptr, u32, 1), kind = "precond")]
 #[rapx::requires(Align(ptr, u32), kind = "precond")]
+#[rapx::requires(Init(ptr, u32, 1), kind = "precond")]
 unsafe fn read_slot(ptr: *mut u32) -> u32 {
     unsafe { ptr.read() }
 }
