@@ -135,6 +135,9 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
     /// Exit an inlined callee: capture the callee's return value, restore the
     /// caller context, and write the return value to the caller's destination.
     fn handle_callee_exit(&mut self, dest: usize) {
+        // Still the inlined callee at this point; needed for the
+        // MaybeUninit::uninit exception below.
+        let callee_def_id = self.caller_def_id;
         let ret = self.locals.get(&Local::from_usize(0)).cloned();
         let ret_fields: Vec<(Vec<usize>, VmValue<'ctx, 'tcx>)> = self
             .field_values
@@ -153,20 +156,36 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
             let dest_ty = self.body.local_decls[Local::from_usize(dest)].ty;
             v.ty = dest_ty;
             // Infer invariants: a non-null provenance with offset 0 means the
-            // return value is valid and initialized.
+            // return value is valid and initialized. Exception:
+            // `MaybeUninit::uninit` returns uninitialized memory by contract.
+            let callee_path = self.tcx.def_path_str(callee_def_id);
+            let returns_uninit = callee_path.ends_with("maybe_uninit::uninit")
+                || callee_path.ends_with("maybe_uninit::as_ptr")
+                || callee_path.ends_with("maybe_uninit::as_mut_ptr")
+                || crate::verify::api_classify::is_ptr_read(Some(callee_def_id))
+                    || (callee_path.contains("ptr::")
+                        && (callee_path.ends_with("::read")
+                            || callee_path.ends_with("::read_volatile")));
             if let Some(ref prov) = v.provenance {
                 if prov.offset.as_u64() == Some(0) {
                     v.invariants.non_null = true;
-                    v.invariants.init = true;
-                    self.alloc_mut(prov.alloc_id).initialized = true;
+                    if !returns_uninit {
+                        v.invariants.init = true;
+                        self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                    }
                 }
             }
             self.set_local(Local::from_usize(dest), v);
             // The callee returned a fully-constructed value, so the caller's
             // destination stack slot is initialized.
-            if let Some(dest_alloc_id) = self.local_alloc_ids.get(&Local::from_usize(dest)).copied()
-            {
-                self.alloc_mut(dest_alloc_id).initialized = true;
+            if !returns_uninit {
+                if let Some(dest_alloc_id) =
+                    self.local_alloc_ids.get(&Local::from_usize(dest)).copied()
+                {
+                    self.alloc_mut(dest_alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                }
             }
         }
         for (fields, fv) in ret_fields {
@@ -227,6 +246,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                         invariants.non_null = true;
                         invariants.init = true;
                         self.alloc_mut(heap_alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                         // Also expose the box's inner `Unique<T>.pointer` field
                         // (a `NonNull<T>` at path [0, 0]) so that inlined bodies
                         // like `Box::into_non_null_with_allocator` — which reads
@@ -491,6 +511,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                             self.allocate_slice(len, elem_size_sym, elem_align, Some(*elem_ty));
                         if !pointee_is_maybe_uninit {
                             self.alloc_mut(data_alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                         }
                         self.set_local(
                             local,
@@ -520,6 +541,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                         self.allocate(pointee_size_term, pointee_align, Some(pointee_ty));
                     if !pointee_is_maybe_uninit {
                         self.alloc_mut(pointee_alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                     }
                     self.set_local(
                         local,
@@ -746,6 +768,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     };
                     self.alloc_mut(alloc_id).set_slice_len(n_term);
                     self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                     self.local_alloc_ids.insert(local, alloc_id);
                     if let Some(n) = n {
                         for i in 0..n {
@@ -914,6 +937,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
         let max_size = Int::from_u64(self.ctx, i64::MAX as u64);
         let (alloc_id, base) = self.allocate_external(max_size, align, Some(elem_ty));
         self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
         if let Some(region) = alive_region {
             self.alloc_mut(alloc_id).liveness = Liveness::AssumedFor(region);
         }
@@ -1164,6 +1188,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                 let max_size = Int::from_u64(self.ctx, i64::MAX as u64);
                 let (fa, _fb) = self.allocate_external(max_size, field_align, Some(pointee));
                 self.alloc_mut(fa).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                 let term = self.fresh_int(&format!("pointee_nn_{}_{}", local_idx, idx));
                 self.alloc_field_values.insert(
                     (alloc_id, root_ty, path.clone()),
@@ -1235,6 +1260,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     Some(*elem_ty),
                 );
                 self.alloc_mut(fa).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                 self.alloc_field_values.insert(
                     (alloc_id, root_ty, path.clone()),
                     VmValue {
@@ -1939,7 +1965,27 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
         }
 
         if concrete && value_size > 0 {
-            self.alloc_mut(alloc_id).initialized = true;
+            // Storing into a `MaybeUninit`-typed place does NOT initialize it:
+            // the whole point of `MaybeUninit::uninit()` is that the storage
+            // starts uninitialized. Byte-level init is tracked separately by
+            // actual writes (see the raw-write handler in vm/call.rs), and
+            // `check_init` consults it. Mirrors the `pointee_is_maybe_uninit`
+            // guard on the reference-creation path.
+            let stored_ty_is_maybe_uninit = matches!(
+                value_ty.kind(),
+                rustc_middle::ty::TyKind::Adt(adt, _)
+                    if self.tcx.def_path_str(adt.did()) == "core::mem::maybe_uninit"
+            );
+            rap_debug!(
+                "STORE-MARK debug: alloc={} value_ty={} skip={}",
+                alloc_id.0,
+                format!("{:?}", value_ty.kind()),
+                stored_ty_is_maybe_uninit
+            );
+            if !stored_ty_is_maybe_uninit {
+                self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+            }
 
             let is_u8_write = matches!(
                 value_ty.kind(),
@@ -1987,6 +2033,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                 let alloc_id = prov.alloc_id;
                 let byte_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
                 self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                 self.record_byte_value(alloc_id, byte_offset, value.term.clone());
                 if let Some(term_val) = value.term.as_u64() {
                     if term_val == 0 {
@@ -2442,6 +2489,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     self.set_field_value(dest_local, vec![0], field_val.clone());
                     if let Some(alloc_id) = self.local_alloc_ids.get(&dest_local).copied() {
                         self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                     }
                     return VmValue {
                         term: field_val.term,
@@ -2507,6 +2555,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     }
                     if let Some(alloc_id) = dest_alloc_id {
                         self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                         if is_byte_array && field_sz == 1 {
                             self.record_byte_value(alloc_id, byte_offset, field_term.clone());
                         }
@@ -3588,6 +3637,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     self.alloc_mut(id).dead = false;
                     self.alloc_mut(id).liveness = Liveness::AssumedFor(self.tcx.lifetimes.re_static);
                     self.alloc_mut(id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                     self.alloc_mut(id).nul_terminated = true;
                     // `ValidCStr(p, n)` carries the byte length of the
                     // nul-terminated buffer.  Assert the allocation covers `n`
@@ -3682,6 +3732,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
             self.allocate_external(total, heap_align, Some(elem_ty))
         };
         self.alloc_mut(heap_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
         VmValue {
             term: heap_base,
             ty: val_ty,
@@ -4428,6 +4479,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
         }
         if let Some(prov) = &val.provenance {
             self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
         }
         if let Some((local, path)) = self.contract_field_path(property) {
             let existing = if path.is_empty() {
@@ -4439,6 +4491,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                 existing.invariants.init = true;
                 if let Some(prov) = &existing.provenance {
                     self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                 }
                 if path.is_empty() {
                     self.set_local(local, existing);
@@ -4453,6 +4506,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
     fn set_owning_for_value(&mut self, val: VmValue<'ctx, 'tcx>) {
         if let Some(prov) = &val.provenance {
             self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
         }
     }
 
@@ -4557,6 +4611,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
             .unwrap_or_else(|| first_arg_val.term.clone());
         if let Some(ref prov) = prov {
             self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
             self.set_local(
                 dest,
                 VmValue {
@@ -4618,6 +4673,7 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                         let align = self.align_sym(pointee_ty);
                         let (alloc_id, base) = self.allocate(size, align, Some(pointee_ty));
                         self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
                         // A const/static byte materialization lives for the
                         // whole program (`'static`), so it is always alive.
                         self.alloc_mut(alloc_id).liveness =

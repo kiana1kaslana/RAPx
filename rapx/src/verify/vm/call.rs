@@ -970,11 +970,32 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                 val.ty = dest_ty;
                 // Infer invariants: a non-null provenance with offset=0
                 // means the return value is valid and initialized.
+                // Exception: `MaybeUninit::uninit` returns uninitialized
+                // memory by contract, so Init must not be inferred here
+                // (otherwise a later read through a derived pointer is
+                // proved initialized without ever being written).
+                // A read (ptr::read & friends) produces a value that inherits
+                // the source provenance; marking the source allocation
+                // initialized because the *read result* is non-null at offset
+                // 0 is circular — reading uninitialized memory yields exactly
+                // such a value. Same for MaybeUninit::uninit/as_ptr family.
+                let callee_path = self.tcx.def_path_str(callee_def_id);
+                let returns_uninit = callee_path.ends_with("maybe_uninit::uninit")
+                    || callee_path.ends_with("maybe_uninit::as_ptr")
+                    || callee_path.ends_with("maybe_uninit::as_mut_ptr")
+                    || crate::verify::api_classify::is_ptr_read(Some(callee_def_id))
+                    || (callee_path.contains("ptr::")
+                        && (callee_path.ends_with("::read")
+                            || callee_path.ends_with("::read_volatile")));
                 if let Some(ref prov) = val.provenance {
                     if prov.offset.as_u64() == Some(0) {
                         val.invariants.non_null = true;
-                        val.invariants.init = true;
-                        self.alloc_mut(prov.alloc_id).initialized = true;
+                        if !returns_uninit {
+                            val.invariants.init = true;
+                            self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt callee={}:{}", self.tcx.def_path_str(callee_def_id), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
+                        }
                     }
                 }
                 self.set_local(dest, val);
@@ -990,7 +1011,11 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                 // no provenance: a later `&raw const (*&field)` + `ptr::read`
                 // must be able to discharge `Init` against the field.
                 if let Some(dest_alloc_id) = self.local_alloc_ids.get(&dest).copied() {
-                    self.alloc_mut(dest_alloc_id).initialized = true;
+                    if !returns_uninit {
+                        self.alloc_mut(dest_alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
+                    }
                 }
             }
             None => {
@@ -1551,6 +1576,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                             self.path_conditions.push(field_size._eq(&remaining));
                         }
                         self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                         if let Some(ref source_prov) = self_val.provenance {
                             self.alloc_mut(alloc_id).parent = Some(source_prov.alloc_id);
                         }
@@ -1755,6 +1782,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                         f_elem_ty,
                     );
                     self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                     self.alloc_mut(alloc_id).parent = Some(src_prov.alloc_id);
                     if let Some(ref_dest_alloc_id) = self.local_alloc_ids.get(&dest).copied() {
                         self.alloc_mut(ref_dest_alloc_id).slice_data = Some(alloc_id);
@@ -2434,6 +2463,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                         if let Some(off) = off_u64 {
                             if off == 0 {
                                 self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                             }
                             let elem_size = match arg_val.ty.kind() {
                                 rustc_middle::ty::TyKind::Ref(_, inner, _) => {
@@ -2468,6 +2499,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                                 }
                                 _ => {
                                     self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                                 }
                             }
                         }
@@ -2518,6 +2551,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     if let Some(ref source_prov) = ptr_val.provenance {
                         if !self.alloc(source_prov.alloc_id).dead {
                             self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                             self.alloc_mut(alloc_id).parent = Some(source_prov.alloc_id);
                         }
                         // Copy byte-level tracking (value, init, NUL knowledge),
@@ -2604,6 +2639,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     .unwrap_or_else(|| Int::from_u64(self.ctx, 1));
                 let (alloc_id, base) = self.allocate(size, align, pointee);
                 self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                 let align_n = pointee.map(|ty| self.align_sym(ty));
                 let heap_prov = Provenance {
                     alloc_id,
@@ -2678,6 +2715,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                         self.alloc_mut(dest_alloc_id).slice_data = Some(alloc_id);
                     }
                     self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                     let vec_base = base.clone();
                     let vec_len = size_val.term.clone();
                     self.set_local(
@@ -2746,6 +2785,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                         self.alloc_mut(dest_alloc_id).slice_data = Some(alloc_id);
                     }
                     self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                     let vec_base = base.clone();
                     let vec_cap = cap_val.term.clone();
                     self.set_local(
@@ -2814,6 +2855,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                     self.alloc_mut(*dest_alloc_id).slice_data = Some(alloc_id);
                 }
                 self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                 let vec_base = base.clone();
                 self.set_local(
                     dest,
@@ -2893,6 +2936,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                 if let Some(arg_val) = args.get(*arg) {
                     if let Some(prov) = &arg_val.provenance {
                         self.alloc_mut(prov.alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
                     }
                     let mut val = arg_val.clone();
                     val.ty = self.body.local_decls[dest].ty;
@@ -3072,6 +3117,8 @@ impl<'ctx, 'tcx> VmState<'ctx, 'tcx> {
                 }
             }
             self.alloc_mut(alloc_id).initialized = true;
+                rap_debug!("INIT-MARK stmt {}:{}", file!(), line!());
+                rap_debug!("INIT-MARK at {}:{}", file!(), line!());
         }
     }
 

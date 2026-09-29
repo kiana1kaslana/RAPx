@@ -1,3 +1,10 @@
+// ================ MaybeUninit conditional read regression ================
+#[test]
+fn maybe_uninit_conditional_read() {
+    let output = run_with_args("verify_cases/maybe_uninit_conditional_read", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "probe", "UNSOUND");
+}
+
 // ================ mut_ptr::read precond regression ================
 #[test]
 fn mut_ptr_read_precond() {
