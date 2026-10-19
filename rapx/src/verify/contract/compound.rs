@@ -174,7 +174,7 @@ fn parse_one_compound_block(s: &str) -> (Option<CompoundSpec>, usize) {
     let body = s[body_start..j].trim();
 
     let (params, param_tys, required) = parse_equation_params(params_str);
-    let Some(body_ast) = super::pest_conv::parse_compound_body(body, &params) else {
+    let Some(body_ast) = super::pest::parse_compound_body(body, &params) else {
         return (None, 0);
     };
 
@@ -338,9 +338,9 @@ fn expand_compound_body<'tcx>(
             // Validate the compound's parameter annotations against the primitive's
             // declared argument roles (e.g. a `Ptr` param used in a `Ty` slot).
             if let Some(spec) = super::spec::find_spec(tag) {
-                match spec.build {
+                match spec.kind {
                     // Variadic target list (Alias/Alive): every param must be Ptr.
-                    super::spec::BuildKind::Targets => {
+                    PropertyKind::Alias | PropertyKind::Alive => {
                         for (pos, a) in args.iter().enumerate() {
                             if let CompoundArg::Param(i) = a
                                 && let Some(def_ty) = param_tys.get(*i)
@@ -359,7 +359,7 @@ fn expand_compound_body<'tcx>(
                         }
                     }
                     // Accepts-anything placeholder: no constraints.
-                    super::spec::BuildKind::TobeSpecified => {}
+                    PropertyKind::Unknown => {}
                     // Fixed-arity tag: match a form by call arity, then check each
                     // positional parameter annotation against the declared role.
                     _ => {

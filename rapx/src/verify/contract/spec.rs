@@ -2,8 +2,8 @@
 //!
 //! This is the single source of truth for every safety tag `rapx` understands:
 //! its `PropertyKind`, the argument shapes it accepts (for variable-arity tags
-//! there is more than one form), its default `ContractKind`, and the assembly
-//! strategy used to build the final `Property` from raw `syn::Expr` arguments.
+//! there is more than one form), its default `ContractKind`, and its rendering
+//! template.
 //!
 //! `PropertyKind` orthogonalisation lives on `PropertyKind` in `types.rs`.
 //!
@@ -21,58 +21,16 @@ pub(crate) enum ArgKind {
     Ident,
 }
 
-/// How a tag's arguments are assembled into a `Property`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BuildKind {
-    /// Positional resolution over a matched `forms` entry (common case).
-    Uniform,
-    /// `Size(T, sized | unsized | const)` — second arg is an ident or a const.
-    Size,
-    /// `Allocated(target[, T[, n[, allocator]]])` — 1/2/3/4-argument forms.
-    Allocated,
-    /// `InBound(target[, T[, n]] | slice, index)` — 1/2/3-arg pointer + slice-index.
-    InBound,
-    /// `Init(target[, T[, n]])` — 1/2/3-argument forms.
-    Init,
-    /// `Typed(target[, T[, n]])` — 1/2/3-argument forms.
-    Typed,
-    /// `NonVolatile(target[, T[, len]])` — 1/2/3-argument forms.
-    NonVolatile,
-    /// `Owning(target[, T[, n]])` — 1/2/3-argument forms.
-    Owning,
-    /// `NonOverlap(indices | a, b[, T[, count]])` — 1/2/3/4-argument forms.
-    NonOverlap,
-    /// `ValidNum(predicate | value, interval)`.
-    ValidNum,
-    /// `Pinned(ptr, lifetime)` — exactly two args; lifetime is required.
-    Pinned,
-    /// `SplitTransmute([T], [U])` — array element types.
-    SplitTransmute,
-    /// One-or-more target places (`Alias`, `Alive`).
-    Targets,
-    /// `ContainNoType(T, bad1, bad2, ...)` — first arg is a type, the rest are
-    /// negative type names (one or more).
-    ContainNoType,
-    /// Placeholder accepting any args; always yields `Unknown`.
-    TobeSpecified,
-}
-
 pub(crate) struct PropertySpec {
+    /// Tag name as written in contracts (e.g. `"Allocated"`).
     pub tag: &'static str,
+    /// The `PropertyKind` this tag resolves to.
     pub kind: PropertyKind,
-    /// Accepted argument shapes. Authoritative for [`BuildKind::Uniform`]
-    /// only: the other build kinds validate arity in their `build_*`
-    /// function, so keep the two in sync. For `BuildKind::Targets` the single
-    /// entry is a marker and the tag accepts one or more `Target` args.
+    /// Accepted argument shapes, one entry per arity (authoritative for positional builds only).
     pub forms: &'static [&'static [ArgKind]],
+    /// Default contract kind (`Precond` / `Hazard` / `Option_`).
     pub contract_kind: ContractKind,
-    pub build: BuildKind,
-    /// Human-readable explanation template, with `{0}`, `{1}`, `{2}`
-    /// placeholders bound to the rendered positional arguments.  This keeps the
-    /// display text co-located with the tag declaration instead of hardcoded in
-    /// the renderer.  A few argument-dependent kinds (`InBound`, `Size`,
-    /// `ValidNum`, `Alive`, `Allocated`, `NonOverlap`, `Alias`) override this
-    /// template structurally at render time.
+    /// Explanation template with `{0}`, `{1}`, `{2}` placeholders.
     pub meaning: &'static str,
 }
 
@@ -81,7 +39,6 @@ const fn ps(
     kind: PropertyKind,
     forms: &'static [&'static [ArgKind]],
     contract_kind: ContractKind,
-    build: BuildKind,
     meaning: &'static str,
 ) -> PropertySpec {
     PropertySpec {
@@ -89,7 +46,6 @@ const fn ps(
         kind,
         forms,
         contract_kind,
-        build,
         meaning,
     }
 }
@@ -99,13 +55,12 @@ use ArgKind::{Expr, Ident, Target, Ty};
 // ── Table ────────────────────────────────────────────────────────────
 
 static SPECS: &[PropertySpec] = &[
-    // Uniform single-form primitives.
+    // Single-form primitives.
     ps(
         "NonNull",
         PropertyKind::NonNull,
         &[&[Target]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} as usize != 0",
     ),
     ps(
@@ -113,7 +68,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Null,
         &[&[Target]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} is the null pointer",
     ),
     ps(
@@ -121,7 +75,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Owning,
         &[&[Target], &[Target, Ty], &[Target, Ty, Expr]],
         ContractKind::Precond,
-        BuildKind::Owning,
         "ownership(*{0}) = none: no other live owner points to the pointee",
     ),
     // Unverified: the checker returns `Unknown` (no implementation yet).
@@ -130,7 +83,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Opened,
         &[&[Target]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} is a valid open file descriptor",
     ),
     // Unverified: the checker returns `Unknown` (no implementation yet).
@@ -139,7 +91,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Unreachable,
         &[&[]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "this branch is unreachable",
     ),
     ps(
@@ -147,7 +98,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Align,
         &[&[Target, Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "({0} as usize) % align_of::<{1}>() == 0",
     ),
     ps(
@@ -155,7 +105,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Typed,
         &[&[Target], &[Target, Ty], &[Target, Ty, Expr]],
         ContractKind::Precond,
-        BuildKind::Typed,
         "*{0} holds TypeInvariant({1})",
     ),
     ps(
@@ -163,7 +112,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Init,
         &[&[Target], &[Target, Ty], &[Target, Ty, Expr]],
         ContractKind::Precond,
-        BuildKind::Init,
         "forall i in 0..{2}: *({0} + i*sizeof({1})) |= type_invariant({1}), and the {2} value(s) are initialized",
     ),
     ps(
@@ -171,7 +119,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::ValidString,
         &[&[Target, Ty, Expr], &[Target]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} is valid UTF-8",
     ),
     // Assumed satisfied: the VM does not model volatile access.
@@ -180,7 +127,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::NonVolatile,
         &[&[Target], &[Target, Ty], &[Target, Ty, Expr]],
         ContractKind::Precond,
-        BuildKind::NonVolatile,
         "{0} does not reference volatile memory",
     ),
     ps(
@@ -188,7 +134,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::ValidTransmute,
         &[&[Ty, Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "bytes_of({1}) within bytes_of({0})",
     ),
     ps(
@@ -196,7 +141,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Trait,
         &[&[Ty, Ident]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} satisfies the trait bound {1}",
     ),
     // Variable-arity negative type predicate: first arg is the target type,
@@ -207,7 +151,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::ContainNoType,
         &[&[Ty, Ident]],
         ContractKind::Precond,
-        BuildKind::ContainNoType,
         "{0} does not structurally contain {1}",
     ),
     // `&T: Send` — the type can be shared across threads: every
@@ -218,7 +161,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::RefSend,
         &[&[Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "&{0} is Send: all shared mutations of {0} go through a synchronization primitive",
     ),
     // Interior-mutability predicates for taming raw pointers in `Send`/`Sync`.
@@ -227,7 +169,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::NoRawPtr,
         &[&[Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} has no raw pointers",
     ),
     ps(
@@ -235,7 +176,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::NoInternalMut,
         &[&[Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} has no interior mutation through raw pointers",
     ),
     ps(
@@ -243,7 +183,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::UniInternalMut,
         &[&[Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} has unique interior mutation (exclusive owner, no aliasing Clone)",
     ),
     ps(
@@ -251,7 +190,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::AtomicUpdate,
         &[&[Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} updates its raw pointers under synchronization or atomically",
     ),
     ps(
@@ -259,7 +197,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::NoPadding,
         &[&[Ty]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} has no padding bytes between fields",
     ),
     ps(
@@ -267,7 +204,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::ValidCStr,
         &[&[Target, Expr]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "{0} is a null-terminated valid UTF-8 byte sequence",
     ),
     // Unverified: the checker returns `Unknown` (no implementation yet).
@@ -276,7 +212,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Unwrap,
         &[&[Target, Ident]],
         ContractKind::Precond,
-        BuildKind::Uniform,
         "unwrap({0}) = {1}",
     ),
     // Variable-arity / special-build primitives.
@@ -285,7 +220,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Size,
         &[&[Ty, Ident], &[Ty, Expr]],
         ContractKind::Precond,
-        BuildKind::Size,
         "sizeof({0}) = {1}",
     ),
     ps(
@@ -293,7 +227,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Allocated,
         &[&[Target], &[Target, Ty], &[Target, Ty, Expr], &[Target, Ty, Expr, Ident]],
         ContractKind::Precond,
-        BuildKind::Allocated,
         "{0} points to a live allocation of size: size_of({1}) * {2}",
     ),
     ps(
@@ -301,7 +234,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::InBound,
         &[&[Target], &[Target, Ty], &[Target, Expr], &[Target, Ty, Expr]],
         ContractKind::Precond,
-        BuildKind::InBound,
         "same_alloc([{0}, {0} + sizeof({1})*{2}])",
     ),
     ps(
@@ -309,7 +241,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::NonOverlap,
         &[&[Target], &[Target, Target], &[Target, Target, Ty], &[Target, Target, Ty, Expr]],
         ContractKind::Precond,
-        BuildKind::NonOverlap,
         "[{0}] are pairwise disjoint memory ranges",
     ),
     ps(
@@ -317,7 +248,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::ValidNum,
         &[&[Expr], &[Expr, Expr]],
         ContractKind::Precond,
-        BuildKind::ValidNum,
         "{0}",
     ),
     ps(
@@ -325,7 +255,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Alias,
         &[&[Target, Target]],
         ContractKind::Hazard,
-        BuildKind::Targets,
         "{0} and {1} alias each other (hazard)",
     ),
     ps(
@@ -333,7 +262,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Alive,
         &[&[Target, Target]],
         ContractKind::Precond,
-        BuildKind::Targets,
         "*{0} outlives '{1}",
     ),
     // Unverified: the checker returns `Unknown` (no implementation yet).
@@ -342,7 +270,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Pinned,
         &[&[Target, Ident]],
         ContractKind::Precond,
-        BuildKind::Pinned,
         "{0} will not be moved",
     ),
     ps(
@@ -350,7 +277,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::SplitTransmute,
         &[&[Ty, Ty]],
         ContractKind::Precond,
-        BuildKind::SplitTransmute,
         "[{0}] as [{1}]: every size_of({1})-byte contiguous chunk of [{0}] is a valid bit-pattern of {1} (type_invariant satisfied, alignment not required)\nforall w subset bytes([{0}]), |w| == |{1}|: reinterpret_as_{1}(w) |= type_invariant({1})",
     ),
     ps(
@@ -358,7 +284,6 @@ static SPECS: &[PropertySpec] = &[
         PropertyKind::Unknown,
         &[],
         ContractKind::Precond,
-        BuildKind::TobeSpecified,
         "(unresolved contract)",
     ),
 ];

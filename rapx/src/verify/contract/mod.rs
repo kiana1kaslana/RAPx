@@ -1,8 +1,8 @@
 //! Contract parsing, resolution, and rendering.
 //!
-//! Three front-ends (inline attributes, embedded JSON, and `pred!`-style
-//! compound-property macros, plus the pest DSL for expressions) all funnel into
-//! `Property::parse_list`, producing a single IR defined in [`types`].
+//! Three front-ends — inline attributes, embedded JSON, and `pred!`-style
+//! compound-property macros — funnel into `Property::parse_list`, producing a
+//! single IR defined in [`types`]; the three share the pest DSL for expressions.
 //!
 //! ## Layering
 //!
@@ -14,6 +14,10 @@
 //!                      └────────────────── builder.rs ──────────────────▶ Property   (Atom | Or)
 //! ```
 //!
+//! Compound tags are the exception: `parse_list` dispatches them to
+//! `compound::expand_compound`, which expands `CompoundSpec` into `Property`
+//! directly (builder never sees the `CompoundSpec`).
+//!
 //! Within the resolved IR, the naming follows granularity rather than stage:
 //! `Property*` names the formula level (`Property`, `PropertyKind`,
 //! `PropertyArg`), while `Contract*` names the expression sub-language that
@@ -24,8 +28,7 @@ pub(crate) mod attr;
 pub(crate) mod builder;
 pub(crate) mod compound;
 pub(crate) mod json;
-pub(crate) mod pest_conv;
-pub(crate) mod pest_grammar;
+pub(crate) mod pest;
 pub(crate) mod place;
 pub(crate) mod render;
 pub(crate) mod resolve;

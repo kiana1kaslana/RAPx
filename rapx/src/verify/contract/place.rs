@@ -4,7 +4,7 @@
 //! projections, `iter()`/`each_element()` element projection, `unwrap_some()`
 //! enum downcast) against rustc's type context.  This layer depends only on
 //! `types.rs` and crate helpers, so both the property builder (`builder.rs`)
-//! and the pest-based expression converter (`pest_conv.rs`) can share it
+//! and the pest-based expression converter (`pest.rs`) can share it
 //! without a dependency cycle.
 
 use crate::helpers::mir_utils;

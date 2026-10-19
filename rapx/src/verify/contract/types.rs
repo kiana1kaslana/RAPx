@@ -206,9 +206,8 @@ impl<'tcx> NumericPredicate<'tcx> {
 
 /// The vocabulary of safety predicates a contract can assert.
 ///
-/// Each kind's meaning, accepted argument shapes, and assembly strategy are
-/// declared in `spec::SPECS` (the single source of truth); this enum only
-/// names the kinds.  A few kinds carry extra semantics: `Null` is the guard
+/// Each kind's meaning and accepted argument shapes are declared in
+/// `spec::SPECS` (the single source of truth); this enum only names the kinds.  A few kinds carry extra semantics: `Null` is the guard
 /// branch of `any(Null(p), …)` (proved when `p` is null), and `Owning` asserts
 /// `ownership(*p) = none` (psp IV.1 in primitive-sp.md).  The kinds `Unwrap`,
 /// `Pinned`, `Opened` and `Unreachable` are declared but not yet verified (the

@@ -1,8 +1,9 @@
 //! Assemble a safety tag into a [`Property`] via the declarative spec table.
 //!
-//! `Property::new` looks up `spec::SPECS`, dispatches on the tag's `BuildKind`,
-//! and resolves arguments positionally. `Property::parse_list` is the shared
-//! entry point for all front-ends, including the `any(...)` combinator.
+//! `Property::new` looks up `spec::SPECS`, dispatches on the tag's
+//! `PropertyKind`, and resolves arguments positionally. `Property::parse_list`
+//! is the shared entry point for all front-ends, including the `any(...)`
+//! combinator.
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
@@ -15,33 +16,34 @@ use super::types::*;
 
 impl<'tcx> Property<'tcx> {
     /// Parse a property from the declaration table, dispatching on the tag's
-    /// assembly strategy.
+    /// `PropertyKind`.
     fn parse_from_spec(
         tcx: TyCtxt<'tcx>,
         def_id: DefId,
         spec: &spec::PropertySpec,
         exprs: &[Expr],
     ) -> Self {
-        let mut prop = match spec.build {
-            spec::BuildKind::Uniform => Self::build_uniform(tcx, def_id, spec, exprs),
-            spec::BuildKind::Size => Self::build_size(tcx, def_id, exprs),
-            spec::BuildKind::Allocated => Self::build_allocated(tcx, def_id, exprs),
-            spec::BuildKind::InBound => Self::build_inbound(tcx, def_id, exprs),
-            spec::BuildKind::Init => Self::build_init(tcx, def_id, exprs),
-            spec::BuildKind::Typed => Self::build_typed(tcx, def_id, exprs),
-            spec::BuildKind::NonVolatile => Self::build_nonvolatile(tcx, def_id, exprs),
-            spec::BuildKind::Owning => Self::build_owning(tcx, def_id, exprs),
-            spec::BuildKind::NonOverlap => Self::build_nonoverlap(tcx, def_id, exprs),
-            spec::BuildKind::ValidNum => Self::build_validnum(tcx, def_id, exprs),
-            spec::BuildKind::Pinned => Self::build_pinned(tcx, def_id, exprs),
-            spec::BuildKind::SplitTransmute => Self::build_split_transmute(tcx, def_id, exprs),
-            spec::BuildKind::Targets => Self::build_targets(spec, tcx, def_id, exprs),
-            spec::BuildKind::ContainNoType => Self::build_contain_no_type(tcx, def_id, exprs),
-            spec::BuildKind::TobeSpecified => Self::new_simple(PropertyKind::Unknown),
+        let mut prop = match spec.kind {
+            PropertyKind::Size => Self::build_size(tcx, def_id, exprs),
+            PropertyKind::Allocated => Self::build_allocated(tcx, def_id, exprs),
+            PropertyKind::InBound => Self::build_inbound(tcx, def_id, exprs),
+            PropertyKind::Init => Self::build_init(tcx, def_id, exprs),
+            PropertyKind::Typed => Self::build_typed(tcx, def_id, exprs),
+            PropertyKind::NonVolatile => Self::build_nonvolatile(tcx, def_id, exprs),
+            PropertyKind::Owning => Self::build_owning(tcx, def_id, exprs),
+            PropertyKind::NonOverlap => Self::build_nonoverlap(tcx, def_id, exprs),
+            PropertyKind::ValidNum => Self::build_validnum(tcx, def_id, exprs),
+            PropertyKind::Pinned => Self::build_pinned(tcx, def_id, exprs),
+            PropertyKind::SplitTransmute => Self::build_split_transmute(tcx, def_id, exprs),
+            PropertyKind::Alias | PropertyKind::Alive => {
+                Self::build_targets(spec, tcx, def_id, exprs)
+            }
+            PropertyKind::ContainNoType => Self::build_contain_no_type(tcx, def_id, exprs),
+            PropertyKind::Unknown => Self::new_simple(PropertyKind::Unknown),
+            _ => Self::build_uniform(tcx, def_id, spec, exprs),
         };
         // Apply the spec-declared `ContractKind` centrally, so `Hazard` /
-        // `Option_` tags keep their kind regardless of build strategy (not just
-        // for `BuildKind::Targets`).
+        // `Option_` tags keep their kind regardless of how they're built.
         prop.set_contract_kind(spec.contract_kind);
         prop
     }

@@ -1,14 +1,11 @@
 // RAPx contract DSL grammar.
 //
-// This is the single source of truth for the contract-DSL surface. The pest
-// parser generated from this file replaces the hand-written `match`-based
-// expression parsing in `contract/parser.rs` and the hand-written body parsing
-// in `contract/def.rs`.
-//
-// Scope: the *contents* of a `#[rapx::requires(...)]` / `#[rapx::invariant(...)]`
-// / `#[rapx::ensures(...)]` attribute, and the *body* of a `pred!` definition.
-// The Rust attribute wrapper itself is still extracted by `syn` (`source/attr.rs`),
-// because attribute token streams are Rust syntax.
+// This is the single source of truth for the contract-DSL expression surface.
+// The generated parser feeds two entry points (`expr` and `def_body`): contract
+// expressions/predicates, and `pred!`/`def_property` bodies. The attribute
+// wrapper (`#[rapx::requires(...)]`), tag names, and the `any(...)` combinator
+// are handled by `syn` in `attr.rs` / `builder.rs`, since attribute token
+// streams are Rust syntax.
 //
 // `size_of::<T>()` / `align_of::<T>()` (turbofish, optionally with a
 // `std::mem::` / `core::mem::` path prefix) are also supported; `size_of(T)`
@@ -18,9 +15,8 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-int    = @{ ASCII_DIGIT+ }
-string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
-ident  = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+int   = @{ ASCII_DIGIT+ }
+ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 
 relop  = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
 addop  = { "+" | "-" }
@@ -30,17 +26,9 @@ bxor   = { "^" }
 band   = { "&" }
 unop   = { "!" | "-" }
 
-// ── Attribute contents (one property + optional `kind`) ─────────────────────
-
-contract   = { SOI ~ property ~ EOI }
-property   = { (any | tag_call) ~ kind? }
-kind       = { "," ~ "kind" ~ "=" ~ string }
-
-// ── Property / combinator layer ─────────────────────────────────────────────
+// ── Tag call ────────────────────────────────────────────────────────────────
 
 tag_call = { ident ~ "(" ~ arg_list? ~ ")" }
-any      = { "any" ~ "(" ~ disjunct ~ "," ~ disjunct ~ ")" }
-disjunct = { "(" ~ tag_call ~ ("," ~ tag_call)* ~ ")" | tag_call }
 
 arg_list = { arg ~ ("," ~ arg)* }
 

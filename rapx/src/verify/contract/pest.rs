@@ -1,9 +1,9 @@
-//! Semantic converter: pest `Pairs<Rule>` → `ContractExpr` / `NumericPredicate`
-//! / `CompoundBody`.
+//! pest parser and semantic converter for the contract DSL.
 //!
-//! This is the phase-2 counterpart to `pest_grammar.rs`: it turns the parse
-//! tree produced by the pest grammar into the contract AST (`types.rs` /
-//! `compound.rs`).
+//! The grammar (`grammar.pest`) is the single source of truth for the
+//! contract-DSL surface; `ContractParser` is derived from it, and the
+//! conversion functions turn the resulting `Pairs<Rule>` into the contract AST
+//! (`types.rs` / `compound.rs`).
 //!
 //! Places (fields, projections) are bridged through the `place.rs` / `resolve.rs`
 //! helpers via a `syn` round-trip, since resolving a field name to a `Ty` still
@@ -13,16 +13,21 @@
 use crate::helpers::mir_utils;
 use pest::Parser;
 use pest::iterators::Pair;
+use pest_derive::Parser;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
 
 use super::compound::{CompoundArg, CompoundBody};
-use super::pest_grammar::{ContractParser, Rule};
 use super::place::resolve_place_from_ident;
 use super::types::{
     ContractExpr, ContractPlace, NumericBinOp, NumericPredicate, NumericUnaryOp, PlaceBase, RelOp,
 };
 use crate::helpers::name::match_ty_with_ident;
+
+/// Parser derived from `grammar.pest`.
+#[derive(Parser)]
+#[grammar = "verify/contract/grammar.pest"]
+pub(crate) struct ContractParser;
 
 fn only_child(pair: Pair<Rule>) -> Pair<Rule> {
     pair.into_inner()
@@ -49,7 +54,10 @@ pub(crate) fn parse_expr_pest<'tcx>(
     text: &str,
 ) -> ContractExpr<'tcx> {
     let Ok(mut pairs) = ContractParser::parse(Rule::expr, text) else {
-        rap_debug!("contract expression not supported by grammar: {text}");
+        rap_warn!(
+            "contract expression not supported by grammar: {text} (in {})",
+            tcx.def_path_str(def_id)
+        );
         return ContractExpr::Unknown;
     };
     conv_expr(tcx, def_id, pairs.next().expect("expr pair"))
@@ -63,7 +71,10 @@ pub(crate) fn parse_predicate_pest<'tcx>(
     text: &str,
 ) -> Option<NumericPredicate<'tcx>> {
     let Ok(mut pairs) = ContractParser::parse(Rule::expr, text) else {
-        rap_debug!("contract predicate not supported by grammar: {text}");
+        rap_warn!(
+            "contract predicate not supported by grammar: {text} (in {})",
+            tcx.def_path_str(def_id)
+        );
         return None;
     };
     conv_predicate(tcx, def_id, pairs.next().expect("expr pair"))
@@ -396,6 +407,7 @@ fn conv_place_bridge<'tcx>(
 ) -> ContractExpr<'tcx> {
     let text = pair.as_str();
     let Ok(expr) = syn::parse_str::<syn::Expr>(text) else {
+        rap_warn!("contract place not parseable: {text} (in {})", tcx.def_path_str(def_id));
         return ContractExpr::Unknown;
     };
     super::resolve::parse_contract_expr(tcx, def_id, &expr, "pest")

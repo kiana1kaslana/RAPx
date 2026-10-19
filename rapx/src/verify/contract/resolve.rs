@@ -1,6 +1,6 @@
 //! Expression / argument resolution: `syn::Expr` → semantic values.
 //!
-//! The numeric-expression layer is parsed by the pest grammar (`pest_conv.rs`);
+//! The numeric-expression layer is parsed by the pest grammar (`pest.rs`);
 //! everything that still needs rustc's type context or `syn` structure lives
 //! here: places (via `place.rs`), const generics, builtin integer bounds, the
 //! `x.len()` sugar, tag argument types/targets, and `ValidNum` predicates.
@@ -63,10 +63,11 @@ pub(crate) fn parse_contract_expr<'tcx>(
     {
         return ContractExpr::Const(value);
     }
-    rap_debug!(
-        "Numeric expression in {:?} could not be resolved: {:?}",
+    rap_warn!(
+        "Numeric expression in {:?} could not be resolved: {:?} (in {})",
         sp,
-        expr
+        expr,
+        tcx.def_path_str(def_id)
     );
     ContractExpr::Unknown
 }
@@ -328,7 +329,7 @@ fn parse_numeric_predicate<'tcx>(
     expr: &Expr,
 ) -> Option<NumericPredicate<'tcx>> {
     let text = expr.to_token_stream().to_string();
-    super::pest_conv::parse_predicate_pest(tcx, def_id, &text)
+    super::pest::parse_predicate_pest(tcx, def_id, &text)
 }
 
 pub(crate) fn expr_to_pest<'tcx>(
@@ -337,7 +338,7 @@ pub(crate) fn expr_to_pest<'tcx>(
     expr: &Expr,
 ) -> ContractExpr<'tcx> {
     let text = expr.to_token_stream().to_string();
-    super::pest_conv::parse_expr_pest(tcx, def_id, &text)
+    super::pest::parse_expr_pest(tcx, def_id, &text)
 }
 
 fn parse_interval_predicates<'tcx>(
