@@ -75,7 +75,7 @@ impl Parse for AttrProperty {
     }
 }
 
-fn parse_outer_attr(input: ParseStream<'_>) -> SynResult<syn::Attribute> {
+pub(crate) fn parse_outer_attr(input: ParseStream<'_>) -> SynResult<syn::Attribute> {
     input
         .call(syn::Attribute::parse_outer)?
         .into_iter()

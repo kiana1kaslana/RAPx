@@ -519,7 +519,7 @@ fn resolve_subsumption_args<'tcx>(
             CompoundArg::Param(i) => {
                 let pa = atom.args.get(*i)?;
                 resolved.push(pa.clone())
-            },
+            }
             CompoundArg::Lit(s) => {
                 rap_warn!("subsumption body literal `{s}` unsupported; skipping");
                 return None;
@@ -787,22 +787,8 @@ fn is_def_property_attr(attr: &Attribute) -> bool {
 /// Extract the string literal from a `#[rapx::def_property("compound ...")]`
 /// attribute's textual representation.
 fn extract_def_property_string(attr_str: &str) -> Option<String> {
-    struct OneAttr {
-        attr: syn::Attribute,
-    }
-    impl syn::parse::Parse for OneAttr {
-        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-            let attrs = syn::Attribute::parse_outer(input)?;
-            let attr = attrs
-                .into_iter()
-                .next()
-                .ok_or_else(|| input.error("expected one attribute"))?;
-            Ok(OneAttr { attr })
-        }
-    }
-
-    let one: OneAttr = syn::parse_str(attr_str).ok()?;
-    let syn::Meta::List(list) = one.attr.meta else {
+    let attr = syn::parse::Parser::parse_str(super::attr::parse_outer_attr, attr_str).ok()?;
+    let syn::Meta::List(list) = attr.meta else {
         return None;
     };
     let lit: syn::LitStr = syn::parse2(list.tokens).ok()?;
