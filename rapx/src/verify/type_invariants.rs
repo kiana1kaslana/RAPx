@@ -76,14 +76,14 @@ pub(crate) fn build_type_invariants_from_params<'tcx>(
 fn collect_type_invariants<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
-    db: &std::collections::HashMap<String, crate::verify::contract::json::TypeInvariantEntry>,
+    db: &std::collections::HashMap<String, Vec<crate::verify::contract::json::JsonProperty>>,
     type_path: &str,
     param_name: &str,
     elem_ty: Option<Ty<'tcx>>,
     results: &mut Vec<Property<'tcx>>,
 ) {
-    if let Some(entry) = db.get(type_path) {
-        for prop_entry in &entry.invariants {
+    if let Some(entries) = db.get(type_path) {
+        for prop_entry in entries {
             results.extend(instantiate_type_invariant(
                 tcx, def_id, prop_entry, param_name, elem_ty,
             ));
@@ -93,8 +93,8 @@ fn collect_type_invariants<'tcx>(
     for prefix in ["alloc::", "std::"] {
         let prefixed = format!("{prefix}{type_path}");
         if prefixed != type_path
-            && let Some(entry) = db.get(&prefixed) {
-                for prop_entry in &entry.invariants {
+            && let Some(entries) = db.get(&prefixed) {
+                for prop_entry in entries {
                     results.extend(instantiate_type_invariant(
                         tcx, def_id, prop_entry, param_name, elem_ty,
                     ));

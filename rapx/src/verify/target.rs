@@ -672,10 +672,11 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                         // they never carry a JSON contract either.
                         let is_intrinsic = self.tcx.intrinsic(callee_def_id).is_some();
                         let has_json_entry = is_std
-                            && super::contract::json::std_contracts_has_entry(
+                            && super::contract::json::get_std_contracts_from_json(
                                 self.tcx,
                                 callee_def_id,
-                            );
+                            )
+                            .is_some();
                         let is_verify_target = callee_def_id
                             .as_local()
                             .is_some_and(|id| has_rapx_verify_attr(self.tcx, id));
@@ -712,10 +713,11 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                     // invariant) rather than a `requires`.  Anything else with no
                     // contract is a genuine unknown.
                     let has_json_entry = is_std
-                        && super::contract::json::std_contracts_has_entry(
+                        && super::contract::json::get_std_contracts_from_json(
                             self.tcx,
                             callee_def_id,
-                        );
+                        )
+                        .is_some();
                     let is_verify_target = callee_def_id
                         .as_local()
                         .is_some_and(|id| has_rapx_verify_attr(self.tcx, id));

@@ -76,16 +76,11 @@ pub(crate) enum AnyItem {
 /// For trait-method impls, resolves to the trait method's path first so that
 /// all impls share the same contracts.
 ///
-/// After exact-path lookup, first strips impl-block type segments, then falls
-/// back to wildcard patterns by progressively replacing the tail segment with
-/// `*`.  For example, for `core::slice::<impl [T]>::as_chunks`, the fallback
-/// chain is:
+/// After exact-path lookup, strips impl-block type segments so re-exported or
+/// impl-generic paths resolve.  For example, for `core::slice::<impl [T]>::as_chunks`:
 ///
 /// 1. `core::slice::<impl [T]>::as_chunks`  (exact)
 /// 2. `core::slice::as_chunks`              (impl segments stripped)
-/// 3. `core::slice::<impl [T]>::*`          (all methods of `[T]`)
-/// 4. `core::slice::*`                      (all functions in slice module)
-/// 5. `core::*`                             (anything in core crate)
 pub(crate) fn get_std_contracts_from_json(
     tcx: TyCtxt<'_>,
     def_id: DefId,
@@ -114,30 +109,7 @@ pub(crate) fn get_std_contracts_from_json(
         }
     }
 
-    // Wildcard fallback: progressively replace tail segments with `*`.
-    let mut segments: Vec<&str> = cleaned_path_name.split("::").collect();
-    for i in (1..segments.len()).rev() {
-        segments.truncate(i + 1);
-        segments[i] = "*";
-        let pattern = segments.join("::");
-        if let Some(entries) = db.get(&pattern) {
-            return Some(entries.as_slice());
-        }
-    }
-
-    // Try bare `*` for any function.
-    if let Some(entries) = db.get("*") {
-        return Some(entries.as_slice());
-    }
-
     None
-}
-
-/// Whether the JSON contract database has an entry for `def_id` — including an
-/// *empty* one, which means "no safety contract is needed" (e.g. `fmt::new`,
-/// whose arguments are all references).
-pub(crate) fn std_contracts_has_entry(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    get_std_contracts_from_json(tcx, def_id).is_some()
 }
 
 /// If `def_id` is a trait-method implementation, returns the corresponding
@@ -159,16 +131,10 @@ fn load_std_contracts_json() -> &'static HashMap<String, Vec<JsonProperty>> {
     })
 }
 
-/// Serialisation-friendly struct for the type-invariants JSON.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct TypeInvariantEntry {
-    pub invariants: Vec<JsonProperty>,
-}
-
 /// Returns the std-type-invariants database, mapping a type path key
 /// (e.g. `"core::num::nonzero::NonZero"`) to its invariant entries.
-pub(crate) fn get_std_type_invariants() -> &'static HashMap<String, TypeInvariantEntry> {
-    static TYPE_INVARIANTS: OnceLock<HashMap<String, TypeInvariantEntry>> = OnceLock::new();
+pub(crate) fn get_std_type_invariants() -> &'static HashMap<String, Vec<JsonProperty>> {
+    static TYPE_INVARIANTS: OnceLock<HashMap<String, Vec<JsonProperty>>> = OnceLock::new();
     TYPE_INVARIANTS.get_or_init(|| {
         serde_json::from_str(include_str!("assets/std-type-invariants.json"))
             .expect("failed to parse std type invariants")
@@ -405,11 +371,10 @@ pub(crate) fn resolve_json_param_name(arg: &str, param_names: &[String]) -> Stri
 /// Unprefixed strings are kept unchanged for compatibility with older entries
 /// such as `"0"`, `"T"`, and `"1"`.
 pub(crate) fn normalize_json_contract_arg(arg: &str) -> String {
-    let bytes = arg.as_bytes();
     let mut out = String::with_capacity(arg.len());
     let mut i = 0;
 
-    while i < bytes.len() {
+    while i < arg.len() {
         if arg[i..].starts_with("arg:") {
             let start = i + "arg:".len();
             let end = scan_while(arg, start, |ch| ch.is_ascii_digit());
