@@ -27,10 +27,10 @@ impl<'tcx> Property<'tcx> {
             PropertyKind::Size => Self::build_size(tcx, def_id, exprs),
             PropertyKind::Allocated => Self::build_allocated(tcx, def_id, exprs),
             PropertyKind::InBound => Self::build_inbound(tcx, def_id, exprs),
-            PropertyKind::Init => Self::build_init(tcx, def_id, exprs),
-            PropertyKind::Typed => Self::build_typed(tcx, def_id, exprs),
-            PropertyKind::NonVolatile => Self::build_nonvolatile(tcx, def_id, exprs),
-            PropertyKind::Owning => Self::build_owning(tcx, def_id, exprs),
+            PropertyKind::Init
+            | PropertyKind::Typed
+            | PropertyKind::NonVolatile
+            | PropertyKind::Owning => Self::build_target_ty_count(spec, tcx, def_id, exprs),
             PropertyKind::NonOverlap => Self::build_nonoverlap(tcx, def_id, exprs),
             PropertyKind::ValidNum => Self::build_validnum(tcx, def_id, exprs),
             PropertyKind::Pinned => Self::build_pinned(tcx, def_id, exprs),
@@ -86,7 +86,7 @@ impl<'tcx> Property<'tcx> {
         let Some(form) = spec.forms.iter().find(|f| f.len() == exprs.len()) else {
             let expected: Vec<usize> = spec.forms.iter().map(|f| f.len()).collect();
             rap_error!(
-                "Wrong args length for {:?} Tag! expected one of {expected:?}, got {}",
+                "Wrong args length for {} Tag! expected one of {expected:?}, got {}",
                 spec.tag,
                 exprs.len()
             );
@@ -198,8 +198,8 @@ impl<'tcx> Property<'tcx> {
 
     fn build_inbound(tcx: TyCtxt<'tcx>, def_id: DefId, exprs: &[Expr]) -> Self {
         match exprs {
-            [_target, ty_expr, len_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, &exprs[0]);
+            [target_expr, ty_expr, len_expr] => {
+                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
                 let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "InBound") else {
                     return Self::new_simple(PropertyKind::Unknown);
                 };
@@ -262,137 +262,39 @@ impl<'tcx> Property<'tcx> {
         }
     }
 
-    fn build_init(tcx: TyCtxt<'tcx>, def_id: DefId, exprs: &[Expr]) -> Self {
+    fn build_target_ty_count(
+        spec: &spec::PropertySpec,
+        tcx: TyCtxt<'tcx>,
+        def_id: DefId,
+        exprs: &[Expr],
+    ) -> Self {
         match exprs {
             [target_expr, ty_expr, count_expr] => {
                 let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "Init") else {
+                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, spec.tag) else {
                     return Self::new_simple(PropertyKind::Unknown);
                 };
                 let count = super::resolve::expr_to_pest(tcx, def_id, count_expr);
                 Self::new_atom(
-                    PropertyKind::Init,
+                    spec.kind,
                     vec![target, PropertyArg::Ty(ty), PropertyArg::Expr(count)],
                 )
             }
             [target_expr, ty_expr] => {
                 let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "Init") else {
+                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, spec.tag) else {
                     return Self::new_simple(PropertyKind::Unknown);
                 };
-                Self::new_atom(PropertyKind::Init, vec![target, PropertyArg::Ty(ty)])
+                Self::new_atom(spec.kind, vec![target, PropertyArg::Ty(ty)])
             }
             [target_expr] => {
                 let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                Self::new_atom(PropertyKind::Init, vec![target])
+                Self::new_atom(spec.kind, vec![target])
             }
             _ => {
                 rap_error!(
-                    "Wrong args length for Init Tag! expected 1, 2 or 3, got {}",
-                    exprs.len()
-                );
-                Self::new_simple(PropertyKind::Unknown)
-            }
-        }
-    }
-
-    fn build_typed(tcx: TyCtxt<'tcx>, def_id: DefId, exprs: &[Expr]) -> Self {
-        match exprs {
-            [target_expr, ty_expr, count_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "Typed") else {
-                    return Self::new_simple(PropertyKind::Unknown);
-                };
-                let count = super::resolve::expr_to_pest(tcx, def_id, count_expr);
-                Self::new_atom(
-                    PropertyKind::Typed,
-                    vec![target, PropertyArg::Ty(ty), PropertyArg::Expr(count)],
-                )
-            }
-            [target_expr, ty_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "Typed") else {
-                    return Self::new_simple(PropertyKind::Unknown);
-                };
-                Self::new_atom(PropertyKind::Typed, vec![target, PropertyArg::Ty(ty)])
-            }
-            [target_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                Self::new_atom(PropertyKind::Typed, vec![target])
-            }
-            _ => {
-                rap_error!(
-                    "Wrong args length for Typed Tag! expected 1, 2 or 3, got {}",
-                    exprs.len()
-                );
-                Self::new_simple(PropertyKind::Unknown)
-            }
-        }
-    }
-
-    fn build_nonvolatile(tcx: TyCtxt<'tcx>, def_id: DefId, exprs: &[Expr]) -> Self {
-        match exprs {
-            [target_expr, ty_expr, len_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "NonVolatile")
-                else {
-                    return Self::new_simple(PropertyKind::Unknown);
-                };
-                let len = super::resolve::expr_to_pest(tcx, def_id, len_expr);
-                Self::new_atom(
-                    PropertyKind::NonVolatile,
-                    vec![target, PropertyArg::Ty(ty), PropertyArg::Expr(len)],
-                )
-            }
-            [target_expr, ty_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "NonVolatile")
-                else {
-                    return Self::new_simple(PropertyKind::Unknown);
-                };
-                Self::new_atom(PropertyKind::NonVolatile, vec![target, PropertyArg::Ty(ty)])
-            }
-            [target_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                Self::new_atom(PropertyKind::NonVolatile, vec![target])
-            }
-            _ => {
-                rap_error!(
-                    "Wrong args length for NonVolatile Tag! expected 1, 2 or 3, got {}",
-                    exprs.len()
-                );
-                Self::new_simple(PropertyKind::Unknown)
-            }
-        }
-    }
-
-    fn build_owning(tcx: TyCtxt<'tcx>, def_id: DefId, exprs: &[Expr]) -> Self {
-        match exprs {
-            [target_expr, ty_expr, count_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "Owning") else {
-                    return Self::new_simple(PropertyKind::Unknown);
-                };
-                let count = super::resolve::expr_to_pest(tcx, def_id, count_expr);
-                Self::new_atom(
-                    PropertyKind::Owning,
-                    vec![target, PropertyArg::Ty(ty), PropertyArg::Expr(count)],
-                )
-            }
-            [target_expr, ty_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                let Some(ty) = super::resolve::parse_type(tcx, def_id, ty_expr, "Owning") else {
-                    return Self::new_simple(PropertyKind::Unknown);
-                };
-                Self::new_atom(PropertyKind::Owning, vec![target, PropertyArg::Ty(ty)])
-            }
-            [target_expr] => {
-                let target = super::resolve::parse_target_arg(tcx, def_id, target_expr);
-                Self::new_atom(PropertyKind::Owning, vec![target])
-            }
-            _ => {
-                rap_error!(
-                    "Wrong args length for Owning Tag! expected 1, 2 or 3, got {}",
+                    "Wrong args length for {} Tag! expected 1, 2 or 3, got {}",
+                    spec.tag,
                     exprs.len()
                 );
                 Self::new_simple(PropertyKind::Unknown)
@@ -507,7 +409,11 @@ impl<'tcx> Property<'tcx> {
     }
 
     fn build_split_transmute(tcx: TyCtxt<'tcx>, def_id: DefId, exprs: &[Expr]) -> Self {
-        if !Self::check_arg_length(exprs.len(), 2, "SplitTransmute") {
+        if exprs.len() != 2 {
+            rap_error!(
+                "Wrong args length for SplitTransmute Tag! expected 2, got {}",
+                exprs.len()
+            );
             return Self::new_simple(PropertyKind::Unknown);
         }
         let src_elem = super::resolve::unwrap_array_expr(tcx, def_id, &exprs[0]);
@@ -645,16 +551,5 @@ impl<'tcx> Property<'tcx> {
         };
         let name = path.path.get_ident()?.to_string();
         Some((name, call.args.iter().cloned().collect()))
-    }
-
-    fn check_arg_length(expr_len: usize, required_len: usize, sp: &str) -> bool {
-        if expr_len != required_len {
-            rap_error!(
-                "Wrong args length for {:?} Tag! expected {required_len}, got {expr_len}",
-                sp
-            );
-            return false;
-        }
-        true
     }
 }
