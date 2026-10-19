@@ -237,11 +237,6 @@ pub(crate) fn entry_to_property<'tcx>(
 
     let exprs = resolve_json_args(&entry.args, param_names, has_names, &entry.tag);
     if exprs.len() != entry.args.len() {
-        rap_error!(
-            "Parse JSON API args error: Failed to parse arg '{:?}' for tag {}",
-            entry.args,
-            entry.tag
-        );
         return Vec::new();
     }
 
@@ -278,7 +273,7 @@ fn any_entry_to_property<'tcx>(
     for item in disjuncts {
         match item {
             AnyItem::Single(entry) => {
-                let group = resolve_entry_group(tcx, def_id, entry, param_names, has_names, false);
+                let group = resolve_entry_group(tcx, def_id, entry, param_names, has_names);
                 if !group.is_empty() {
                     or_disjuncts.push(Property::conjunction(group));
                 }
@@ -292,7 +287,6 @@ fn any_entry_to_property<'tcx>(
                         entry,
                         param_names,
                         has_names,
-                        true,
                     ));
                 }
                 if !group.is_empty() {
@@ -311,31 +305,13 @@ fn resolve_entry_group<'tcx>(
     entry: &JsonProperty,
     param_names: &[String],
     has_names: bool,
-    in_group: bool,
 ) -> Vec<Property<'tcx>> {
     if entry.any.is_some() {
-        if in_group {
-            rap_error!("Nested 'any' inside 'any' group is not supported");
-        } else {
-            rap_error!("Nested 'any' inside 'any' is not supported in JSON contracts");
-        }
+        rap_error!("Nested 'any' inside 'any' is not supported in JSON contracts");
         return Vec::new();
     }
     let exprs = resolve_json_args(&entry.args, param_names, has_names, &entry.tag);
     if exprs.len() != entry.args.len() {
-        if in_group {
-            rap_error!(
-                "Parse any group entry arg error: failed to parse '{:?}' for tag {}",
-                entry.args,
-                entry.tag
-            );
-        } else {
-            rap_error!(
-                "Parse any entry arg error: Failed to parse arg '{:?}' for tag {}",
-                entry.args,
-                entry.tag
-            );
-        }
         return Vec::new();
     }
     let props = Property::parse_list(tcx, def_id, entry.tag.as_str(), &exprs);
@@ -370,32 +346,24 @@ pub(crate) fn resolve_json_args(
         match syn::parse_str::<Expr>(&normalized_arg) {
             Ok(expr) => exprs.push(expr),
             Err(_) => {
-                if let Some(lifetime) = normalized_arg.strip_prefix('\'') {
-                    if lifetime.chars().all(|c| c.is_alphabetic() || c == '_') {
-                        match syn::parse_str::<Expr>(lifetime) {
-                            Ok(expr) => exprs.push(expr),
-                            Err(_) => {
-                                rap_error!(
-                                    "JSON Contract Error: Failed to parse lifetime \
-                                     '{}' as Rust Expr for tag {}",
-                                    arg_str,
-                                    tag
-                                );
-                            }
-                        }
-                    } else {
-                        rap_error!(
-                            "JSON Contract Error: Failed to parse arg '{}' as Rust Expr for tag {}",
+                let lifetime = normalized_arg
+                    .strip_prefix('\'')
+                    .filter(|l| !l.is_empty() && l.chars().all(|c| c.is_alphabetic() || c == '_'));
+                match lifetime {
+                    Some(lifetime) => match syn::parse_str::<Expr>(lifetime) {
+                        Ok(expr) => exprs.push(expr),
+                        Err(_) => rap_error!(
+                            "JSON Contract Error: Failed to parse lifetime \
+                             '{}' as Rust Expr for tag {}",
                             arg_str,
                             tag
-                        );
-                    }
-                } else {
-                    rap_error!(
+                        ),
+                    },
+                    None => rap_error!(
                         "JSON Contract Error: Failed to parse arg '{}' as Rust Expr for tag {}",
                         arg_str,
                         tag
-                    );
+                    ),
                 }
             }
         }
