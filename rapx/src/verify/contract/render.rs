@@ -239,10 +239,6 @@ impl<'tcx> Property<'tcx> {
         };
 
         if matches!(self.kind(), Some(PropertyKind::InBound))
-            && matches!(
-                self.args().first(),
-                Some(PropertyArg::Expr(ContractExpr::IndexAccess { .. }))
-            )
             && let Some(PropertyArg::Expr(ContractExpr::IndexAccess { slice, index })) =
                 self.args().first()
             {

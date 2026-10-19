@@ -42,15 +42,12 @@ pub(crate) fn parse_contract_expr<'tcx>(
         )));
     }
 
-    // A place (fields, projections), a const generic, or a builtin constant.
+    // A place (fields, projections) or a const generic.
     if let Some(place) = place::parse_contract_place(tcx, def_id, expr) {
         return ContractExpr::Place(place);
     }
     if let Some(e) = parse_const_param(tcx, def_id, expr) {
         return e;
-    }
-    if let Some(value) = parse_builtin_const(tcx, expr) {
-        return ContractExpr::Const(value);
     }
     if let Some(value) = parse_expr_into_number(expr) {
         return ContractExpr::new_value(value);
@@ -116,9 +113,6 @@ pub(crate) fn int_type_min_max<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<
         },
         _ => return None,
     };
-    if bits == 0 {
-        return None;
-    }
     match ty.kind() {
         rustc_middle::ty::TyKind::Uint(_) => {
             let max = if bits == 128 {
@@ -133,25 +127,6 @@ pub(crate) fn int_type_min_max<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<
             let min = max + 1;
             Some((min, max))
         }
-        _ => None,
-    }
-}
-
-fn parse_builtin_const<'tcx>(tcx: TyCtxt<'tcx>, expr: &Expr) -> Option<u128> {
-    let Expr::Path(expr_path) = expr else {
-        return None;
-    };
-    let mut segments = expr_path.path.segments.iter();
-    let first = segments.next()?.ident.to_string();
-    let second = segments.next()?.ident.to_string();
-    if segments.next().is_some() || second != "MAX" {
-        return None;
-    }
-
-    let pointer_bits = tcx.data_layout.pointer_size().bits();
-    match first.as_str() {
-        "isize" => Some((1_u128 << (pointer_bits - 1)) - 1),
-        "usize" => Some((1_u128 << pointer_bits) - 1),
         _ => None,
     }
 }
@@ -235,12 +210,10 @@ pub(crate) fn parse_type<'tcx>(
         return resolve_ty_ident(tcx, def_id, &last.ident.to_string());
     }
 
-    let ty_ident_full = access_ident_recursive(expr);
-    if ty_ident_full.is_none() {
+    let Some((ty_ident, _)) = access_ident_recursive(expr) else {
         rap_debug!("Incorrect expression for the type of {:?} Tag!", sp);
         return None;
-    }
-    let ty_ident = ty_ident_full.unwrap().0;
+    };
     let ty = resolve_ty_ident(tcx, def_id, &ty_ident);
     if ty.is_none() {
         rap_debug!("Cannot get type in {:?} Tag!", sp);
