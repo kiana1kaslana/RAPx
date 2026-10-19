@@ -1,16 +1,17 @@
-//! Parsing utilities for `#[rapx::requires(...)]` outer attributes.
+//! Parsing utilities for RAPx contract attributes.
 //!
-//! This module converts a raw `#[rapx::requires(...)]` attribute string into a
-//! structured representation that the verification analysis can consume without
-//! depending on `syn` expression details in later stages.
+//! Converts a raw `#[rapx::<name>(...)]` attribute (`requires` / `invariant` /
+//! `ensures`) into a structured representation that the verification analysis
+//! can consume without depending on `syn` expression details in later stages.
 //!
-//! The currently supported shape is:
+//! The supported shape is:
 //!
 //! ```text
-//! #[rapx::requires(property_call, kind = "...")]
+//! #[rapx::<name>(property_call, kind = "...")]
 //! ```
 //!
-//! where `kind = "..."` applies to the property in the same attribute.
+//! where `kind = "..."` (a string literal) applies to the property in the same
+//! attribute.
 
 use syn::{
     Expr, Lit, Result as SynResult, Token, Type,
@@ -33,11 +34,11 @@ pub(crate) struct AttrProperty {
 }
 
 impl Parse for AttrProperty {
-    /// Parse a single property item from a `requires` attribute argument list.
+    /// Parse a single property item from an attribute argument list.
     ///
     /// Supported forms:
-    /// - `nonzero(x)`
-    /// - `nonzero(x), kind = "ptr"`
+    /// - `NonNull(x)`
+    /// - `NonNull(x), kind = "precond"`
     fn parse(input: ParseStream<'_>) -> SynResult<Self> {
         let mut property = parse_property_head(input)?;
 
@@ -74,22 +75,12 @@ impl Parse for AttrProperty {
     }
 }
 
-/// A thin wrapper that allows parsing exactly one outer attribute from a string.
-struct RequireOuterAttribute {
-    attr: syn::Attribute,
-}
-
-impl Parse for RequireOuterAttribute {
-    /// Parse exactly one outer attribute.
-    fn parse(input: ParseStream<'_>) -> SynResult<Self> {
-        Ok(Self {
-            attr: input
-                .call(syn::Attribute::parse_outer)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| input.error("expected exactly one outer attribute"))?,
-        })
-    }
+fn parse_outer_attr(input: ParseStream<'_>) -> SynResult<syn::Attribute> {
+    input
+        .call(syn::Attribute::parse_outer)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| input.error("expected an outer attribute"))
 }
 
 /// Parse a raw attribute string into a structured `requires` property.
@@ -101,8 +92,7 @@ pub(crate) fn parse_rapx_attr(
     expected_name: &str,
 ) -> SynResult<Option<AttrProperty>> {
     let attr_str = strip_lifetime_ticks(attr_str);
-    // Parse the raw string into a single outer attribute node.
-    let attr = syn::parse_str::<RequireOuterAttribute>(&attr_str)?.attr;
+    let attr = syn::parse::Parser::parse_str(parse_outer_attr, &attr_str)?;
     if !is_expected_syn_rapx_attr(&attr, expected_name) {
         return Ok(None);
     }
@@ -248,15 +238,17 @@ fn strip_lifetime_ticks(s: &str) -> String {
                     i += 1 + "static".len();
                     continue;
                 }
-                let char_literal = match chars.get(i + 1) {
-                    Some('\\') => chars.get(i + 3) == Some(&'\''),
-                    Some(_) => chars.get(i + 2) == Some(&'\''),
-                    None => false,
+                let len = match chars.get(i + 1) {
+                    Some('\\') if chars.get(i + 3) == Some(&'\'') => 4,
+                    Some(_) if chars.get(i + 2) == Some(&'\'') => 3,
+                    _ => 0,
                 };
-                if char_literal {
-                    out.push('\'');
+                if len > 0 {
+                    out.extend(&chars[i..i + len]);
+                    i += len;
+                } else {
+                    i += 1;
                 }
-                i += 1;
             }
             c => {
                 out.push(c);
