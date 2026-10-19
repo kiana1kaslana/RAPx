@@ -91,12 +91,6 @@ fn parse_named_place<'tcx>(expr: &Expr) -> Option<ContractPlace<'tcx>> {
                 && let Ok(idx) = num_str.parse::<usize>() {
                     return Some(ContractPlace::arg(idx));
                 }
-            if s == "return" {
-                return Some(ContractPlace {
-                    base: PlaceBase::Return,
-                    projections: Vec::new(),
-                });
-            }
         }
     None
 }
