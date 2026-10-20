@@ -16,12 +16,9 @@ use crate::verify::api_classify::is_branch;
 pub(crate) struct CallDependencySummary {
     /// If the call destination is relevant, these call arguments are relevant.
     pub return_depends_on_args: Vec<usize>,
-    /// Arguments definitely written on every return path (the must-write
-    /// intersection, from `local_must_write_args`). The backward slicer keeps
-    /// these relevant so the write effect is applied. A conditionally-written
-    /// argument is *not* listed here — that is the "may-write" set, which this
-    /// summary does not compute.
-    pub must_write_args: Vec<usize>,
+    /// Arguments the callee writes; the backward slicer keeps them relevant so
+    /// the write effect is applied.
+    pub write_args: Vec<usize>,
 }
 
 impl CallDependencySummary {
@@ -29,7 +26,7 @@ impl CallDependencySummary {
     fn fallback(arg_count: usize) -> Self {
         Self {
             return_depends_on_args: (0..arg_count).collect(),
-            must_write_args: Vec::new(),
+            write_args: Vec::new(),
         }
     }
 }
@@ -246,7 +243,7 @@ pub(crate) fn dependency_summary<'tcx>(
         // Writes and return-dependencies are orthogonal: a callee can both
         // write an argument and return a value depending on another, so compute
         // both rather than clearing `return_depends_on_args` when a write exists.
-        let must_write_args = dependencies::local_must_write_args(tcx, callee)
+        let write_args = dependencies::local_write_args(tcx, callee)
             .map(|args| args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>())
             .filter(|args| !args.is_empty());
         let return_deps = if is_branch(Some(callee)) {
@@ -256,10 +253,10 @@ pub(crate) fn dependency_summary<'tcx>(
                 .map(|args| args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>())
         };
 
-        if must_write_args.is_some() || return_deps.is_some() {
+        if write_args.is_some() || return_deps.is_some() {
             return CallDependencySummary {
                 return_depends_on_args: return_deps.unwrap_or_default(),
-                must_write_args: must_write_args.unwrap_or_default(),
+                write_args: write_args.unwrap_or_default(),
             };
         }
     }

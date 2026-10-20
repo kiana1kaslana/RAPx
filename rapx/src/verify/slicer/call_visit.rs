@@ -58,23 +58,23 @@ pub(crate) fn visit<'tcx>(
     // when its destination is not *value*-relevant.  Keep it so the forward VM
     // applies the call's effect (and thus the provenance/alloc) instead of
     // relying on the backward `propagate_pass` re-application.  Deliberately
-    // *not* applied to must-write calls (e.g. `MaybeUninit::write`), whose
-    // write effect is tracked separately below via `must_write_args`.
+    // *not* applied to write calls (e.g. `MaybeUninit::write`), whose write
+    // effect is tracked separately below via `write_args`.
     let dest_is_ptr = matches!(
         body.local_decls[destination.local].ty.kind(),
         TyKind::RawPtr(..) | TyKind::Ref(..)
     );
-    if dest_is_ptr && summary.must_write_args.is_empty() {
+    if dest_is_ptr && summary.write_args.is_empty() {
         items.push(RelevantItem::Terminator { def_id, block, switch_succ: None });
         relevant.remove_all(&defs);
         relevant.extend(call_args_uses_at(args, &summary.return_depends_on_args));
         return;
     }
 
-    let summarized_write = !summary.must_write_args.is_empty();
+    let summarized_write = !summary.write_args.is_empty();
     if summarized_write || arg_uses.intersects(relevant) {
         items.push(RelevantItem::Terminator { def_id, block, switch_succ: None });
-        relevant.extend(call_args_uses_at(args, &summary.must_write_args));
+        relevant.extend(call_args_uses_at(args, &summary.write_args));
     }
 
     // If the contract requires the length of a place (via `Len(place)`),

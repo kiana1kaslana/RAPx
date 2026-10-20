@@ -130,25 +130,25 @@ pub(super) fn local_return_dependencies(tcx: TyCtxt<'_>, callee: DefId) -> Optio
 }
 
 /// Memo keyed by `(callee, depth)`, shared within a single
-/// `local_must_write_args` recursion.
-type MustWriteMemo = HashMap<(DefId, usize), Option<HashSet<usize>>>;
+/// `local_write_args` recursion.
+type WriteMemo = HashMap<(DefId, usize), Option<HashSet<usize>>>;
 
-/// Return callee argument indices that are definitely written on every
-/// reachable return path. Works for any callee with available MIR, and follows
-/// wrapper calls (`Vec::push` → `push_mut`) with bounded depth.
-pub(super) fn local_must_write_args(
+/// Return callee argument indices that are written. Works for any callee with
+/// available MIR, and follows wrapper calls (`Vec::push` → `push_mut`) with
+/// bounded depth.
+pub(super) fn local_write_args(
     tcx: TyCtxt<'_>,
     callee: DefId,
 ) -> Option<Vec<usize>> {
-    must_write_args_rec(tcx, callee, 0, &mut HashMap::new())
+    write_args_rec(tcx, callee, 0, &mut HashMap::new())
         .map(|set| set.into_iter().collect())
 }
 
-fn must_write_args_rec(
+fn write_args_rec(
     tcx: TyCtxt<'_>,
     callee: DefId,
     depth: usize,
-    memo: &mut MustWriteMemo,
+    memo: &mut WriteMemo,
 ) -> Option<HashSet<usize>> {
     if depth > 4 {
         return None;
@@ -176,19 +176,19 @@ fn must_write_args_rec(
             return None;
         }
 
-        let mut must_write: Option<HashSet<usize>> = None;
+        let mut write: Option<HashSet<usize>> = None;
         for path in paths.iter() {
             if !path_ends_in_return(body, &path) {
                 continue;
             }
             let writes = write_args_on_path(tcx, body, &path, depth, memo);
-            must_write = Some(match must_write {
+            write = Some(match write {
                 Some(current) => current.intersection(&writes).copied().collect(),
                 None => writes,
             });
         }
 
-        Some(must_write.unwrap_or_default())
+        Some(write.unwrap_or_default())
     })
     .ok()
     .flatten();
@@ -210,7 +210,7 @@ fn write_args_on_path<'tcx>(
     body: &rustc_middle::mir::Body<'tcx>,
     path: &[usize],
     depth: usize,
-    memo: &mut MustWriteMemo,
+    memo: &mut WriteMemo,
 ) -> HashSet<usize> {
     let mut writes = HashSet::new();
     for block in path {
@@ -251,7 +251,7 @@ fn write_args_on_path<'tcx>(
         // Wrapper calls: a nested callee that writes its own args maps those
         // writes back onto this callee's args.
         if let Some(nested) = helpers::dep_callee_def_id(func)
-            && let Some(nested_writes) = must_write_args_rec(tcx, nested, depth + 1, memo)
+            && let Some(nested_writes) = write_args_rec(tcx, nested, depth + 1, memo)
         {
             for (i, arg) in args.iter().enumerate() {
                 if nested_writes.contains(&i)

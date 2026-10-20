@@ -74,7 +74,7 @@ static REGISTRY: &[Entry] = &[
     ED_INLINE!(api_classify::is_nonnull_checked_new, eff_nonnull_new),
     ED_INLINE!(api_classify::is_iter_next, eff_iter_next),
     ED_INLINE!(api_classify::is_range_next, eff_range_next),
-    ED_INLINE!(api_classify::is_eq_call, eff_none),
+    ED!(api_classify::is_eq_call, eff_none),
     // ── Intrinsics — no MIR body ────────────────────────────────────
     ED!(api_classify::is_layout_constant, eff_layout_const),
     ED!(
