@@ -505,11 +505,7 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                 methods.vec_ownership_transfer_fns.push(did);
             }
 
-            if name.contains("::rotate_left")
-                || name.contains("::rotate_right")
-                || name.contains("::isqrt")
-                || name.contains("::saturating_pow")
-            {
+            if name.contains("::isqrt") {
                 methods.bit_preserving_nz.push(did);
             }
             if name.ends_with("::checked_next_power_of_two") {
@@ -1007,6 +1003,14 @@ intrinsics! {
     intrinsics_bitreverse: &[
         "std::intrinsics::bitreverse",
         "core::intrinsics::bitreverse"
+    ],
+    intrinsics_rotate_left: &[
+        "std::intrinsics::rotate_left",
+        "core::intrinsics::rotate_left"
+    ],
+    intrinsics_rotate_right: &[
+        "std::intrinsics::rotate_right",
+        "core::intrinsics::rotate_right"
     ],
     assume_init_read: &[
         "std::mem::MaybeUninit::<T>::assume_init_read",

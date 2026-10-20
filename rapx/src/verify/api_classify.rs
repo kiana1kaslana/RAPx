@@ -721,6 +721,8 @@ pub fn is_intrinsic_bit_preserving(callee: Option<DefId>) -> bool {
             def_id::intrinsics_bswap(),
             def_id::intrinsics_ctpop(),
             def_id::intrinsics_bitreverse(),
+            def_id::intrinsics_rotate_left(),
+            def_id::intrinsics_rotate_right(),
         ],
     )
 }
