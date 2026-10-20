@@ -110,17 +110,10 @@ pub(crate) enum CallEffect {
     /// operations like `rotate_left`/`swap_bytes`/`count_ones`/`isqrt`, which map
     /// `0` to `0` and non-zero to non-zero).
     ReturnNonZeroIff { arg: usize },
-    /// The call returns `Option<T>` whose `Some` payload is non-zero *iff* `arg`
-    /// is non-zero (models `checked_pow`).
-    ReturnOptionSomeNonZeroIff { arg: usize },
     /// The call returns `Option<T>` whose `Some` payload is unconditionally
     /// non-zero (models `checked_next_power_of_two`, where the next power of
     /// two is always positive regardless of the argument).
     ReturnOptionSomeNonZero,
-    /// A specific field of the returned tuple is known to be non-zero (e.g.
-    /// `overflowing_abs`/`overflowing_neg` return `(result, overflow)` where
-    /// `result != 0`). Used to discharge a downstream `ValidNum(result != 0)`.
-    ReturnTupleFieldNonZero { field: usize },
     /// A specific field of the returned tuple carries the length of a given
     /// argument (e.g. split_at(mid) returns (left, right) where left.len() == mid).
     ReturnTupleFieldLength { field: usize, from_arg: usize },

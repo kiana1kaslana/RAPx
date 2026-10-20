@@ -548,6 +548,16 @@ pub(crate) fn is_select_unpredictable(callee: Option<DefId>) -> bool {
     )
 }
 
+pub(crate) fn is_branch_hint(callee: Option<DefId>) -> bool {
+    any_opt(
+        callee,
+        &[
+            def_id::intrinsics_unlikely(),
+            def_id::intrinsics_likely(),
+        ],
+    )
+}
+
 /// Whether `callee` is a `Vec` method that may reallocate (invalidating any
 /// outstanding raw pointers derived from it).
 pub fn is_vec_invalidating_method(callee: Option<DefId>) -> bool {
@@ -703,14 +713,8 @@ pub fn is_checked_add(callee: Option<DefId>) -> bool {
 pub fn is_checked_mul(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::checked_mul_fns())
 }
-pub fn is_overflowing_abs_neg(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::overflowing_nz_fns())
-}
 pub fn is_bit_preserving_nz(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::bit_preserving_nz_fns())
-}
-pub fn is_checked_nonzero_iff(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::checked_nonzero_iff_fns())
 }
 pub fn is_checked_next_pow2(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::checked_next_pow2_fns())

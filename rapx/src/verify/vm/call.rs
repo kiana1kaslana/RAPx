@@ -1013,31 +1013,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     );
                 }
             }
-            CallEffect::ReturnTupleFieldNonZero { field } => {
-                let dest_ty = self.body().local_decls[dest].ty;
-                if let TyKind::Tuple(elem_tys) = dest_ty.kind()
-                    && let Some(field_ty) = elem_tys.get(*field) {
-                        let zero = Int::from_u64(self.z3_ctx, 0);
-                        let term =
-                            self.fresh_int(&format!("ret_tup_nz_{}_{}", dest.as_usize(), field));
-                        self.constraints.assertions.push(term._eq(&zero).not());
-                        self.set_field_value(
-                            dest,
-                            vec![*field],
-                            VmValue {
-                                z3_term: term,
-                                ty: *field_ty,
-                                provenance: None,
-                                facts: ValueFacts {
-                                    non_null: true,
-                                    init: true,
-                                    ..Default::default()
-                                },
-                                source: ValueSource::None,
-                            },
-                        );
-                    }
-            }
             CallEffect::ReturnAligned => {
                 if let Some(mut existing) = self.local_value(dest).cloned() {
                     // `as_ptr`/`as_mut_ptr`/`into_raw` expose a pointer aligned to
@@ -1262,19 +1237,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.set_local(
                         dest,
                         VmValue::new(term, dest_ty),
-                    );
-                }
-            }
-            CallEffect::ReturnOptionSomeNonZeroIff { arg } => {
-                if let Some(a) = args.get(*arg) {
-                    let zero = Int::from_u64(self.z3_ctx, 0);
-                    let term = self.fresh_int(&format!("ret_opt_nz_iff_{}", dest.as_usize()));
-                    self.constraints.assertions
-                        .push(term._eq(&zero)._eq(&a.z3_term._eq(&zero)));
-                    self.set_field_value(
-                        dest,
-                        vec![0],
-                        VmValue::new(term, a.ty),
                     );
                 }
             }

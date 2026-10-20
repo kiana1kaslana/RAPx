@@ -20,7 +20,7 @@ use rustc_middle::{
     },
     ty::{
         ConstKind, FieldDef, GenericArgKind, GenericArgs, GenericArgsRef, GenericParamDefKind,
-        Instance, InstanceKind, PseudoCanonicalInput, Ty, TyCtxt, TyKind, TypingEnv,
+        Instance, InstanceKind, PseudoCanonicalInput, ScalarInt, Ty, TyCtxt, TyKind, TypingEnv,
     },
 };
 use rustc_span::{DUMMY_SP, Symbol};
@@ -1064,24 +1064,46 @@ pub fn eval_const_scalar_int<'tcx>(
     let typing_env = TypingEnv::fully_monomorphized();
     let val = constant.eval(tcx, typing_env, rustc_span::DUMMY_SP).ok()?;
     let scalar = val.try_to_scalar_int()?;
-    let bits = scalar.size().bits() as u32;
-    let raw = scalar.to_bits(scalar.size()) as i128;
     // Keep wide bounds (`u64::MAX`, `usize::MAX`, `u128::MAX`) symbolic so
     // they don't overflow downstream size arithmetic.
-    if raw > u32::MAX as i128 {
+    if scalar.to_bits(scalar.size()) > u32::MAX as u128 {
         return None;
     }
-    // Sign-extend signed integer constants (e.g. `i32::MIN` == -2147483648).
+    Some(scalar_int_value(scalar, constant.ty()))
+}
+
+pub(crate) fn const_destructure<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    constant: &rustc_middle::mir::Const<'tcx>,
+) -> Option<(Option<u64>, Vec<(ConstValue, Ty<'tcx>)>)> {
     let ty = constant.ty();
+    match ty.kind() {
+        TyKind::Tuple(_) => {}
+        TyKind::Adt(adt_def, _) if !adt_def.is_union() => {}
+        _ => return None,
+    }
+    let val = constant
+        .eval(tcx, TypingEnv::fully_monomorphized(), DUMMY_SP)
+        .ok()?;
+    let destructured = tcx.try_destructure_mir_constant_for_user_output(val, ty)?;
+    Some((
+        destructured.variant.map(|v| v.as_u32() as u64),
+        destructured.fields.to_vec(),
+    ))
+}
+
+pub(crate) fn scalar_int_value<'tcx>(scalar: ScalarInt, ty: Ty<'tcx>) -> i128 {
+    let bits = scalar.size().bits() as u32;
+    let raw = scalar.to_bits(scalar.size()) as i128;
     if let TyKind::Int(_) = ty.kind() {
         let sign = 1i128 << (bits - 1);
         if raw >= sign {
-            Some(raw - (1i128 << bits))
+            raw - (1i128 << bits)
         } else {
-            Some(raw)
+            raw
         }
     } else {
-        Some(raw)
+        raw
     }
 }
 

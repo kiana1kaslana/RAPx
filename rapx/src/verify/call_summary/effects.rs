@@ -60,6 +60,7 @@ static REGISTRY: &[Entry] = &[
         api_classify::is_select_unpredictable,
         eff_select_unpredictable
     ),
+    ED!(api_classify::is_branch_hint, eff_alias_arg0),
     ED!(api_classify::is_ptr_offset_from, eff_ptr_offset_from),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
@@ -86,7 +87,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_sat_unchecked_mul, eff_return_mul),
     ED!(api_classify::is_checked_add, eff_return_option_some_add),
     ED!(api_classify::is_checked_mul, eff_return_option_some_mul),
-    ED!(api_classify::is_overflowing_abs_neg, eff_overflowing_nz),
     ED!(api_classify::is_unwrap, eff_alias_arg0),
     // Pointer arithmetic: direction × granularity.
     ED!(api_classify::is_element_ptr_add, eff_ptr_add),
@@ -98,10 +98,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
     ED!(api_classify::is_min_like, eff_cmp_min),
     ED!(api_classify::is_bit_preserving_nz, eff_return_nonzero_iff),
-    ED!(
-        api_classify::is_checked_nonzero_iff,
-        eff_return_option_some_nonzero_iff
-    ),
     ED!(
         api_classify::is_checked_next_pow2,
         eff_return_option_some_nonzero
@@ -296,10 +292,6 @@ fn eff_return_nonzero_iff(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnNonZeroIff { arg: 0 }]
 }
 
-fn eff_return_option_some_nonzero_iff(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnOptionSomeNonZeroIff { arg: 0 }]
-}
-
 fn eff_return_option_some_nonzero(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnOptionSomeNonZero]
 }
@@ -353,10 +345,6 @@ fn eff_return_option_some_mul(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
         lhs_arg: 0,
         rhs_arg: 1,
     }]
-}
-
-fn eff_overflowing_nz(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnTupleFieldNonZero { field: 0 }]
 }
 
 fn eff_ownership_recon(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

@@ -11,13 +11,17 @@ use crate::verify::api_classify;
 
 pub(crate) fn eval_use<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    _place: &Place<'tcx>,
+    place: &Place<'tcx>,
     rvalue: &Rvalue<'tcx>,
 ) -> Option<VmValue<'z3, 'tcx>> {
     let Rvalue::Use(operand, ..) = rvalue else {
         return None;
     };
     let mut val = state.value_of_operand(operand);
+    if let rustc_middle::mir::Operand::Constant(c) = operand
+        && place.projection.is_empty() {
+            state.materialize_const_adt(place.local, &c.const_);
+        }
     state.try_materialize_const_bytes(&mut val, operand);
     state.inject_layout_constraints(operand, &val);
     state.try_emit_gcd_divisibility(operand, &val);

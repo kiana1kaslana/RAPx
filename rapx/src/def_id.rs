@@ -401,9 +401,7 @@ struct Methods {
     sat_unchecked_mul: Vec<DefId>,
     checked_add: Vec<DefId>,
     checked_mul: Vec<DefId>,
-    overflowing_nz: Vec<DefId>,
     bit_preserving_nz: Vec<DefId>,
-    checked_nonzero_iff: Vec<DefId>,
     checked_next_pow2: Vec<DefId>,
     layout_align: Vec<DefId>,
     split_at: Vec<DefId>,
@@ -445,9 +443,7 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         sat_unchecked_mul: Vec::new(),
         checked_add: Vec::new(),
         checked_mul: Vec::new(),
-        overflowing_nz: Vec::new(),
         bit_preserving_nz: Vec::new(),
-        checked_nonzero_iff: Vec::new(),
         checked_next_pow2: Vec::new(),
         layout_align: Vec::new(),
         split_at: Vec::new(),
@@ -572,9 +568,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             if name.ends_with("::checked_mul") {
                 methods.checked_mul.push(did);
             }
-            if name.ends_with("::overflowing_abs") || name.ends_with("::overflowing_neg") {
-                methods.overflowing_nz.push(did);
-            }
             if name.contains("::rotate_left")
                 || name.contains("::rotate_right")
                 || name.contains("::swap_bytes")
@@ -588,12 +581,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                 || name.contains("::saturating_pow")
             {
                 methods.bit_preserving_nz.push(did);
-            }
-            if name.ends_with("::checked_pow")
-                || name.ends_with("::checked_abs")
-                || name.ends_with("::checked_neg")
-            {
-                methods.checked_nonzero_iff.push(did);
             }
             if name.ends_with("::checked_next_power_of_two") {
                 methods.checked_next_pow2.push(did);
@@ -783,9 +770,7 @@ method_fns! {
     sat_unchecked_mul_fns => sat_unchecked_mul,
     checked_add_fns => checked_add,
     checked_mul_fns => checked_mul,
-    overflowing_nz_fns => overflowing_nz,
     bit_preserving_nz_fns => bit_preserving_nz,
-    checked_nonzero_iff_fns => checked_nonzero_iff,
     checked_next_pow2_fns => checked_next_pow2,
     layout_align_fns => layout_align,
     split_at_fns => split_at,
@@ -1041,6 +1026,14 @@ intrinsics! {
     select_unpredictable: &[
         "std::intrinsics::select_unpredictable",
         "core::intrinsics::select_unpredictable"
+    ],
+    intrinsics_unlikely: &[
+        "std::intrinsics::unlikely",
+        "core::intrinsics::unlikely"
+    ],
+    intrinsics_likely: &[
+        "std::intrinsics::likely",
+        "core::intrinsics::likely"
     ],
     assume_init_read: &[
         "std::mem::MaybeUninit::<T>::assume_init_read",

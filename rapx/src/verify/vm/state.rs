@@ -7,7 +7,7 @@
 use crate::helpers::mir_utils;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
-    mir::{Body, Local, Operand, Place, ProjectionElem},
+    mir::{Body, ConstValue, Local, Operand, Place, ProjectionElem},
     ty::{Region, Ty, TyCtxt},
 };
 use z3::{
@@ -1186,6 +1186,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 let field_offset = int_val.is_none()
                     && mir_utils::offset_of_container(self.tcx, &constant.const_)
                         .is_some();
+                let enum_variant = mir_utils::const_destructure(self.tcx, &constant.const_)
+                    .and_then(|(variant, _)| variant);
                 let term = if let Some(v) = int_val {
                     if v < 0 {
                         Int::from_i64(self.z3_ctx, v as i64)
@@ -1204,7 +1206,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     ty,
                     provenance: None,
                     facts: ValueFacts::default(),
-                    source: if field_offset {
+                    source: if let Some(v) = enum_variant {
+                        ValueSource::Discriminant(Int::from_u64(self.z3_ctx, v))
+                    } else if field_offset {
                         ValueSource::FieldOffset
                     } else {
                         ValueSource::None
@@ -1217,6 +1221,35 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 self.body().local_decls[Local::from_usize(0)].ty,
             ),
         }
+    }
+
+    pub(crate) fn materialize_const_adt(
+        &mut self,
+        local: Local,
+        constant: &rustc_middle::mir::Const<'tcx>,
+    ) {
+        let Some((_variant, fields)) = mir_utils::const_destructure(self.tcx, constant) else {
+            return;
+        };
+        for (idx, (field_val, field_ty)) in fields.iter().enumerate() {
+            let term = self.const_field_term(field_val, *field_ty);
+            self.set_field_value(local, vec![idx], VmValue::new(term, *field_ty));
+        }
+    }
+
+    fn const_field_term(&self, val: &ConstValue, ty: Ty<'tcx>) -> Int<'z3> {
+        if let Some(scalar) = (*val).try_to_scalar_int() {
+            let v = mir_utils::scalar_int_value(scalar, ty);
+            if v < 0 {
+                return Int::from_i64(self.z3_ctx, v as i64);
+            }
+            return Int::from_u64(self.z3_ctx, v as u64);
+        }
+        let name = format!(
+            "const_field_{}",
+            format!("{:?}", val).replace([':', '#', ' '], "_")
+        );
+        Int::new_const(self.z3_ctx, name.as_str())
     }
 
     /// Read the byte at `offset` within a `repr(C)`-style ADT from its
