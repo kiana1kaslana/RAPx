@@ -60,8 +60,8 @@ static REGISTRY: &[Entry] = &[
         api_classify::is_select_unpredictable,
         eff_select_unpredictable
     ),
-    ED!(api_classify::is_branch_hint, eff_alias_arg0),
-    ED!(api_classify::is_with_overflow, eff_with_overflow),
+    ED!(api_classify::is_intrinsic_branch_hint, eff_alias_arg0),
+    ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
     ED!(api_classify::is_ptr_offset_from, eff_ptr_offset_from),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
@@ -334,9 +334,9 @@ fn eff_return_mul(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 fn eff_with_overflow(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     let callee = mir_utils::dep_callee_def_id(ctx.func);
-    let op = if api_classify::is_add_with_overflow(callee) {
+    let op = if api_classify::is_intrinsic_add_with_overflow(callee) {
         OverflowOp::Add
-    } else if api_classify::is_sub_with_overflow(callee) {
+    } else if api_classify::is_intrinsic_sub_with_overflow(callee) {
         OverflowOp::Sub
     } else {
         OverflowOp::Mul

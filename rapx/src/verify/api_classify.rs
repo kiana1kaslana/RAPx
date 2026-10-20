@@ -548,7 +548,7 @@ pub(crate) fn is_select_unpredictable(callee: Option<DefId>) -> bool {
     )
 }
 
-pub(crate) fn is_branch_hint(callee: Option<DefId>) -> bool {
+pub(crate) fn is_intrinsic_branch_hint(callee: Option<DefId>) -> bool {
     any_opt(
         callee,
         &[
@@ -558,7 +558,7 @@ pub(crate) fn is_branch_hint(callee: Option<DefId>) -> bool {
     )
 }
 
-pub(crate) fn is_with_overflow(callee: Option<DefId>) -> bool {
+pub(crate) fn is_intrinsic_with_overflow(callee: Option<DefId>) -> bool {
     any_opt(
         callee,
         &[
@@ -569,11 +569,11 @@ pub(crate) fn is_with_overflow(callee: Option<DefId>) -> bool {
     )
 }
 
-pub(crate) fn is_add_with_overflow(callee: Option<DefId>) -> bool {
+pub(crate) fn is_intrinsic_add_with_overflow(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_add_with_overflow()])
 }
 
-pub(crate) fn is_sub_with_overflow(callee: Option<DefId>) -> bool {
+pub(crate) fn is_intrinsic_sub_with_overflow(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_sub_with_overflow()])
 }
 
