@@ -1200,28 +1200,6 @@ intrinsics! {
         "std::ptr::mut_ptr::<impl *mut T>::wrapping_byte_offset",
         "core::ptr::mut_ptr::<impl *mut T>::wrapping_byte_offset"
     ],
-    const_ptr_offset_from: &[
-        "std::ptr::const_ptr::<impl *const T>::offset_from",
-        "core::ptr::const_ptr::<impl *const T>::offset_from"
-    ],
-    const_ptr_offset_from_unsigned: &[
-        "std::ptr::const_ptr::<impl *const T>::offset_from_unsigned",
-        "core::ptr::const_ptr::<impl *const T>::offset_from_unsigned"
-    ],
-    mut_ptr_offset_from: &[
-        "std::ptr::mut_ptr::<impl *mut T>::offset_from",
-        "core::ptr::mut_ptr::<impl *mut T>::offset_from"
-    ],
-    mut_ptr_offset_from_unsigned: &[
-        "std::ptr::mut_ptr::<impl *mut T>::offset_from_unsigned",
-        "core::ptr::mut_ptr::<impl *mut T>::offset_from_unsigned"
-    ],
-    nonnull_offset_from: &[
-        "std::ptr::NonNull::<T>::offset_from",
-        "core::ptr::NonNull::<T>::offset_from",
-        "std::ptr::non_null::NonNull::<T>::offset_from",
-        "core::ptr::non_null::NonNull::<T>::offset_from"
-    ],
     intrinsics_ptr_offset_from: &[
         "std::intrinsics::ptr_offset_from",
         "core::intrinsics::ptr_offset_from"

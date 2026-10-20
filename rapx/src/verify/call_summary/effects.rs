@@ -58,7 +58,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_layout_constant, eff_layout_const),
     ED!(api_classify::is_select_unpredictable, eff_select_unpredictable),
     ED!(api_classify::is_intrinsic_branch_hint, eff_alias_arg0),
-    ED!(api_classify::is_ptr_offset_from, eff_ptr_offset_from),
+    ED!(api_classify::is_intrinsic_ptr_offset_from, eff_ptr_offset_from),
     ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
     ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
     ED!(api_classify::is_intrinsic_integer_max, eff_return_max),

@@ -251,15 +251,10 @@ pub fn is_pointer_sub(callee: Option<DefId>) -> bool {
     is_element_ptr_sub(callee) || is_byte_ptr_sub(callee)
 }
 
-pub fn is_ptr_offset_from(callee: Option<DefId>) -> bool {
+pub fn is_intrinsic_ptr_offset_from(callee: Option<DefId>) -> bool {
     any_opt(
         callee,
         &[
-            def_id::const_ptr_offset_from(),
-            def_id::const_ptr_offset_from_unsigned(),
-            def_id::mut_ptr_offset_from(),
-            def_id::mut_ptr_offset_from_unsigned(),
-            def_id::nonnull_offset_from(),
             def_id::intrinsics_ptr_offset_from(),
             def_id::intrinsics_ptr_offset_from_unsigned(),
         ],
