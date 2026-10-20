@@ -100,12 +100,11 @@ pub(crate) enum CallEffect {
     ReturnAdd { lhs_arg: usize, rhs_arg: usize },
     /// The return value is `lhs_arg * rhs_arg`.
     ReturnMul { lhs_arg: usize, rhs_arg: usize },
-    /// The call returns `Option<T>` whose `Some` payload is `lhs_arg + rhs_arg`
-    /// (models `checked_add`; the payload is non-zero whenever `lhs_arg` is).
-    ReturnOptionSomeAdd { lhs_arg: usize, rhs_arg: usize },
-    /// The call returns `Option<T>` whose `Some` payload is `lhs_arg * rhs_arg`
-    /// (models `checked_mul`; the payload is non-zero whenever both args are).
-    ReturnOptionSomeMul { lhs_arg: usize, rhs_arg: usize },
+    ReturnWithOverflow {
+        lhs_arg: usize,
+        rhs_arg: usize,
+        op: OverflowOp,
+    },
     /// The return value is non-zero *iff* `arg` is non-zero (models bit-preserving
     /// operations like `rotate_left`/`swap_bytes`/`count_ones`/`isqrt`, which map
     /// `0` to `0` and non-zero to non-zero).
@@ -213,6 +212,13 @@ pub(crate) enum CallEffect {
     /// layout): the result is the shared symbolic `sizeof_T` / `align_T`, bound
     /// at apply time from `func`'s type argument.
     ReturnLayoutSymbolic { is_size: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OverflowOp {
+    Add,
+    Sub,
+    Mul,
 }
 
 /// Return dependency information for a MIR call terminator.

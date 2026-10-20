@@ -12,7 +12,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 
-use super::{CallEffect, CallEffectSummary};
+use super::{CallEffect, CallEffectSummary, OverflowOp};
 use crate::def_id;
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
 use crate::verify::api_classify;
@@ -61,6 +61,7 @@ static REGISTRY: &[Entry] = &[
         eff_select_unpredictable
     ),
     ED!(api_classify::is_branch_hint, eff_alias_arg0),
+    ED!(api_classify::is_with_overflow, eff_with_overflow),
     ED!(api_classify::is_ptr_offset_from, eff_ptr_offset_from),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
@@ -85,8 +86,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_neg, eff_return_neg),
     ED!(api_classify::is_sat_unchecked_add, eff_return_add),
     ED!(api_classify::is_sat_unchecked_mul, eff_return_mul),
-    ED!(api_classify::is_checked_add, eff_return_option_some_add),
-    ED!(api_classify::is_checked_mul, eff_return_option_some_mul),
     ED!(api_classify::is_unwrap, eff_alias_arg0),
     // Pointer arithmetic: direction × granularity.
     ED!(api_classify::is_element_ptr_add, eff_ptr_add),
@@ -333,17 +332,19 @@ fn eff_return_mul(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     }]
 }
 
-fn eff_return_option_some_add(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnOptionSomeAdd {
+fn eff_with_overflow(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    let callee = mir_utils::dep_callee_def_id(ctx.func);
+    let op = if api_classify::is_add_with_overflow(callee) {
+        OverflowOp::Add
+    } else if api_classify::is_sub_with_overflow(callee) {
+        OverflowOp::Sub
+    } else {
+        OverflowOp::Mul
+    };
+    vec![CallEffect::ReturnWithOverflow {
         lhs_arg: 0,
         rhs_arg: 1,
-    }]
-}
-
-fn eff_return_option_some_mul(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnOptionSomeMul {
-        lhs_arg: 0,
-        rhs_arg: 1,
+        op,
     }]
 }
 

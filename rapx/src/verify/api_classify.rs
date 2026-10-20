@@ -558,6 +558,25 @@ pub(crate) fn is_branch_hint(callee: Option<DefId>) -> bool {
     )
 }
 
+pub(crate) fn is_with_overflow(callee: Option<DefId>) -> bool {
+    any_opt(
+        callee,
+        &[
+            def_id::intrinsics_add_with_overflow(),
+            def_id::intrinsics_sub_with_overflow(),
+            def_id::intrinsics_mul_with_overflow(),
+        ],
+    )
+}
+
+pub(crate) fn is_add_with_overflow(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_add_with_overflow()])
+}
+
+pub(crate) fn is_sub_with_overflow(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_sub_with_overflow()])
+}
+
 /// Whether `callee` is a `Vec` method that may reallocate (invalidating any
 /// outstanding raw pointers derived from it).
 pub fn is_vec_invalidating_method(callee: Option<DefId>) -> bool {
@@ -706,12 +725,6 @@ pub fn is_sat_unchecked_add(callee: Option<DefId>) -> bool {
 }
 pub fn is_sat_unchecked_mul(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::sat_unchecked_mul_fns())
-}
-pub fn is_checked_add(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::checked_add_fns())
-}
-pub fn is_checked_mul(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::checked_mul_fns())
 }
 pub fn is_bit_preserving_nz(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::bit_preserving_nz_fns())

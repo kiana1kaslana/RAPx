@@ -18,7 +18,7 @@ use crate::compat::{FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
 use crate::verify::api_classify;
-use crate::verify::call_summary::{self, CallEffect};
+use crate::verify::call_summary::{self, CallEffect, OverflowOp};
 use super::state::{AllocId, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
@@ -1135,29 +1135,18 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     Int::mul(self.z3_ctx, &[lhs, rhs])
                 });
             }
-            CallEffect::ReturnOptionSomeAdd { lhs_arg, rhs_arg } => {
+            CallEffect::ReturnWithOverflow {
+                lhs_arg,
+                rhs_arg,
+                op,
+            } => {
                 if let (Some(lhs), Some(rhs)) = (args.get(*lhs_arg), args.get(*rhs_arg)) {
-                    // `checked_add` returns `Option<T>`; its `Some` payload is
-                    // `lhs + rhs`. Store the payload term under field 0 so the
-                    // `if let Some(payload)` projection resolves to it. The
-                    // discriminant is left unconstrained, so both `Some`/`None`
-                    // branches remain reachable.
-                    let term = Int::add(self.z3_ctx, &[&lhs.z3_term, &rhs.z3_term]);
-                    self.set_field_value(
-                        dest,
-                        vec![0],
-                        VmValue::new(term, lhs.ty),
-                    );
-                }
-            }
-            CallEffect::ReturnOptionSomeMul { lhs_arg, rhs_arg } => {
-                if let (Some(lhs), Some(rhs)) = (args.get(*lhs_arg), args.get(*rhs_arg)) {
-                    let term = Int::mul(self.z3_ctx, &[&lhs.z3_term, &rhs.z3_term]);
-                    self.set_field_value(
-                        dest,
-                        vec![0],
-                        VmValue::new(term, lhs.ty),
-                    );
+                    let term = match op {
+                        OverflowOp::Add => Int::add(self.z3_ctx, &[&lhs.z3_term, &rhs.z3_term]),
+                        OverflowOp::Sub => Int::sub(self.z3_ctx, &[&lhs.z3_term, &rhs.z3_term]),
+                        OverflowOp::Mul => Int::mul(self.z3_ctx, &[&lhs.z3_term, &rhs.z3_term]),
+                    };
+                    self.set_field_value(dest, vec![0], VmValue::new(term, lhs.ty));
                 }
             }
             CallEffect::ReturnOptionSomeScanIndex { self_arg } => {
