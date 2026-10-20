@@ -61,8 +61,22 @@ static REGISTRY: &[Entry] = &[
         eff_select_unpredictable
     ),
     ED!(api_classify::is_intrinsic_branch_hint, eff_alias_arg0),
-    ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
     ED!(api_classify::is_ptr_offset_from, eff_ptr_offset_from),
+    ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
+    ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
+    ED!(api_classify::is_intrinsic_integer_max, eff_return_max),
+    ED!(
+        api_classify::is_intrinsic_saturating_add,
+        eff_return_add
+    ),
+    ED!(api_classify::is_intrinsic_saturating_sub, eff_return_sub),
+    ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
+    ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
+    ED!(api_classify::is_intrinsic_wrapping_sub, eff_return_sub),
+    ED!(
+        api_classify::is_intrinsic_bit_preserving,
+        eff_return_nonzero_iff
+    ),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
     ED!(api_classify::is_box_alloc_ctor, eff_box_alloc),
@@ -79,19 +93,12 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_into_boxed_slice, eff_box_from_vec),
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
-    // Non-zero-preserving integer ops discharge `!= 0` conditionally.
-    ED!(api_classify::is_intrinsic_integer_max, eff_return_max),
+    // Non-zero-preserving integer compound methods.
+    ED!(api_classify::is_bit_preserving_nz, eff_return_nonzero_iff),
     ED!(
-        api_classify::is_intrinsic_wrapping_sub,
-        eff_return_sub
+        api_classify::is_checked_next_pow2,
+        eff_return_option_some_nonzero
     ),
-    ED!(
-        api_classify::is_intrinsic_saturating_add,
-        eff_return_add
-    ),
-    ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
-    ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
-    ED!(api_classify::is_intrinsic_saturating_sub, eff_return_sub),
     ED!(api_classify::is_unwrap, eff_alias_arg0),
     // Pointer arithmetic: direction × granularity.
     ED!(api_classify::is_element_ptr_add, eff_ptr_add),
@@ -101,13 +108,6 @@ static REGISTRY: &[Entry] = &[
     // Raw-pointer `cast` is excluded (`is_as_ptr_valid`) — left to inlining.
     ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
-    ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
-    ED!(api_classify::is_intrinsic_bit_preserving, eff_return_nonzero_iff),
-    ED!(api_classify::is_bit_preserving_nz, eff_return_nonzero_iff),
-    ED!(
-        api_classify::is_checked_next_pow2,
-        eff_return_option_some_nonzero
-    ),
     ED!(api_classify::is_slice_get_unchecked, eff_alias_ptr),
     // `SliceIndex::get_unchecked(self, slice)` returns `slice + self` (receiver
     // is the index), so model as element-strided add off argument 1.
