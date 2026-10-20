@@ -67,7 +67,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
     ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
     ED!(api_classify::is_intrinsic_wrapping_sub, eff_return_sub),
-    ED!(api_classify::is_intrinsic_bit_preserving, eff_return_nonzero_iff),
+    ED!(api_classify::is_intrinsic_nonzero_preserving, eff_return_nonzero_iff),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
     ED!(api_classify::is_box_alloc_ctor, eff_box_alloc),
@@ -81,8 +81,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_into_boxed_slice, eff_box_from_vec),
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
-    // Non-zero-preserving integer compound methods.
-    ED!(api_classify::is_bit_preserving_nz, eff_return_nonzero_iff),
     ED!(api_classify::is_checked_next_pow2, eff_return_option_some_nonzero),
     ED!(api_classify::is_unwrap, eff_alias_arg0),
     // Pointer arithmetic: direction × granularity.

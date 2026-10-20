@@ -97,9 +97,9 @@ pub(crate) enum CallEffect {
         rhs_arg: usize,
         op: OverflowOp,
     },
-    /// The return value is non-zero *iff* `arg` is non-zero (models bit-preserving
-    /// operations like `rotate_left`/`swap_bytes`/`count_ones`/`isqrt`, which map
-    /// `0` to `0` and non-zero to non-zero).
+    /// The return value is non-zero *iff* `arg` is non-zero (models bit-manipulating
+    /// intrinsics like `bswap`/`bitreverse`/`ctpop`/`rotate_*`, which map `0` to
+    /// `0` and non-zero to non-zero).
     ReturnNonZeroIff { arg: usize },
     /// The call returns `Option<T>` whose `Some` payload is unconditionally
     /// non-zero (models `checked_next_power_of_two`, where the next power of

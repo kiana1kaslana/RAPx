@@ -714,7 +714,7 @@ pub fn is_intrinsic_integer_max(callee: Option<DefId>) -> bool {
 pub fn is_intrinsic_saturating_sub(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_saturating_sub()])
 }
-pub fn is_intrinsic_bit_preserving(callee: Option<DefId>) -> bool {
+pub fn is_intrinsic_nonzero_preserving(callee: Option<DefId>) -> bool {
     any_opt(
         callee,
         &[
@@ -737,9 +737,6 @@ pub fn is_intrinsic_unchecked_mul(callee: Option<DefId>) -> bool {
 }
 pub fn is_intrinsic_wrapping_sub(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_wrapping_sub()])
-}
-pub fn is_bit_preserving_nz(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::bit_preserving_nz_fns())
 }
 pub fn is_checked_next_pow2(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::checked_next_pow2_fns())

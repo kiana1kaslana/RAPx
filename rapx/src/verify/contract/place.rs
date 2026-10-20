@@ -66,7 +66,48 @@ pub(crate) fn parse_contract_place<'tcx>(
     if let Some((base, fields, _ty)) = parse_expr_into_local_and_ty(tcx, def_id, expr) {
         return Some(ContractPlace::local(base, fields));
     }
-    parse_named_place(expr)
+    parse_return_field_place(tcx, def_id, expr).or_else(|| parse_named_place(expr))
+}
+
+/// Resolve a place rooted at the function's return value with field projections
+/// (`return.0`, `return.pointer`). `parse_named_place` only handles a *bare*
+/// `return` (no projections); this walks the field chain against the return type.
+fn parse_return_field_place<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    expr: &Expr,
+) -> Option<ContractPlace<'tcx>> {
+    let mut field_names: Vec<String> = Vec::new();
+    let mut cur = expr;
+    loop {
+        match cur {
+            Expr::Return(expr_return) if expr_return.expr.is_none() => break,
+            Expr::Field(expr_field) => {
+                field_names.push(match &expr_field.member {
+                    syn::Member::Named(ident) => ident.to_string(),
+                    syn::Member::Unnamed(index) => index.index.to_string(),
+                });
+                cur = &expr_field.base;
+            }
+            _ => return None,
+        }
+    }
+    if field_names.is_empty() {
+        return None;
+    }
+    field_names.reverse();
+    let ret_ty = tcx.fn_sig(def_id).skip_binder().output().skip_binder();
+    let (field_indices, _) = walk_fields(tcx, ret_ty, Vec::new(), &field_names)?;
+    Some(ContractPlace {
+        base: PlaceBase::Return,
+        projections: field_indices
+            .into_iter()
+            .map(|(index, ty)| ContractProjection::Field {
+                index,
+                ty: Some(ty),
+            })
+            .collect(),
+    })
 }
 
 fn parse_named_place<'tcx>(expr: &Expr) -> Option<ContractPlace<'tcx>> {

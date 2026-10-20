@@ -392,7 +392,6 @@ struct Methods {
     with_capacity_fns: Vec<DefId>,
     box_alloc_ctors: Vec<DefId>,
     vec_ownership_transfer_fns: Vec<DefId>,
-    bit_preserving_nz: Vec<DefId>,
     checked_next_pow2: Vec<DefId>,
     layout_align: Vec<DefId>,
     split_at: Vec<DefId>,
@@ -425,7 +424,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         with_capacity_fns: Vec::new(),
         box_alloc_ctors: Vec::new(),
         vec_ownership_transfer_fns: Vec::new(),
-        bit_preserving_nz: Vec::new(),
         checked_next_pow2: Vec::new(),
         layout_align: Vec::new(),
         split_at: Vec::new(),
@@ -505,9 +503,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                 methods.vec_ownership_transfer_fns.push(did);
             }
 
-            if name.contains("::isqrt") {
-                methods.bit_preserving_nz.push(did);
-            }
             if name.ends_with("::checked_next_power_of_two") {
                 methods.checked_next_pow2.push(did);
             }
@@ -687,7 +682,6 @@ fn assoc_self_adt_did(tcx: TyCtxt, def_id: DefId) -> Option<DefId> {
 }
 
 method_fns! {
-    bit_preserving_nz_fns => bit_preserving_nz,
     checked_next_pow2_fns => checked_next_pow2,
     layout_align_fns => layout_align,
     split_at_fns => split_at,
