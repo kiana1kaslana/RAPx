@@ -102,6 +102,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
     ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
+    ED!(api_classify::is_intrinsic_bit_preserving, eff_return_nonzero_iff),
     ED!(api_classify::is_bit_preserving_nz, eff_return_nonzero_iff),
     ED!(
         api_classify::is_checked_next_pow2,

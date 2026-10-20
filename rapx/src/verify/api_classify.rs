@@ -714,6 +714,16 @@ pub fn is_intrinsic_integer_max(callee: Option<DefId>) -> bool {
 pub fn is_intrinsic_saturating_sub(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_saturating_sub()])
 }
+pub fn is_intrinsic_bit_preserving(callee: Option<DefId>) -> bool {
+    any_opt(
+        callee,
+        &[
+            def_id::intrinsics_bswap(),
+            def_id::intrinsics_ctpop(),
+            def_id::intrinsics_bitreverse(),
+        ],
+    )
+}
 pub fn is_intrinsic_saturating_add(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_saturating_add()])
 }

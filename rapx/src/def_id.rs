@@ -507,13 +507,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
 
             if name.contains("::rotate_left")
                 || name.contains("::rotate_right")
-                || name.contains("::swap_bytes")
-                || name.contains("::reverse_bits")
-                || name.contains("::from_be")
-                || name.contains("::from_le")
-                || name.contains("::to_be")
-                || name.contains("::to_le")
-                || name.contains("::count_ones")
                 || name.contains("::isqrt")
                 || name.contains("::saturating_pow")
             {
@@ -1002,6 +995,18 @@ intrinsics! {
     intrinsics_integer_max: &[
         "std::intrinsics::integer_max",
         "core::intrinsics::integer_max"
+    ],
+    intrinsics_bswap: &[
+        "std::intrinsics::bswap",
+        "core::intrinsics::bswap"
+    ],
+    intrinsics_ctpop: &[
+        "std::intrinsics::ctpop",
+        "core::intrinsics::ctpop"
+    ],
+    intrinsics_bitreverse: &[
+        "std::intrinsics::bitreverse",
+        "core::intrinsics::bitreverse"
     ],
     assume_init_read: &[
         "std::mem::MaybeUninit::<T>::assume_init_read",
