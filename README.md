@@ -119,6 +119,13 @@ Options:
 Usage: cargo rapx opt
 ```
 
+The opt checker reports optimization candidates, not automatic rewrites or
+guaranteed speedups. Encoding suggestions require evidence about the input bytes;
+bounds candidates still require mutation/range analysis and release-build
+validation before considering unchecked access. See the
+[opt pipeline study and limitations](docs/opt-pipeline.zh-CN.md) and the
+[reproducible String experiment](tools/opt/README.md).
+
 ### `verify` command
 
 The `verify` command provides a contract-based verification pipeline for functions annotated with `#[rapx::verify]`. It uses path-sensitive backward/forward analysis and Z3-based SMT solving to prove safety properties.
