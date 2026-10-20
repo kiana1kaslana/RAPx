@@ -1,6 +1,8 @@
 pub mod participant;
 pub mod slice_contains;
+pub mod string_accumulator;
 pub mod vec_remove;
+use string_accumulator::StringAccumulatorCheck;
 
 use participant::ParticipantCheck;
 use slice_contains::SliceContainsCheck;
@@ -17,6 +19,7 @@ pub struct SuboptimalCheck {
     participant: ParticipantCheck,
     slice_contains: SliceContainsCheck,
     vec_remove: VecRemoveCheck,
+    string_accumulator: StringAccumulatorCheck,
 }
 
 impl OptCheck for SuboptimalCheck {
@@ -25,11 +28,13 @@ impl OptCheck for SuboptimalCheck {
             participant: ParticipantCheck::new(),
             slice_contains: SliceContainsCheck::new(),
             vec_remove: VecRemoveCheck::new(),
+            string_accumulator: StringAccumulatorCheck::new(),
         }
     }
 
     fn check(&mut self, graph: &Graph, tcx: &TyCtxt) {
         self.vec_remove.check(graph, tcx);
+        self.string_accumulator.check(graph, tcx);
         let level = LEVEL.lock().unwrap();
         if *level == 2 {
             self.participant.check(graph, tcx);
@@ -41,9 +46,13 @@ impl OptCheck for SuboptimalCheck {
         self.participant.report(graph);
         self.slice_contains.report(graph);
         self.vec_remove.report(graph);
+        self.string_accumulator.report(graph);
     }
 
     fn cnt(&self) -> usize {
-        self.participant.cnt() + self.slice_contains.cnt() + self.vec_remove.cnt()
+        self.participant.cnt()
+            + self.slice_contains.cnt()
+            + self.vec_remove.cnt()
+            + self.string_accumulator.cnt()
     }
 }

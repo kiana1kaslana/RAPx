@@ -54,34 +54,22 @@ pub struct BoundsLenCheck {
 struct IfFinder {
     record: Vec<(Span, Vec<Span>)>,
 }
-struct LtFinder {
-    record: Vec<Span>,
-}
 struct IndexFinder {
     record: Vec<Span>,
 }
 
-impl intravisit::Visitor<'_> for LtFinder {
-    fn visit_expr(&mut self, ex: &Expr) {
-        if let ExprKind::Binary(op, ..) = ex.kind
-            && op.node == BinOpKind::Lt {
-                self.record.push(ex.span);
-            }
-        intravisit::walk_expr(self, ex);
-    }
-}
-
 impl<'tcx> intravisit::Visitor<'tcx> for IfFinder {
     fn visit_expr(&mut self, ex: &'tcx Expr<'tcx>) {
-        if let ExprKind::If(cond, e1, _) = ex.kind {
-            let mut lt_finder = LtFinder { record: vec![] };
-            intravisit::walk_expr(&mut lt_finder, cond);
-            if !lt_finder.record.is_empty() {
-                let mut index_finder = IndexFinder { record: vec![] };
-                intravisit::walk_expr(&mut index_finder, e1);
-                if !index_finder.record.is_empty() {
-                    self.record.push((lt_finder.record[0], index_finder.record));
-                }
+        // Only a direct true less-than condition establishes this relation.
+        // Finding a comparison under negation, disjunction or a call is not a guard.
+        if let ExprKind::If(cond, e1, _) = ex.kind
+            && let ExprKind::Binary(op, ..) = cond.kind
+            && op.node == BinOpKind::Lt
+        {
+            let mut index_finder = IndexFinder { record: vec![] };
+            intravisit::walk_expr(&mut index_finder, e1);
+            if !index_finder.record.is_empty() {
+                self.record.push((cond.span, index_finder.record));
             }
         }
         intravisit::walk_expr(self, ex);
@@ -106,21 +94,21 @@ impl OptCheck for BoundsLenCheck {
         DEFPATHS.get_or_init(|| DefPaths::new(tcx));
         for (node_idx, node) in graph.nodes.iter_enumerated() {
             if let Some(upperbound_node_idx) = extract_upperbound_node_if_ops_range(graph, node)
-                && let Some(vec_len_node_idx) = find_upside_len_node(graph, upperbound_node_idx) {
-                    let maybe_vec_node_idx = graph.get_upside_idx(vec_len_node_idx, 0).unwrap();
-                    let maybe_vec_node_idxs =
-                        graph.collect_equivalent_locals(maybe_vec_node_idx, true);
-                    let mut index_record = vec![];
-                    for index_node_idx in find_downside_index_node(graph, node_idx).into_iter() {
-                        let maybe_vec_node_idx = graph.get_upside_idx(index_node_idx, 0).unwrap();
-                        if maybe_vec_node_idxs.contains(&maybe_vec_node_idx) {
-                            index_record.push(index_node_idx);
-                        }
-                    }
-                    if !index_record.is_empty() {
-                        self.record.push((upperbound_node_idx, index_record));
+                && let Some(vec_len_node_idx) = find_upside_len_node(graph, upperbound_node_idx)
+            {
+                let maybe_vec_node_idx = graph.get_upside_idx(vec_len_node_idx, 0).unwrap();
+                let maybe_vec_node_idxs = graph.collect_equivalent_locals(maybe_vec_node_idx, true);
+                let mut index_record = vec![];
+                for index_node_idx in find_downside_index_node(graph, node_idx).into_iter() {
+                    let maybe_vec_node_idx = graph.get_upside_idx(index_node_idx, 0).unwrap();
+                    if maybe_vec_node_idxs.contains(&maybe_vec_node_idx) {
+                        index_record.push(index_node_idx);
                     }
                 }
+                if !index_record.is_empty() {
+                    self.record.push((upperbound_node_idx, index_record));
+                }
+            }
         }
         let def_id = graph.def_id;
         let body = tcx.hir_body_owned_by(def_id.as_local().unwrap());
@@ -154,7 +142,9 @@ impl OptCheck for BoundsLenCheck {
                             }
                         }
                     }
-                    self.record.push((node_idx, slice_node_indice));
+                    if !slice_node_indice.is_empty() {
+                        self.record.push((node_idx, slice_node_indice));
+                    }
                 }
             }
         }
@@ -181,12 +171,11 @@ fn find_indexed_node_from_index(graph: &Graph, index_node_idx: Local) -> Option<
             if let NodeOp::Call(def_id) = op
                 && (*def_id == def_paths.ops_index.last_def_id()
                     || *def_id == def_paths.ops_index_mut.last_def_id())
-                {
-                    let index_operator_node =
-                        &graph.nodes[graph.edges[index_node.out_edges[0]].dst];
+            {
+                let index_operator_node = &graph.nodes[graph.edges[index_node.out_edges[0]].dst];
 
-                    return Some(graph.edges[index_operator_node.in_edges[0]].src);
-                }
+                return Some(graph.edges[index_operator_node.in_edges[0]].src);
+            }
             if graph.is_marker(dst_node_idx) {
                 for edge_idx_ in dst_node.in_edges.iter() {
                     let edge = &graph.edges[*edge_idx_];
@@ -205,10 +194,11 @@ fn extract_upperbound_node_if_ops_range(graph: &Graph, node: &GraphNode) -> Opti
     let target_def_id = def_paths.ops_range.last_def_id();
     for op in node.ops.iter() {
         if let NodeOp::Aggregate(AggKind::Adt(def_id)) = op
-            && *def_id == target_def_id {
-                let upperbound_edge = &graph.edges[node.in_edges[1]]; // the second field
-                return Some(upperbound_edge.src);
-            }
+            && *def_id == target_def_id
+        {
+            let upperbound_edge = &graph.edges[node.in_edges[1]]; // the second field
+            return Some(upperbound_edge.src);
+        }
     }
     None
 }
@@ -224,9 +214,9 @@ fn find_upside_len_node(graph: &Graph, node_idx: Local) -> Option<Local> {
                 if let NodeOp::Call(def_id) = op
                     && (*def_id == def_paths.vec_len.last_def_id()
                         || *def_id == def_paths.slice_len.last_def_id())
-                    {
-                        return true;
-                    }
+                {
+                    return true;
+                }
             }
             false
         },
@@ -245,9 +235,9 @@ fn find_downside_index_node(graph: &Graph, node_idx: Local) -> Vec<Local> {
                 if let NodeOp::Call(def_id) = op
                     && (*def_id == def_paths.ops_index.last_def_id()
                         || *def_id == def_paths.ops_index_mut.last_def_id())
-                    {
-                        return true;
-                    }
+                {
+                    return true;
+                }
             }
             false
         },
@@ -258,11 +248,13 @@ fn find_downside_index_node(graph: &Graph, node_idx: Local) -> Vec<Local> {
 fn report_upperbound_bug(graph: &Graph, upperbound_node_idx: Local, index_record: &Vec<Local>) {
     let upperbound_span = graph.nodes[upperbound_node_idx].span;
     let mut report = OptReport::from_graph(graph)
-        .title("Unnecessary bounds checkings detected")
-        .annotate(Level::Info, upperbound_span, "Index is upperbounded.");
+        .title("Bounds-check optimization candidate")
+        .annotate(Level::Info, upperbound_span, "Related length bound.");
     for node_idx in index_record {
         let index_span = graph.nodes[*node_idx].span;
         report = report.annotate(Level::Error, index_span, "Checked here.");
     }
-    report.footer("Use unsafe APIs instead.").emit();
+    report
+        .footer("Prefer iterator-based traversal where possible. This pattern does not prove unchecked indexing safe; verify index, length and mutation invariants and inspect optimized code.")
+        .emit();
 }

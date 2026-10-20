@@ -1,105 +1,94 @@
-pub mod array_encoding;
-pub mod string_lowercase;
-pub mod string_push;
-pub mod vec_encoding;
-
-use crate::{analysis::dataflow::*, check::opt::OptCheck};
-
 use annotate_snippets::Level;
-
-use crate::check::opt::report::OptReport;
-
-use rustc_middle::{mir::Local, ty::TyCtxt};
+use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
 
-use array_encoding::ArrayEncodingCheck;
-use string_lowercase::StringLowercaseCheck;
-use string_push::StringPushCheck;
-use vec_encoding::VecEncodingCheck;
+use crate::{
+    analysis::dataflow::Graph,
+    check::opt::{
+        OptCheck,
+        evidence::{ByteEvidence, ByteFact, direct_call},
+        report::OptReport,
+    },
+};
+
+// Keep candidate recognition separate from the proof of the API precondition.
+crate::def_paths! {
+    str_from_utf8: "std::str::from_utf8",
+    string_from_utf8: "std::string::String::from_utf8",
+    string_from_utf8_lossy: "std::string::String::from_utf8_lossy",
+    to_lowercase: "str::to_lowercase",
+}
 
 pub struct EncodingCheck {
-    vec_encoding: VecEncodingCheck,
-    array_encoding: ArrayEncodingCheck,
-    string_push: StringPushCheck,
-    string_lowercase: StringLowercaseCheck,
+    record: Vec<(Span, ByteFact, bool)>,
 }
 
 impl OptCheck for EncodingCheck {
     fn new() -> Self {
-        Self {
-            vec_encoding: VecEncodingCheck::new(),
-            array_encoding: ArrayEncodingCheck::new(),
-            string_push: StringPushCheck::new(),
-            string_lowercase: StringLowercaseCheck::new(),
-        }
+        Self { record: Vec::new() }
     }
 
     fn check(&mut self, graph: &Graph, tcx: &TyCtxt) {
-        self.vec_encoding.check(graph, tcx);
-        self.array_encoding.check(graph, tcx);
-        self.string_push.check(graph, tcx);
-        self.string_lowercase.check(graph, tcx);
+        let paths = DEFPATHS.get_or_init(|| DefPaths::new(tcx));
+        let body = tcx.optimized_mir(graph.def_id);
+        let mut evidence = None;
+        for block in body.basic_blocks.iter() {
+            let Some((id, args, span)) = direct_call(*tcx, body, block) else {
+                continue;
+            };
+            let lowercase = id == paths.to_lowercase.last_def_id();
+            if !lowercase
+                && ![
+                    paths.str_from_utf8.last_def_id(),
+                    paths.string_from_utf8.last_def_id(),
+                    paths.string_from_utf8_lossy.last_def_id(),
+                ]
+                .contains(&id)
+            {
+                continue;
+            }
+            let Some(arg) = args.first() else {
+                continue;
+            };
+            let evidence =
+                evidence.get_or_insert_with(|| ByteEvidence::new(*tcx, graph.def_id, body));
+            let fact = evidence.operand(&arg.node);
+            if (lowercase && fact == ByteFact::Ascii) || (!lowercase && fact.valid_utf8()) {
+                self.record.push((span, fact, lowercase));
+            }
+        }
     }
 
     fn report(&self, graph: &Graph) {
-        self.vec_encoding.report(graph);
-        self.array_encoding.report(graph);
-        self.string_push.report(graph);
-        self.string_lowercase.report(graph);
+        for &(span, fact, lowercase) in &self.record {
+            let (title, help) = if lowercase {
+                (
+                    "ASCII lowercase opportunity",
+                    "The receiver is proven ASCII. Consider to_ascii_lowercase; measure the release-build benefit.",
+                )
+            } else {
+                (
+                    "Redundant UTF-8 validation candidate",
+                    "Prefer reusing the original str or a string literal. Preserve the Result/Cow contract; measure the release-build benefit before considering an unchecked conversion.",
+                )
+            };
+            OptReport::from_graph(graph)
+                .title(title)
+                .annotate(
+                    Level::Info,
+                    span,
+                    if fact == ByteFact::Ascii {
+                        "Evidence: all input bytes are ASCII."
+                    } else {
+                        "Evidence: the complete input is valid UTF-8."
+                    },
+                )
+                .footer(help)
+                .emit();
+        }
     }
 
     fn cnt(&self) -> usize {
-        self.vec_encoding.cnt()
-            + self.array_encoding.cnt()
-            + self.string_lowercase.cnt()
-            + self.string_push.cnt()
+        self.record.len()
     }
-}
-
-fn report_encoding_bug(graph: &Graph, span: Span) {
-    OptReport::from_graph(graph)
-        .title("Unnecessary encoding checkings detected")
-        .annotate(Level::Error, span, "Checked here.")
-        .footer("Use unsafe APIs.")
-        .emit();
-}
-
-fn value_is_from_const(graph: &Graph, value_idx: Local) -> bool {
-    let mut edge_validator = |graph: &Graph, idx: EdgeIdx| {
-        let edge = &graph.edges[idx];
-        let dst_node = &graph.nodes[edge.dst];
-        let same_seq_edge_cnt = dst_node
-            .in_edges
-            .iter()
-            .filter(|edge_idx| graph.edges[**edge_idx].seq == edge.seq)
-            .count();
-        match same_seq_edge_cnt {
-            1 => Graph::always_true_edge_validator(graph, idx),
-            2 => {
-                if let EdgeOp::Index = edge.op {
-                    DFSStatus::Continue
-                } else {
-                    DFSStatus::Stop
-                }
-            }
-            _ => DFSStatus::Stop,
-        }
-    };
-    graph
-        .find_first_node(
-            value_idx,
-            Direction::Upside,
-            &mut |graph: &Graph, idx: Local| {
-                let node = &graph.nodes[idx];
-                node.ops.iter().any(|op| {
-                    if let NodeOp::Const(_, src_ty) = op {
-                        src_ty.contains("u8")
-                    } else {
-                        false
-                    }
-                })
-            },
-            &mut edge_validator,
-        )
-        .is_some()
 }
