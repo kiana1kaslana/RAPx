@@ -82,7 +82,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
     ED!(api_classify::is_checked_next_pow2, eff_return_option_some_nonzero),
-    ED!(api_classify::is_unwrap, eff_alias_arg0),
     // Pointer arithmetic: direction × granularity.
     ED!(api_classify::is_element_ptr_add, eff_ptr_add),
     ED!(api_classify::is_element_ptr_sub, eff_ptr_sub),

@@ -1244,38 +1244,6 @@ intrinsics! {
         "std::ptr::non_null::NonNull::<T>::byte_offset",
         "core::ptr::non_null::NonNull::<T>::byte_offset"
     ],
-    option_unwrap: &[
-        "std::option::Option::<T>::unwrap",
-        "core::option::Option::<T>::unwrap"
-    ],
-    option_expect: &[
-        "std::option::Option::<T>::expect",
-        "core::option::Option::<T>::expect"
-    ],
-    option_unwrap_unchecked: &[
-        "std::option::Option::<T>::unwrap_unchecked",
-        "core::option::Option::<T>::unwrap_unchecked"
-    ],
-    result_unwrap: &[
-        "std::result::Result::<T, E>::unwrap",
-        "core::result::Result::<T, E>::unwrap"
-    ],
-    result_unwrap_err: &[
-        "std::result::Result::<T, E>::unwrap_err",
-        "core::result::Result::<T, E>::unwrap_err"
-    ],
-    result_expect: &[
-        "std::result::Result::<T, E>::expect",
-        "core::result::Result::<T, E>::expect"
-    ],
-    result_expect_err: &[
-        "std::result::Result::<T, E>::expect_err",
-        "core::result::Result::<T, E>::expect_err"
-    ],
-    result_unwrap_unchecked: &[
-        "std::result::Result::<T, E>::unwrap_unchecked",
-        "core::result::Result::<T, E>::unwrap_unchecked"
-    ],
     cstr_from_ptr: &[
         "std::ffi::CStr::from_ptr",
         "core::ffi::CStr::from_ptr",

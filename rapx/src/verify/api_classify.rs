@@ -384,22 +384,6 @@ pub fn is_len(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::len_fns())
 }
 
-pub fn is_unwrap(callee: Option<DefId>) -> bool {
-    any_opt(
-        callee,
-        &[
-            def_id::option_unwrap(),
-            def_id::option_expect(),
-            def_id::option_unwrap_unchecked(),
-            def_id::result_unwrap(),
-            def_id::result_unwrap_err(),
-            def_id::result_expect(),
-            def_id::result_expect_err(),
-            def_id::result_unwrap_unchecked(),
-        ],
-    )
-}
-
 // ── Slice / C-string ──────────────────────────────────────────────
 
 /// Whether `callee` is a `from_raw_parts` constructor (`slice`/`str`/`ptr`/
