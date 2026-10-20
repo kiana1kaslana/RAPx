@@ -86,14 +86,6 @@ pub(crate) enum CallEffect {
     ReturnMin { lhs_arg: usize, rhs_arg: usize },
     /// The return value is `max(lhs_arg, rhs_arg)`.
     ReturnMax { lhs_arg: usize, rhs_arg: usize },
-    /// The return value is `clamp(value_arg, min_arg, max_arg)`.
-    ReturnClamp {
-        value_arg: usize,
-        min_arg: usize,
-        max_arg: usize,
-    },
-    /// The return value is the absolute value of `arg` (`ite(arg >= 0, arg, -arg)`).
-    ReturnAbs { arg: usize },
     /// The return value is `lhs_arg + rhs_arg`.
     ReturnAdd { lhs_arg: usize, rhs_arg: usize },
     /// The return value is `lhs_arg - rhs_arg`.

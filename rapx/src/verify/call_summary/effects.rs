@@ -80,9 +80,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
     // Non-zero-preserving integer ops discharge `!= 0` conditionally.
-    ED!(api_classify::is_max, eff_return_max),
-    ED!(api_classify::is_clamp, eff_return_clamp),
-    ED!(api_classify::is_abs, eff_return_abs),
+    ED!(api_classify::is_intrinsic_integer_max, eff_return_max),
     ED!(
         api_classify::is_intrinsic_wrapping_sub,
         eff_return_sub
@@ -93,6 +91,7 @@ static REGISTRY: &[Entry] = &[
     ),
     ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
     ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
+    ED!(api_classify::is_intrinsic_saturating_sub, eff_return_sub),
     ED!(api_classify::is_unwrap, eff_alias_arg0),
     // Pointer arithmetic: direction × granularity.
     ED!(api_classify::is_element_ptr_add, eff_ptr_add),
@@ -102,7 +101,7 @@ static REGISTRY: &[Entry] = &[
     // Raw-pointer `cast` is excluded (`is_as_ptr_valid`) — left to inlining.
     ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
-    ED!(api_classify::is_min_like, eff_cmp_min),
+    ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
     ED!(api_classify::is_bit_preserving_nz, eff_return_nonzero_iff),
     ED!(
         api_classify::is_checked_next_pow2,
@@ -307,18 +306,6 @@ fn eff_return_max(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
         lhs_arg: 0,
         rhs_arg: 1,
     }]
-}
-
-fn eff_return_clamp(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnClamp {
-        value_arg: 0,
-        min_arg: 1,
-        max_arg: 2,
-    }]
-}
-
-fn eff_return_abs(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnAbs { arg: 0 }]
 }
 
 fn eff_return_add(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

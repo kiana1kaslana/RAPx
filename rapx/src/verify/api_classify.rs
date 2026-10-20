@@ -705,17 +705,14 @@ pub fn is_std_ordering(def_id: DefId) -> bool {
 // These were previously name-based in the call-summary registry; see
 // [`crate::def_id`] for the exact method-name patterns each group collects.
 
-pub fn is_min_like(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::min_like_fns())
+pub fn is_intrinsic_integer_min(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_integer_min()])
 }
-pub fn is_max(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::max_fns())
+pub fn is_intrinsic_integer_max(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_integer_max()])
 }
-pub fn is_clamp(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::clamp_fns())
-}
-pub fn is_abs(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::abs_fns())
+pub fn is_intrinsic_saturating_sub(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_saturating_sub()])
 }
 pub fn is_intrinsic_saturating_add(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_saturating_add()])

@@ -440,19 +440,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// Apply a unary numeric effect: compute `f(a.z3_term)` and store it as the
     /// destination's fresh scalar value.
-    fn apply_unary_num(
-        &mut self,
-        dest: Local,
-        args: &[VmValue<'z3, 'tcx>],
-        arg: usize,
-        f: impl Fn(&Int<'z3>) -> Int<'z3>,
-    ) {
-        if let Some(a) = args.get(arg) {
-            let dest_ty = self.body().local_decls[dest].ty;
-            self.set_local(dest, VmValue::new(f(&a.z3_term), dest_ty));
-        }
-    }
-
     /// Apply a single call effect to the VM state.
     pub(crate) fn apply_call_effect(
         &mut self,
@@ -1094,29 +1081,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             CallEffect::ReturnMax { lhs_arg, rhs_arg } => {
                 self.apply_binary_num(dest, args, *lhs_arg, *rhs_arg, |lhs, rhs| {
                     lhs.ge(rhs).ite(lhs, rhs)
-                });
-            }
-            CallEffect::ReturnClamp {
-                value_arg,
-                min_arg,
-                max_arg,
-            } => {
-                if let (Some(v), Some(mn), Some(mx)) =
-                    (args.get(*value_arg), args.get(*min_arg), args.get(*max_arg))
-                {
-                    let dest_ty = self.body().local_decls[dest].ty;
-                    // clamp(v, mn, mx) = max(mn, min(v, mx))
-                    let upper = v.z3_term.gt(&mx.z3_term).ite(&mx.z3_term, &v.z3_term);
-                    let term = v.z3_term.lt(&mn.z3_term).ite(&mn.z3_term, &upper);
-                    let val = VmValue::new(term, dest_ty);
-                    self.set_local(dest, val);
-                }
-            }
-            CallEffect::ReturnAbs { arg } => {
-                self.apply_unary_num(dest, args, *arg, |a| {
-                    let zero = Int::from_u64(self.z3_ctx, 0);
-                    let neg = Int::sub(self.z3_ctx, &[&zero, a]);
-                    a.ge(&zero).ite(a, &neg)
                 });
             }
             CallEffect::ReturnAdd { lhs_arg, rhs_arg } => {

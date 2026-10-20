@@ -392,10 +392,6 @@ struct Methods {
     with_capacity_fns: Vec<DefId>,
     box_alloc_ctors: Vec<DefId>,
     vec_ownership_transfer_fns: Vec<DefId>,
-    min_like: Vec<DefId>,
-    max: Vec<DefId>,
-    clamp: Vec<DefId>,
-    abs: Vec<DefId>,
     bit_preserving_nz: Vec<DefId>,
     checked_next_pow2: Vec<DefId>,
     layout_align: Vec<DefId>,
@@ -429,10 +425,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         with_capacity_fns: Vec::new(),
         box_alloc_ctors: Vec::new(),
         vec_ownership_transfer_fns: Vec::new(),
-        min_like: Vec::new(),
-        max: Vec::new(),
-        clamp: Vec::new(),
-        abs: Vec::new(),
         bit_preserving_nz: Vec::new(),
         checked_next_pow2: Vec::new(),
         layout_align: Vec::new(),
@@ -513,33 +505,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                 methods.vec_ownership_transfer_fns.push(did);
             }
 
-            if ((name.contains("::cmp::min") || name.contains("::Ord::min"))
-                && !name.contains("min_by"))
-                || name.ends_with("::midpoint")
-                // Recent nightly lowered `Ord::min`/`Ord::max` for integers to the
-                // `integer_min`/`integer_max` intrinsics (instead of an inline
-                // `if self <= other` branch), so match those here to keep the
-                // `ReturnMin`/`ReturnMax` (ite) modelling working.
-                || name.ends_with("::integer_min")
-            {
-                methods.min_like.push(did);
-            }
-            if (name.contains("::cmp::max") || name.contains("::Ord::max"))
-                && !name.contains("max_by")
-                || name.ends_with("::integer_max")
-            {
-                methods.max.push(did);
-            }
-            if name.ends_with("::clamp") {
-                methods.clamp.push(did);
-            }
-            if name.ends_with("::abs")
-                || name.ends_with("::saturating_abs")
-                || name.ends_with("::wrapping_abs")
-                || name.ends_with("::unsigned_abs")
-            {
-                methods.abs.push(did);
-            }
             if name.contains("::rotate_left")
                 || name.contains("::rotate_right")
                 || name.contains("::swap_bytes")
@@ -733,10 +698,6 @@ fn assoc_self_adt_did(tcx: TyCtxt, def_id: DefId) -> Option<DefId> {
 }
 
 method_fns! {
-    min_like_fns => min_like,
-    max_fns => max,
-    clamp_fns => clamp,
-    abs_fns => abs,
     bit_preserving_nz_fns => bit_preserving_nz,
     checked_next_pow2_fns => checked_next_pow2,
     layout_align_fns => layout_align,
@@ -1029,6 +990,18 @@ intrinsics! {
     intrinsics_wrapping_sub: &[
         "std::intrinsics::wrapping_sub",
         "core::intrinsics::wrapping_sub"
+    ],
+    intrinsics_saturating_sub: &[
+        "std::intrinsics::saturating_sub",
+        "core::intrinsics::saturating_sub"
+    ],
+    intrinsics_integer_min: &[
+        "std::intrinsics::integer_min",
+        "core::intrinsics::integer_min"
+    ],
+    intrinsics_integer_max: &[
+        "std::intrinsics::integer_max",
+        "core::intrinsics::integer_max"
     ],
     assume_init_read: &[
         "std::mem::MaybeUninit::<T>::assume_init_read",
