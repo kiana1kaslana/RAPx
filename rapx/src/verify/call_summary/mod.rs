@@ -202,9 +202,6 @@ pub(crate) enum CallEffect {
     /// length is the range's extent. Modelled as a sub-allocation of the array
     /// so downstream `into_iter`/`next()` see the correct element count.
     ReturnSliceRangeIndex,
-    /// `<[T]>::get(range)` / `::get_mut(range)` returns `Option<&[T]>` whose
-    /// `Some` payload is a sub-slice with the range's extent.
-    ReturnSliceRangeGet,
     /// `Iter::len()` / `Iter::is_empty()` computed from the iterator's pointer
     /// fields (`ptr` + `end_or_len` sharing the same allocation).
     ReturnIterLen { is_len: bool },

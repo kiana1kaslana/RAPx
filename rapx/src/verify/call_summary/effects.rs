@@ -31,49 +31,28 @@ pub(crate) struct EffCtx<'a, 'tcx> {
 struct Entry {
     matches: fn(Option<DefId>) -> bool,
     effects: fn(&EffCtx<'_, '_>) -> Vec<CallEffect>,
-    /// Whether the path graph keeps this call opaque (does not inline its CFG).
-    /// `true` when the VM's effect is strictly more precise than the inlined
-    /// body; `false` for hand-specialized shapes that still need their body
-    /// inlined by the path graph to carry loop/range bounds into downstream
-    /// checkpoints.
-    opaque: bool,
 }
 
-/// `DefId`-based matcher row (`fn(Option<DefId>) -> bool`), opaque to the path
-/// graph (the VM's effect replaces the inlined body).
+/// `DefId`-based matcher row (`fn(Option<DefId>) -> bool`).
 macro_rules! ED {
     ($m:expr, $e:ident) => {
         Entry {
             matches: $m,
             effects: $e,
-            opaque: true,
-        }
-    };
-}
-
-/// Matcher row whose body the path graph still inlines (the VM's effect only
-/// handles execution-time semantics; the inlined CFG carries the bounds).
-macro_rules! ED_INLINE {
-    ($m:expr, $e:ident) => {
-        Entry {
-            matches: $m,
-            effects: $e,
-            opaque: false,
         }
     };
 }
 
 static REGISTRY: &[Entry] = &[
-    // ── Hand-specialized VM shapes (opaque: false) ──────────────────
+    // ── Hand-specialized VM shapes ──────────────────────────────────
     // Listed first so they win over the generic def-path matchers below.
-    ED_INLINE!(api_classify::is_branch, eff_branch),
-    ED_INLINE!(api_classify::is_index_method, eff_slice_range_index),
-    ED_INLINE!(api_classify::is_slice_get, eff_slice_range_get),
+    ED!(api_classify::is_branch, eff_branch),
+    ED!(api_classify::is_index_method, eff_slice_range_index),
     ED!(api_classify::is_iter_len, eff_iter_len),
     ED!(api_classify::is_iter_is_empty, eff_iter_is_empty),
-    ED_INLINE!(api_classify::is_nonnull_checked_new, eff_nonnull_new),
-    ED_INLINE!(api_classify::is_iter_next, eff_iter_next),
-    ED_INLINE!(api_classify::is_range_next, eff_range_next),
+    ED!(api_classify::is_nonnull_checked_new, eff_nonnull_new),
+    ED!(api_classify::is_iter_next, eff_iter_next),
+    ED!(api_classify::is_range_next, eff_range_next),
     ED!(api_classify::is_eq_call, eff_none),
     // ── Intrinsics — no MIR body ────────────────────────────────────
     ED!(api_classify::is_layout_constant, eff_layout_const),
@@ -153,23 +132,17 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_iter_position, eff_option_scan_index),
     ED!(api_classify::is_strlen, eff_scan_length),
     // ── MIR available — deliberately opaque ─────────────────────────
-    // `eff_none` keeps `is_modeled` true so the path graph does not inline.
+    // `eff_none` keeps the call in the registry so the path graph does not inline.
     ED!(api_classify::is_nonnull_new_unchecked, eff_new_unchecked),
     ED!(api_classify::is_maybe_uninit_uninit, eff_none),
     ED!(api_classify::is_maybe_uninit_assume_init, eff_none),
     ED!(api_classify::is_maybe_uninit_write, eff_write_mem),
 ];
 
-/// True when `callee` matches a hand-modelled API in the registry. The path
-/// graph uses this to keep such calls opaque (it must not inline their branchy
-/// CFG when the VM models their semantics more precisely).
-pub(crate) fn is_modeled(callee: Option<DefId>) -> bool {
-    REGISTRY.iter().any(|e| e.opaque && (e.matches)(callee))
-}
-
-/// True when the VM has a symbolic model for `callee` (any registry entry). A
-/// cross-crate trait method matching here stays opaque in the path graph rather
-/// than being resolved to its impl and inlined.
+/// True when the VM has a symbolic model for `callee` (any registry entry). The
+/// path graph uses this to keep such calls opaque rather than inlining their
+/// branchy CFG when the VM models their semantics more precisely; a cross-crate
+/// trait method matching here stays opaque instead of resolving to its impl.
 pub(crate) fn is_symbolically_modeled(callee: Option<DefId>) -> bool {
     REGISTRY.iter().any(|e| (e.matches)(callee))
 }
@@ -494,10 +467,6 @@ fn eff_branch(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 fn eff_slice_range_index(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnSliceRangeIndex]
-}
-
-fn eff_slice_range_get(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnSliceRangeGet]
 }
 
 fn eff_iter_len(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

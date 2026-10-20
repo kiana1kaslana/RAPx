@@ -761,7 +761,7 @@ impl<'tcx> PathGraph<'tcx> {
                     )
                     .is_some_and(|inst| mir_utils::instance_def_id(tcx, inst).1);
                     if is_virtual {
-                        if !crate::verify::call_summary::effects::is_modeled(Some(base_callee)) {
+                        if !crate::verify::call_summary::effects::is_symbolically_modeled(Some(base_callee)) {
                             let candidates = mir_utils::trait_impl_candidates(tcx, base_callee);
                             for cand in candidates.into_iter().take(crate::limit::trait_impl_limit())
                             {
@@ -783,7 +783,7 @@ impl<'tcx> PathGraph<'tcx> {
                     None
                 };
                 let has_fn_sim =
-                    crate::verify::call_summary::effects::is_modeled(Some(callee));
+                    crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee));
                 // Skip cross-crate trait methods with a default body (they call a
                 // further required method whose effect we can't attribute).
                 let cross_crate_trait_method = cross_crate
