@@ -1119,15 +1119,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     a.ge(&zero).ite(a, &neg)
                 });
             }
-            CallEffect::ReturnNeg { arg } => {
-                self.apply_unary_num(dest, args, *arg, |a| {
-                    let zero = Int::from_u64(self.z3_ctx, 0);
-                    Int::sub(self.z3_ctx, &[&zero, a])
-                });
-            }
             CallEffect::ReturnAdd { lhs_arg, rhs_arg } => {
                 self.apply_binary_num(dest, args, *lhs_arg, *rhs_arg, |lhs, rhs| {
                     Int::add(self.z3_ctx, &[lhs, rhs])
+                });
+            }
+            CallEffect::ReturnSub { lhs_arg, rhs_arg } => {
+                self.apply_binary_num(dest, args, *lhs_arg, *rhs_arg, |lhs, rhs| {
+                    Int::sub(self.z3_ctx, &[lhs, rhs])
                 });
             }
             CallEffect::ReturnMul { lhs_arg, rhs_arg } => {

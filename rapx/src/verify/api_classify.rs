@@ -717,9 +717,6 @@ pub fn is_clamp(callee: Option<DefId>) -> bool {
 pub fn is_abs(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::abs_fns())
 }
-pub fn is_neg(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::neg_fns())
-}
 pub fn is_intrinsic_saturating_add(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_saturating_add()])
 }
@@ -728,6 +725,9 @@ pub fn is_intrinsic_unchecked_add(callee: Option<DefId>) -> bool {
 }
 pub fn is_intrinsic_unchecked_mul(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_unchecked_mul()])
+}
+pub fn is_intrinsic_wrapping_sub(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_wrapping_sub()])
 }
 pub fn is_bit_preserving_nz(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::bit_preserving_nz_fns())

@@ -94,10 +94,10 @@ pub(crate) enum CallEffect {
     },
     /// The return value is the absolute value of `arg` (`ite(arg >= 0, arg, -arg)`).
     ReturnAbs { arg: usize },
-    /// The return value is the negation of `arg` (`-arg`).
-    ReturnNeg { arg: usize },
     /// The return value is `lhs_arg + rhs_arg`.
     ReturnAdd { lhs_arg: usize, rhs_arg: usize },
+    /// The return value is `lhs_arg - rhs_arg`.
+    ReturnSub { lhs_arg: usize, rhs_arg: usize },
     /// The return value is `lhs_arg * rhs_arg`.
     ReturnMul { lhs_arg: usize, rhs_arg: usize },
     ReturnWithOverflow {

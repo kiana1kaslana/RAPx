@@ -83,7 +83,10 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_max, eff_return_max),
     ED!(api_classify::is_clamp, eff_return_clamp),
     ED!(api_classify::is_abs, eff_return_abs),
-    ED!(api_classify::is_neg, eff_return_neg),
+    ED!(
+        api_classify::is_intrinsic_wrapping_sub,
+        eff_return_sub
+    ),
     ED!(
         api_classify::is_intrinsic_saturating_add,
         eff_return_add
@@ -318,12 +321,15 @@ fn eff_return_abs(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnAbs { arg: 0 }]
 }
 
-fn eff_return_neg(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnNeg { arg: 0 }]
-}
-
 fn eff_return_add(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnAdd {
+        lhs_arg: 0,
+        rhs_arg: 1,
+    }]
+}
+
+fn eff_return_sub(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnSub {
         lhs_arg: 0,
         rhs_arg: 1,
     }]

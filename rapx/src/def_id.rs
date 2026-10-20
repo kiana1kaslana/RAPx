@@ -396,7 +396,6 @@ struct Methods {
     max: Vec<DefId>,
     clamp: Vec<DefId>,
     abs: Vec<DefId>,
-    neg: Vec<DefId>,
     bit_preserving_nz: Vec<DefId>,
     checked_next_pow2: Vec<DefId>,
     layout_align: Vec<DefId>,
@@ -434,7 +433,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         max: Vec::new(),
         clamp: Vec::new(),
         abs: Vec::new(),
-        neg: Vec::new(),
         bit_preserving_nz: Vec::new(),
         checked_next_pow2: Vec::new(),
         layout_align: Vec::new(),
@@ -541,12 +539,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                 || name.ends_with("::unsigned_abs")
             {
                 methods.abs.push(did);
-            }
-            if name.ends_with("::neg")
-                || name.ends_with("::wrapping_neg")
-                || name.ends_with("::saturating_neg")
-            {
-                methods.neg.push(did);
             }
             if name.contains("::rotate_left")
                 || name.contains("::rotate_right")
@@ -745,7 +737,6 @@ method_fns! {
     max_fns => max,
     clamp_fns => clamp,
     abs_fns => abs,
-    neg_fns => neg,
     bit_preserving_nz_fns => bit_preserving_nz,
     checked_next_pow2_fns => checked_next_pow2,
     layout_align_fns => layout_align,
@@ -1034,6 +1025,10 @@ intrinsics! {
     intrinsics_unchecked_mul: &[
         "std::intrinsics::unchecked_mul",
         "core::intrinsics::unchecked_mul"
+    ],
+    intrinsics_wrapping_sub: &[
+        "std::intrinsics::wrapping_sub",
+        "core::intrinsics::wrapping_sub"
     ],
     assume_init_read: &[
         "std::mem::MaybeUninit::<T>::assume_init_read",
