@@ -379,8 +379,12 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
     // pointer.  Model the wrapper as the pointer field itself (term + provenance
     // + invariants) so downstream checks like `NonNull(node)` / `Align(node, T)`
     // / `Allocated(node, ..)` can discharge against the real pointer instead of
-    // a fresh unconstrained `aggregate` symbol.
-    if operands.len() == 1 && state.find_nn_pointee(dest_ty).is_some() {
+    // a fresh unconstrained `aggregate` symbol.  The same transparent modelling
+    // applies to value newtypes (`MaybeUninit<T>`, `ManuallyDrop<T>`) so that
+    // `MaybeUninit::new(x).assume_init()` round-trips back to `x`.
+    if operands.len() == 1
+        && (state.find_nn_pointee(dest_ty).is_some() || state.is_transparent_newtype(dest_ty))
+    {
         let field_val = state.value_of_operand(operands.iter().next().unwrap());
         let dest_local = dest_place.local;
         state.set_field_value(dest_local, vec![0], field_val.clone());

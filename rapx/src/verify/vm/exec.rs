@@ -3390,6 +3390,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
+    /// Whether `ty` is a `#[repr(transparent)]` newtype (a single non-zero-sized
+    /// field whose value *is* that field, e.g. `MaybeUninit<T>`, `ManuallyDrop<T>`,
+    /// `Wrapping<T>`, `NonNull<T>`).  Construction and field reads are modelled
+    /// transparently: the wrapper value is the field value itself.
+    pub(crate) fn is_transparent_newtype(&self, ty: Ty<'tcx>) -> bool {
+        match ty.kind() {
+            rustc_middle::ty::TyKind::Adt(adt_def, _) => adt_def.repr().transparent(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn container_ptr_field(&self, ty: Ty<'tcx>) -> Option<Vec<usize>> {
         self.container_ptr_field_inner(ty, Vec::new(), 0)
     }

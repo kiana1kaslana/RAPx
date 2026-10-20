@@ -56,7 +56,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_eq_call, eff_none),
     // ── Intrinsics — no MIR body ────────────────────────────────────
     ED!(api_classify::is_layout_constant, eff_layout_const),
-    ED!(api_classify::is_select_unpredictable, eff_select_unpredictable),
+    ED!(api_classify::is_intrinsic_select_unpredictable, eff_select_unpredictable),
     ED!(api_classify::is_intrinsic_branch_hint, eff_alias_arg0),
     ED!(api_classify::is_intrinsic_ptr_offset_from, eff_ptr_offset_from),
     ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
@@ -113,7 +113,10 @@ static REGISTRY: &[Entry] = &[
     // `eff_none` keeps the call in the registry so the path graph does not inline.
     ED!(api_classify::is_nonnull_new_unchecked, eff_new_unchecked),
     ED!(api_classify::is_maybe_uninit_uninit, eff_none),
-    ED!(api_classify::is_maybe_uninit_assume_init, eff_none),
+    ED!(
+        api_classify::is_maybe_uninit_assume_init,
+        eff_return_arg_value
+    ),
     ED!(api_classify::is_maybe_uninit_write, eff_write_mem),
 ];
 
@@ -151,6 +154,10 @@ pub(crate) fn lookup_effect<'tcx>(
 
 fn eff_none(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     Vec::new()
+}
+
+fn eff_return_arg_value(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnArgValue { arg: 0 }]
 }
 
 fn eff_select_unpredictable(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

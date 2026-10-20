@@ -467,6 +467,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.set_dest_as_heap_ptr(arg_val, dest);
                 }
             }
+            CallEffect::ReturnArgValue { arg } => {
+                if let Some(arg_val) = args.get(*arg) {
+                    let mut val = arg_val.clone();
+                    val.ty = self.body().local_decls[dest].ty;
+                    val.facts.init = true;
+                    self.set_local(dest, val);
+                }
+            }
             CallEffect::SelectUnpredictable => {
                 if args.len() >= 3 {
                     let term = self.fresh_int(&format!("selunpred_{}", dest.as_usize()));

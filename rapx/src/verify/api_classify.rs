@@ -515,16 +515,10 @@ pub fn is_nonnull_as_mut(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::nonnull_as_mut()])
 }
 
-/// Whether `callee` is `select_unpredictable` (the intrinsic or its
-/// `hint::`/`intrinsics::` wrappers): returns one of two candidate values.
-pub(crate) fn is_select_unpredictable(callee: Option<DefId>) -> bool {
-    any_opt(
-        callee,
-        &[
-            def_id::select_unpredictable(),
-            def_id::hint_select_unpredictable(),
-        ],
-    )
+/// Whether `callee` is the `intrinsics::select_unpredictable` intrinsic:
+/// returns one of two candidate values (the `hint::` wrapper inlines to it).
+pub(crate) fn is_intrinsic_select_unpredictable(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::select_unpredictable()])
 }
 
 pub(crate) fn is_intrinsic_branch_hint(callee: Option<DefId>) -> bool {

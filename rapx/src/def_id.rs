@@ -885,10 +885,6 @@ intrinsics! {
         "std::mem::take",
         "core::mem::take"
     ],
-    hint_select_unpredictable: &[
-        "std::hint::select_unpredictable",
-        "core::hint::select_unpredictable"
-    ],
     ptr_read: &[
         "std::ptr::read",
         "core::ptr::read"

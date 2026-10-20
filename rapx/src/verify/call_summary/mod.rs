@@ -39,6 +39,10 @@ pub(crate) type CallEffectSummary = Vec<CallEffect>;
 pub(crate) enum CallEffect {
     /// The return value aliases or is a direct value flow from an argument.
     ReturnAliasArg { arg: usize },
+    /// The return value is a transparent copy of an argument's *value*
+    /// (`MaybeUninit::assume_init`, `ManuallyDrop::into_inner`): same term and
+    /// facts, retyped to the destination — no pointer `non_null` forcing.
+    ReturnArgValue { arg: usize },
     /// `select_unpredictable(cond, x, y)` returns either `x` or `y`: the result
     /// is one of the two candidate values (`args[1]`/`args[2]`), non-deterministic
     /// since the boolean selector (`args[0]`) is unpredictable.
