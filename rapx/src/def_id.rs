@@ -397,8 +397,6 @@ struct Methods {
     clamp: Vec<DefId>,
     abs: Vec<DefId>,
     neg: Vec<DefId>,
-    sat_unchecked_add: Vec<DefId>,
-    sat_unchecked_mul: Vec<DefId>,
     bit_preserving_nz: Vec<DefId>,
     checked_next_pow2: Vec<DefId>,
     layout_align: Vec<DefId>,
@@ -437,8 +435,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         clamp: Vec::new(),
         abs: Vec::new(),
         neg: Vec::new(),
-        sat_unchecked_add: Vec::new(),
-        sat_unchecked_mul: Vec::new(),
         bit_preserving_nz: Vec::new(),
         checked_next_pow2: Vec::new(),
         layout_align: Vec::new(),
@@ -551,12 +547,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                 || name.ends_with("::saturating_neg")
             {
                 methods.neg.push(did);
-            }
-            if name.ends_with("::saturating_add") || name.ends_with("::unchecked_add") {
-                methods.sat_unchecked_add.push(did);
-            }
-            if name.ends_with("::saturating_mul") || name.ends_with("::unchecked_mul") {
-                methods.sat_unchecked_mul.push(did);
             }
             if name.contains("::rotate_left")
                 || name.contains("::rotate_right")
@@ -756,8 +746,6 @@ method_fns! {
     clamp_fns => clamp,
     abs_fns => abs,
     neg_fns => neg,
-    sat_unchecked_add_fns => sat_unchecked_add,
-    sat_unchecked_mul_fns => sat_unchecked_mul,
     bit_preserving_nz_fns => bit_preserving_nz,
     checked_next_pow2_fns => checked_next_pow2,
     layout_align_fns => layout_align,
@@ -1034,6 +1022,18 @@ intrinsics! {
     intrinsics_mul_with_overflow: &[
         "std::intrinsics::mul_with_overflow",
         "core::intrinsics::mul_with_overflow"
+    ],
+    intrinsics_saturating_add: &[
+        "std::intrinsics::saturating_add",
+        "core::intrinsics::saturating_add"
+    ],
+    intrinsics_unchecked_add: &[
+        "std::intrinsics::unchecked_add",
+        "core::intrinsics::unchecked_add"
+    ],
+    intrinsics_unchecked_mul: &[
+        "std::intrinsics::unchecked_mul",
+        "core::intrinsics::unchecked_mul"
     ],
     assume_init_read: &[
         "std::mem::MaybeUninit::<T>::assume_init_read",

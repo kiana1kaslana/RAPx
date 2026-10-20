@@ -720,11 +720,14 @@ pub fn is_abs(callee: Option<DefId>) -> bool {
 pub fn is_neg(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::neg_fns())
 }
-pub fn is_sat_unchecked_add(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::sat_unchecked_add_fns())
+pub fn is_intrinsic_saturating_add(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_saturating_add()])
 }
-pub fn is_sat_unchecked_mul(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::sat_unchecked_mul_fns())
+pub fn is_intrinsic_unchecked_add(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_unchecked_add()])
+}
+pub fn is_intrinsic_unchecked_mul(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_unchecked_mul()])
 }
 pub fn is_bit_preserving_nz(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::bit_preserving_nz_fns())

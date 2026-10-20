@@ -84,8 +84,12 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_clamp, eff_return_clamp),
     ED!(api_classify::is_abs, eff_return_abs),
     ED!(api_classify::is_neg, eff_return_neg),
-    ED!(api_classify::is_sat_unchecked_add, eff_return_add),
-    ED!(api_classify::is_sat_unchecked_mul, eff_return_mul),
+    ED!(
+        api_classify::is_intrinsic_saturating_add,
+        eff_return_add
+    ),
+    ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
+    ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
     ED!(api_classify::is_unwrap, eff_alias_arg0),
     // Pointer arithmetic: direction × granularity.
     ED!(api_classify::is_element_ptr_add, eff_ptr_add),
