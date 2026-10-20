@@ -1105,9 +1105,18 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             solver.assert(&value.z3_term._eq(&zero).not());
         }
         if let Some(ref prov) = value.provenance {
-            let alloc = self.alloc(prov.alloc_id);
-            let expected = Int::add(self.z3_ctx, &[&alloc.base, &prov.offset]);
-            solver.assert(&value.z3_term._eq(&expected));
+            let is_scalar = matches!(
+                value.ty.kind(),
+                rustc_middle::ty::TyKind::Uint(_)
+                    | rustc_middle::ty::TyKind::Int(_)
+                    | rustc_middle::ty::TyKind::Bool
+                    | rustc_middle::ty::TyKind::Char
+            );
+            if !is_scalar {
+                let alloc = self.alloc(prov.alloc_id);
+                let expected = Int::add(self.z3_ctx, &[&alloc.base, &prov.offset]);
+                solver.assert(&value.z3_term._eq(&expected));
+            }
         }
         if matches!(
             value.ty.kind(),
@@ -1275,6 +1284,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             if let Some(val) = self.field_value(place.local, &field_path).cloned() {
                 return Some(val);
             }
+            if let Some(base_val) = self.local_value(place.local)
+                && self.is_len_field_read(base_val.ty, &field_path)
+                && let Some(len) = self.len_from_value(base_val)
+            {
+                return Some(VmValue::new(len, place_ty));
+            }
             if !has_downcast {
                 // Fallback: when the base local has provenance, propagate it
                 // to field accesses. This handles pointer-wrapper types (Box,
@@ -1337,6 +1352,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             return Some(val);
                         }
                     }
+                if let Some(base_val) = self.local_value(place.local)
+                    && self.is_len_field_read(base_val.ty, &field_path)
+                    && let Some(len) = self.len_from_value(base_val)
+                {
+                    return Some(VmValue::new(len, place_ty));
+                }
             }
         }
 
@@ -1447,6 +1468,32 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let mut val = base;
         val.ty = place_ty;
         Some(val)
+    }
+
+    /// Whether `field_path` selects a length field.
+    fn is_len_field_read(&self, ty: Ty<'tcx>, field_path: &[usize]) -> bool {
+        if field_path.len() != 1 {
+            return false;
+        }
+        let field = field_path[0];
+        let adt = match ty.kind() {
+            rustc_middle::ty::TyKind::Ref(_, inner, _)
+            | rustc_middle::ty::TyKind::RawPtr(inner, _) => match inner.kind() {
+                rustc_middle::ty::TyKind::Slice(_) | rustc_middle::ty::TyKind::Str => {
+                    return field == 1;
+                }
+                rustc_middle::ty::TyKind::Adt(adt_def, _) => *adt_def,
+                _ => return false,
+            },
+            rustc_middle::ty::TyKind::Adt(adt_def, _) => *adt_def,
+            _ => return false,
+        };
+        adt.is_struct()
+            && adt
+                .non_enum_variant()
+                .fields
+                .get(rustc_abi::FieldIdx::from_usize(field))
+                .is_some_and(|f| f.name.as_str() == "len")
     }
 
     /// Create an unknown value for a place.

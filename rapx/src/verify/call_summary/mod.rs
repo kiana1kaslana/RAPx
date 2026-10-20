@@ -64,6 +64,7 @@ pub(crate) enum CallEffect {
         offset_arg: usize,
         stride: Option<u64>,
     },
+    ReturnPtrOffsetFrom { ptr_arg: usize, base_arg: usize },
     /// The return value is known to be non-zero.
     ReturnNonZero,
     /// The return value is known to satisfy a concrete alignment.
@@ -83,8 +84,6 @@ pub(crate) enum CallEffect {
     /// `alloc::alloc::exchange_malloc(size, align)` — a fresh allocation of
     /// `size_arg` bytes, returned as `*mut u8`.
     ReturnExchangeMalloc { size_arg: usize },
-    /// The return value is the length of an aggregate argument.
-    ReturnLengthOfArg { arg: usize },
     /// The return value is `min(lhs_arg, rhs_arg)`, satisfying
     /// `return <= lhs_arg` and `return <= rhs_arg`.
     ReturnMin { lhs_arg: usize, rhs_arg: usize },

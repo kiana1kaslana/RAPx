@@ -251,6 +251,21 @@ pub fn is_pointer_sub(callee: Option<DefId>) -> bool {
     is_element_ptr_sub(callee) || is_byte_ptr_sub(callee)
 }
 
+pub fn is_ptr_offset_from(callee: Option<DefId>) -> bool {
+    any_opt(
+        callee,
+        &[
+            def_id::const_ptr_offset_from(),
+            def_id::const_ptr_offset_from_unsigned(),
+            def_id::mut_ptr_offset_from(),
+            def_id::mut_ptr_offset_from_unsigned(),
+            def_id::nonnull_offset_from(),
+            def_id::intrinsics_ptr_offset_from(),
+            def_id::intrinsics_ptr_offset_from_unsigned(),
+        ],
+    )
+}
+
 // ── Layout constants ──────────────────────────────────────────────
 
 /// Whether `callee` is the compile-time layout constant `size_of::<T>()` or
@@ -372,11 +387,6 @@ pub fn is_mem_copy_or_write(callee: Option<DefId>) -> bool {
 /// `len` methods are modelled too, without substring-matching a `def_path_str`.
 pub fn is_len(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::len_fns())
-}
-
-/// Whether `callee` is a `capacity` query method.
-pub fn is_capacity(callee: Option<DefId>) -> bool {
-    any_def(callee, def_id::capacity_fns())
 }
 
 pub fn is_unwrap(callee: Option<DefId>) -> bool {

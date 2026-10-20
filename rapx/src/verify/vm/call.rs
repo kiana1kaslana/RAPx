@@ -963,6 +963,27 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.set_local(dest, val);
                 }
             }
+            CallEffect::ReturnPtrOffsetFrom { ptr_arg, base_arg } => {
+                let dest_ty = self.body().local_decls[dest].ty;
+                let ptr = args.get(*ptr_arg).cloned();
+                let base = args.get(*base_arg).cloned();
+                let count = match (ptr.as_ref(), base.as_ref()) {
+                    (Some(p), Some(b)) => self.iter_remaining_len_from_ptrs(b, p).unwrap_or_else(
+                        || self.fresh_int(&format!("ptr_offset_from_{}", dest.as_usize())),
+                    ),
+                    _ => self.fresh_int(&format!("ptr_offset_from_{}", dest.as_usize())),
+                };
+                self.set_local(
+                    dest,
+                    VmValue {
+                        z3_term: count,
+                        ty: dest_ty,
+                        provenance: None,
+                        facts: ValueFacts::default(),
+                        source: ValueSource::None,
+                    },
+                );
+            }
             CallEffect::ReturnNonZero => {
                 let zero = Int::from_u64(self.z3_ctx, 0);
                 if let Some(mut existing) = self.local_value(dest).cloned() {
@@ -1048,26 +1069,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         },
                     );
                 }
-            }
-            CallEffect::ReturnLengthOfArg { arg } => {
-                if let Some(arg_val) = args.get(*arg) {
-                    // For Iter / IterMut, compute len from struct fields
-                    // (ptr + end_or_len with shared allocation) instead of
-                    // the generic sizeof(Iter)/sizeof(T) heuristic.
-                    if self.interpreter_iter_len(arg_val, dest) {
-                        return;
-                    }
-                }
-                // Field-read `len` (e.g. `Vec::len`): fall back to
-                // `size / elem_size` (slices, `&str`, and legacy Vec values).
-                if let Some(arg_val) = args.get(*arg)
-                    && self.set_len_from_alloc(arg_val, dest) {
-                        return;
-                    }
-                let dest_ty = self.body().local_decls[dest].ty;
-                let term = self.fresh_int(&format!("len_{}", dest.as_usize()));
-                let val = VmValue::new(term, dest_ty);
-                self.set_local(dest, val);
             }
             CallEffect::ReturnConst { value } => {
                 let dest_ty = self.body().local_decls[dest].ty;
@@ -2411,6 +2412,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     pub(crate) fn iter_elem_size(&self, ptr: &VmValue<'z3, 'tcx>) -> Int<'z3> {
         let elem_ty = match ptr.ty.kind() {
             TyKind::Adt(_, substs) => substs.first().and_then(|s| s.as_type()),
+            TyKind::RawPtr(ty, _) | TyKind::Ref(_, ty, _) => Some(*ty),
             _ => None,
         };
         match elem_ty {
@@ -2471,28 +2473,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         } else {
             self.iter_len_from_ptrs(ptr, end)
         }
-    }
-
-    /// Remaining element count of the Iter/IterMut backed by `local`
-    /// (fields `[0]` = ptr, `[1]` = end_or_len).
-    fn iter_remaining_len(&self, local: Local) -> Option<Int<'z3>> {
-        let (ptr, end) = self.iter_ptr_end(local)?;
-        self.iter_remaining_len_from_ptrs(&ptr, &end)
-    }
-
-    /// For Iter/IterMut types, compute len from struct fields directly
-    /// instead of the generic allocation-size heuristic. Returns true
-    /// if handled (value set to dest).
-    fn interpreter_iter_len(&mut self, arg_val: &VmValue<'z3, 'tcx>, dest: Local) -> bool {
-        let Some(l) = self.find_iter_self_local(arg_val) else {
-            return false;
-        };
-        let Some(len_term) = self.iter_remaining_len(l) else {
-            return false;
-        };
-        let dest_ty = self.body().local_decls[dest].ty;
-        self.set_local(dest, VmValue::new(len_term, dest_ty));
-        true
     }
 
     /// Find the local whose symbolic address matches `term` (the address a
@@ -2630,43 +2610,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             },
             _ => None,
         }
-    }
-
-    /// Derive an element count from the backing allocation (`size / elem_size`).
-    /// Used by `ReturnLengthOfArg` (slices, `&str`, and Vec values whose
-    /// `{buf{ptr,cap}, len}` field was not materialized). Returns true when a
-    /// value was produced.
-    fn set_len_from_alloc(&mut self, arg_val: &VmValue<'z3, 'tcx>, dest: Local) -> bool {
-        let effective_alloc_id = arg_val
-            .provenance_alloc_id()
-            .and_then(|pid| self.data_alloc_of(pid, arg_val.ty))
-            .or_else(|| arg_val.provenance_alloc_id());
-        let Some(alloc_id) = effective_alloc_id else {
-            return false;
-        };
-        let dest_ty = self.body().local_decls[dest].ty;
-        // Prefer the materialized slice length.
-        if let Some(len) = self.alloc(alloc_id).slice_len().cloned() {
-            let val = VmValue::new(len, dest_ty);
-            self.set_local(dest, val);
-            return true;
-        }
-        if let Some(elem_ty) = self.alloc(alloc_id).element_ty.as_ty() {
-            let elem_term = self.size_sym_read(elem_ty);
-            let size = self.allocation_size(alloc_id);
-            if elem_term.simplify().as_u64() == Some(1) {
-                let val = VmValue::new(size.clone(), dest_ty);
-                self.set_local(dest, val);
-                return true;
-            }
-            let val = VmValue::new(size.div(&elem_term), dest_ty);
-            self.set_local(dest, val);
-            return true;
-        }
-        let size = self.allocation_size(alloc_id);
-        let val = VmValue::new(size.clone(), dest_ty);
-        self.set_local(dest, val);
-        true
     }
 
     /// Apply a `ReturnRange` effect: model `slice::range(range, bounds)`

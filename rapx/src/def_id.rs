@@ -387,7 +387,6 @@ static METHODS: OnceLock<Methods> = OnceLock::new();
 
 struct Methods {
     len_fns: Vec<DefId>,
-    capacity_fns: Vec<DefId>,
     from_raw_parts_fns: Vec<DefId>,
     from_raw_parts_mut_fns: Vec<DefId>,
     with_capacity_fns: Vec<DefId>,
@@ -432,7 +431,6 @@ struct Methods {
 fn init_methods(tcx: TyCtxt) -> Methods {
     let mut methods = Methods {
         len_fns: Vec::new(),
-        capacity_fns: Vec::new(),
         from_raw_parts_fns: Vec::new(),
         from_raw_parts_mut_fns: Vec::new(),
         with_capacity_fns: Vec::new(),
@@ -503,9 +501,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
 
             if name.ends_with("::len") {
                 methods.len_fns.push(did);
-            }
-            if name.ends_with("::capacity") {
-                methods.capacity_fns.push(did);
             }
             if name.ends_with("::from_raw_parts") || name.ends_with("::from_raw_parts_mut") {
                 methods.from_raw_parts_fns.push(did);
@@ -672,7 +667,11 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             // `Iter::len` / `IterMut::len` (the slice-iterator length query,
             // computed from the ptr/end_or_len fields).
             if name.ends_with("::len")
-                && (name.contains("::Iter<")
+                && (name.starts_with("Iter::")
+                    || name.starts_with("IterMut::")
+                    || name.contains("::Iter::")
+                    || name.contains("::IterMut::")
+                    || name.contains("::Iter<")
                     || name.contains("::IterMut<")
                     || name.ends_with("::Iter::len")
                     || name.ends_with("::IterMut::len"))
@@ -681,7 +680,11 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             }
             // `Iter::is_empty` / `IterMut::is_empty`.
             if name.ends_with("::is_empty")
-                && (name.contains("::Iter<")
+                && (name.starts_with("Iter::")
+                    || name.starts_with("IterMut::")
+                    || name.contains("::Iter::")
+                    || name.contains("::IterMut::")
+                    || name.contains("::Iter<")
                     || name.contains("::IterMut<")
                     || name.ends_with("::Iter::is_empty")
                     || name.ends_with("::IterMut::is_empty"))
@@ -744,8 +747,6 @@ method_fns! {
     /// `len` query methods (`slice::len`, `str::len`, `Vec::len`, `String::len`,
     /// pointer-slice `len`, and any local re-implementation).
     len_fns => len_fns,
-    /// `capacity` query methods (`Vec::capacity` and local re-implementations).
-    capacity_fns => capacity_fns,
     /// `from_raw_parts` constructors (`slice`/`str`/`ptr`/`NonNull`/`Vec`/`String`
     /// and local re-implementations).
     from_raw_parts_fns => from_raw_parts_fns,
@@ -1234,6 +1235,36 @@ intrinsics! {
     mut_ptr_wrapping_byte_offset: &[
         "std::ptr::mut_ptr::<impl *mut T>::wrapping_byte_offset",
         "core::ptr::mut_ptr::<impl *mut T>::wrapping_byte_offset"
+    ],
+    const_ptr_offset_from: &[
+        "std::ptr::const_ptr::<impl *const T>::offset_from",
+        "core::ptr::const_ptr::<impl *const T>::offset_from"
+    ],
+    const_ptr_offset_from_unsigned: &[
+        "std::ptr::const_ptr::<impl *const T>::offset_from_unsigned",
+        "core::ptr::const_ptr::<impl *const T>::offset_from_unsigned"
+    ],
+    mut_ptr_offset_from: &[
+        "std::ptr::mut_ptr::<impl *mut T>::offset_from",
+        "core::ptr::mut_ptr::<impl *mut T>::offset_from"
+    ],
+    mut_ptr_offset_from_unsigned: &[
+        "std::ptr::mut_ptr::<impl *mut T>::offset_from_unsigned",
+        "core::ptr::mut_ptr::<impl *mut T>::offset_from_unsigned"
+    ],
+    nonnull_offset_from: &[
+        "std::ptr::NonNull::<T>::offset_from",
+        "core::ptr::NonNull::<T>::offset_from",
+        "std::ptr::non_null::NonNull::<T>::offset_from",
+        "core::ptr::non_null::NonNull::<T>::offset_from"
+    ],
+    intrinsics_ptr_offset_from: &[
+        "std::intrinsics::ptr_offset_from",
+        "core::intrinsics::ptr_offset_from"
+    ],
+    intrinsics_ptr_offset_from_unsigned: &[
+        "std::intrinsics::ptr_offset_from_unsigned",
+        "core::intrinsics::ptr_offset_from_unsigned"
     ],
     nonnull_add: &[
         "std::ptr::NonNull::<T>::add",

@@ -64,47 +64,32 @@ macro_rules! ED_INLINE {
 }
 
 static REGISTRY: &[Entry] = &[
-    // ── Hand-specialized VM shapes (formerly `classify_call`) ────────
-    // These have MIR available but a branchy / field-walking body that the VM
-    // models more precisely with a dedicated `apply_call_effect` branch.  The
-    // path graph still inlines their bodies (`opaque: false`) so loop/range
-    // bounds reach downstream checkpoints.  Listed *first* so their precise
-    // handler wins over the generic def-path matchers below (e.g. `Iter::len`
-    // must not fall through to `is_len`).
+    // ── Hand-specialized VM shapes (opaque: false) ──────────────────
+    // Listed first so they win over the generic def-path matchers below.
     ED_INLINE!(api_classify::is_branch, eff_branch),
     ED_INLINE!(api_classify::is_index_method, eff_slice_range_index),
     ED_INLINE!(api_classify::is_slice_get, eff_slice_range_get),
-    ED_INLINE!(api_classify::is_iter_len, eff_iter_len),
-    ED_INLINE!(api_classify::is_iter_is_empty, eff_iter_is_empty),
+    ED!(api_classify::is_iter_len, eff_iter_len),
+    ED!(api_classify::is_iter_is_empty, eff_iter_is_empty),
     ED_INLINE!(api_classify::is_nonnull_checked_new, eff_nonnull_new),
     ED_INLINE!(api_classify::is_iter_next, eff_iter_next),
     ED_INLINE!(api_classify::is_range_next, eff_range_next),
     ED_INLINE!(api_classify::is_eq_call, eff_none),
     // ── Intrinsics — no MIR body ────────────────────────────────────
-    // Compiler intrinsics (`core::intrinsics::*`) have no MIR to inline, so the
-    // hand-written effect is the *only* model. `mem::size_of`/`align_of` are
-    // `#[inline]` wrappers around the intrinsic and are matched for the same
-    // reason.
     ED!(api_classify::is_layout_constant, eff_layout_const),
     ED!(
         api_classify::is_select_unpredictable,
         eff_select_unpredictable
     ),
+    ED!(api_classify::is_ptr_offset_from, eff_ptr_offset_from),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
-    // These std functions are not `#[inline]`, so precompiled std ships no MIR
-    // for them (`tcx.is_mir_available` is false) and the effect is the only
-    // model. (`Vec::push` itself is `#[inline]` but is grouped with
-    // `reserve`/`reserve_exact` — which are not — for the shared
-    // write-to-buffer model.)
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
     ED!(api_classify::is_box_alloc_ctor, eff_box_alloc),
     ED!(api_classify::is_exchange_malloc, eff_exchange_malloc),
-    // `into_vec` / `box_assume_init_into_vec_unsafe`: needed on older
-    // toolchains where `vec![…]` literals lower to `into_vec` (not `from_elem`).
+    // Needed on older toolchains where `vec![…]` lowers to `into_vec`.
     ED!(api_classify::is_vec_from_box, eff_vec_from_box),
-    // `slice::to_vec` allocates a fresh buffer and copies the slice — model it
-    // like `into_vec`/`box_assume_init_into_vec_unsafe` (fresh allocation, len
-    // == cap), so `String::from(&str)`'s internal Vec buffer gets provenance.
+    // `slice::to_vec` copies the slice; model like `into_vec` so
+    // `String::from(&str)`'s Vec buffer gets provenance.
     ED!(api_classify::is_slice_to_vec, eff_vec_from_box),
     ED!(
         api_classify::is_vec_with_capacity,
@@ -113,14 +98,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_into_boxed_slice, eff_box_from_vec),
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
-    // The following have MIR available (`#[inline]` or local), but a symbolic
-    // summary is more precise than inlining their branchy / bit-twiddling
-    // bodies.
-
-    // Non-zero-preserving integer ops are modelled as a precise expression over
-    // their operands (ite / arithmetic) so a downstream `!= 0` obligation
-    // discharges *conditionally* — only when the operands are actually
-    // non-zero — rather than unconditionally.
+    // Non-zero-preserving integer ops discharge `!= 0` conditionally.
     ED!(api_classify::is_max, eff_return_max),
     ED!(api_classify::is_clamp, eff_return_clamp),
     ED!(api_classify::is_abs, eff_return_abs),
@@ -131,22 +109,14 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_checked_mul, eff_return_option_some_mul),
     ED!(api_classify::is_overflowing_abs_neg, eff_overflowing_nz),
     ED!(api_classify::is_unwrap, eff_alias_arg0),
-    // Pointer arithmetic: direction and granularity are orthogonal; each entry
-    // picks a fixed-stride `ReturnPointerAdd`/`ReturnPointerSub`.
+    // Pointer arithmetic: direction × granularity.
     ED!(api_classify::is_element_ptr_add, eff_ptr_add),
     ED!(api_classify::is_element_ptr_sub, eff_ptr_sub),
     ED!(api_classify::is_byte_ptr_add, eff_ptr_add_byte),
     ED!(api_classify::is_byte_ptr_sub, eff_ptr_sub_byte),
-    // Pointer extraction / cast: `as_ptr`/`into_raw` return a non-null, aligned,
-    // initialized alias of their argument (`ReturnPointerFromArg` derives those
-    // from the source). Raw-pointer `cast` is excluded (`is_as_ptr_valid`)
-    // because it only reinterprets the address and is left to MIR inlining.
+    // Raw-pointer `cast` is excluded (`is_as_ptr_valid`) — left to inlining.
     ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
-    // `str::as_bytes` reinterprets `&str` as `&[u8]` (same data pointer + len).
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
-    // Slice / collection queries.
-    ED!(api_classify::is_len, eff_len),
-    ED!(api_classify::is_capacity, eff_len),
     ED!(api_classify::is_min_like, eff_cmp_min),
     ED!(api_classify::is_bit_preserving_nz, eff_return_nonzero_iff),
     ED!(
@@ -157,50 +127,33 @@ static REGISTRY: &[Entry] = &[
         api_classify::is_checked_next_pow2,
         eff_return_option_some_nonzero
     ),
-    // SliceIndex::get_unchecked / get_unchecked_mut.
     ED!(api_classify::is_slice_get_unchecked, eff_alias_ptr),
-    // `SliceIndex::get_unchecked(self, slice)` returns `slice + self` (the
-    // receiver is the *index*, the slice pointer is argument 1), so model it as
-    // element-strided pointer arithmetic off argument 1 rather than an alias of
-    // argument 0.
+    // `SliceIndex::get_unchecked(self, slice)` returns `slice + self` (receiver
+    // is the index), so model as element-strided add off argument 1.
     ED!(
         api_classify::is_sliceindex_get_unchecked,
         eff_sliceindex_get_unchecked
     ),
-    // Ownership reconstruction (`Box::from_raw` / `CString::from_raw` / …).
     ED!(
         api_classify::is_ownership_reconstruction,
         eff_ownership_recon
     ),
-    // `ManuallyDrop::drop` releases the pointee's heap allocation.
     ED!(api_classify::is_manually_drop_drop, eff_drop_memory),
-    // `std::mem::drop` frees the argument's heap allocation.
     ED!(api_classify::is_std_drop, eff_drop_memory),
-    // `drop_in_place::<T>` drops the pointee in place, freeing its heap
-    // allocation (e.g. a `Box`/`Vec` buffer) for the alias/owning checkers.
     ED!(api_classify::is_drop_in_place, eff_drop_memory),
-    // Slice helpers.
     ED!(api_classify::is_split_at, eff_split_at),
     ED!(api_classify::is_from_raw_parts, eff_from_raw_parts),
     ED!(api_classify::is_align_offset, eff_align_offset),
     ED!(api_classify::is_cstr_from_ptr, eff_alias_arg0),
     ED!(api_classify::is_slice_range, eff_slice_range),
     ED!(api_classify::is_mem_replace, eff_mem_replace),
-    // Layout accessor (`align_of`): returns a power of two.
     ED!(api_classify::is_layout_align, eff_layout_align),
-    // Local re-implementations (std-challenge suites' `_ext` fns): matched by
-    // name-scanning `fn_defs()`. Their MIR is local, but the re-implemented
-    // algorithm is modelled with the same effect as the std original.
-    // (`iter`/`into_iter`/`iter_mut` are *not* here — they are derived from
-    // the return type by `try_iter_constructor_effect`.)
+    // Local `_ext` re-implementations, matched by name-scanning `fn_defs()`.
     ED!(api_classify::is_align_to_local, eff_align_to),
     ED!(api_classify::is_iter_position, eff_option_scan_index),
     ED!(api_classify::is_strlen, eff_scan_length),
     // ── MIR available — deliberately opaque ─────────────────────────
-    // `eff_none` stubs: no symbolic effect, but staying registered keeps
-    // `is_modeled` true so the path graph does not inline their branchy bodies
-    // (`MaybeUninit::uninit`/`assume_init`).
-    // `MaybeUninit::write` marks the slot initialized (`WriteMemory`).
+    // `eff_none` keeps `is_modeled` true so the path graph does not inline.
     ED!(api_classify::is_nonnull_new_unchecked, eff_new_unchecked),
     ED!(api_classify::is_maybe_uninit_uninit, eff_none),
     ED!(api_classify::is_maybe_uninit_assume_init, eff_none),
@@ -304,6 +257,13 @@ fn eff_ptr_sub_byte(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     eff_ptr_arith(ctx, PtrDirection::Sub, PtrGranularity::Byte)
 }
 
+fn eff_ptr_offset_from(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnPtrOffsetFrom {
+        ptr_arg: 0,
+        base_arg: 1,
+    }]
+}
+
 enum PtrDirection {
     Add,
     Sub,
@@ -350,10 +310,6 @@ fn eff_ptr_arith(
 
 fn eff_write_mem(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::WriteMemory { pointer_arg: 0 }]
-}
-
-fn eff_len(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnLengthOfArg { arg: 0 }]
 }
 
 fn eff_cmp_min(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
