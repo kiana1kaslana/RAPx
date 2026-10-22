@@ -389,6 +389,7 @@ struct Methods {
     len_fns: Vec<DefId>,
     from_raw_parts_fns: Vec<DefId>,
     from_raw_parts_mut_fns: Vec<DefId>,
+    with_metadata_of_fns: Vec<DefId>,
     with_capacity_fns: Vec<DefId>,
     box_alloc_ctors: Vec<DefId>,
     vec_ownership_transfer_fns: Vec<DefId>,
@@ -421,6 +422,7 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         len_fns: Vec::new(),
         from_raw_parts_fns: Vec::new(),
         from_raw_parts_mut_fns: Vec::new(),
+        with_metadata_of_fns: Vec::new(),
         with_capacity_fns: Vec::new(),
         box_alloc_ctors: Vec::new(),
         vec_ownership_transfer_fns: Vec::new(),
@@ -483,6 +485,9 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             }
             if name.ends_with("::from_raw_parts_mut") {
                 methods.from_raw_parts_mut_fns.push(did);
+            }
+            if name.ends_with("::with_metadata_of") {
+                methods.with_metadata_of_fns.push(did);
             }
             if name.ends_with("::with_capacity") && name.contains("::Vec::") {
                 methods.with_capacity_fns.push(did);
@@ -661,6 +666,9 @@ method_fns! {
     /// `from_raw_parts_mut` constructors (`slice`/`ptr`/`NonNull` and local
     /// re-implementations).
     from_raw_parts_mut_fns => from_raw_parts_mut_fns,
+    /// `*const T::with_metadata_of` / `*mut T::with_metadata_of` (used by
+    /// `byte_add`/`byte_offset`).
+    with_metadata_of_fns => with_metadata_of_fns,
     /// `Vec::with_capacity` (and local re-implementations).
     with_capacity_fns => with_capacity_fns,
     /// `Box::new` / `new_in` / `new_uninit` / `new_uninit_in` (and `try_` variants).
@@ -1203,6 +1211,10 @@ intrinsics! {
     intrinsics_ptr_offset_from_unsigned: &[
         "std::intrinsics::ptr_offset_from_unsigned",
         "core::intrinsics::ptr_offset_from_unsigned"
+    ],
+    intrinsics_arith_offset: &[
+        "std::intrinsics::arith_offset",
+        "core::intrinsics::arith_offset"
     ],
     nonnull_add: &[
         "std::ptr::NonNull::<T>::add",

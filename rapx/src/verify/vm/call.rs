@@ -56,13 +56,39 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // semantics; bind them to `false` so their branchy panic bodies are not
         // inlined (which would otherwise recurse to the depth limit).
         if let Some(c) = callee
-            && api_classify::is_ub_checks_gate(self.tcx, c)
+            && api_classify::is_ub_check(self.tcx, c)
         {
             let dest_ty = self.body().local_decls[destination].ty;
             self.set_local(
                 destination,
                 VmValue::new(Int::from_u64(self.z3_ctx, 0), dest_ty),
             );
+            return;
+        }
+
+        // `intrinsics::arith_offset` is the wrapping element-strided offset that
+        // stays a `Call` in MIR (it is not lowered to `BinOp::Offset`).  Model it
+        // with the same stride/provenance precision as `Offset`, deriving the
+        // stride from the base operand's (monomorphized) pointee type.
+        if api_classify::is_intrinsic_arith_offset(callee) {
+            if let (Some(base), Some(count)) = (args.first(), args.get(1)) {
+                let base_val = self.value_of_operand(&base.node);
+                let count_val = self.value_of_operand(&count.node);
+                let pointee = mir_utils::pointee_ty(base_val.ty);
+                let stride = pointee.and_then(|p| {
+                    let (_, s) = mir_utils::type_layout(
+                        self.tcx,
+                        self.current_frame.current_def_id,
+                        p,
+                    )?;
+                    if s == 0 && mir_utils::ty_has_type_param(p) {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                });
+                self.apply_pointer_add(destination, &base_val, &count_val, stride, false);
+            }
             return;
         }
 
@@ -267,6 +293,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if let Operand::RuntimeChecks(_) = discr {
             return Some(0);
         }
+        // `T::IS_ZST` for a generic `T` is unevaluated; fold it to `false`
+        // (non-ZST).  The `IS_ZST` guard in pointer arithmetic (`add`/`sub`/
+        // `offset`) only skips redundant arithmetic: `offset` on a ZST pointee
+        // is a no-op (stride 0), so the non-ZST path is correct for ZST too and
+        // avoids the ZST branch returning `self` with a stale element offset.
+        if let Operand::Constant(constant) = discr
+            && let rustc_middle::mir::Const::Unevaluated(uneval, _) = constant.const_
+            && mir_utils::is_sized_type_property(self.tcx, uneval.def, "IS_ZST")
+        {
+            return Some(0);
+        }
         let (Operand::Copy(p) | Operand::Move(p)) = discr else {
             return None;
         };
@@ -279,7 +316,18 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 if dest != p {
                     continue;
                 }
-                return mir_utils::rvalue_runtime_checks_value(rvalue);
+                if let Some(v) = mir_utils::rvalue_runtime_checks_value(rvalue) {
+                    return Some(v);
+                }
+                // `_4 = const <T as SizedTypeProperties>::IS_ZST` (generic `T`):
+                // fold to non-ZST, mirroring the direct-const case above.
+                if let rustc_middle::mir::Rvalue::Use(operand, ..) = rvalue
+                    && let Operand::Constant(constant) = operand
+                    && let rustc_middle::mir::Const::Unevaluated(uneval, _) = constant.const_
+                    && mir_utils::is_sized_type_property(self.tcx, uneval.def, "IS_ZST")
+                {
+                    return Some(0);
+                }
             }
         }
         // `check_language_ub` is a function *call* (not an assignment), whose
@@ -294,7 +342,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 && destination.local == p.local
                 && destination.projection.is_empty()
                 && let Some(callee) = mir_utils::dep_callee_def_id(func)
-                && api_classify::is_ub_checks_gate(self.tcx, callee)
+                && api_classify::is_ub_check(self.tcx, callee)
             {
                 return Some(0);
             }
@@ -841,67 +889,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 stride,
                 dereferenceable,
             } => {
-                let stride = *stride;
                 if let (Some(base), Some(offset)) = (args.get(*base_arg), args.get(*offset_arg)) {
-                    let stride_term = self.pointer_stride_term(dest, stride);
-                    let adjusted_offset = if stride == Some(1) {
-                        offset.z3_term.clone()
-                    } else {
-                        Int::mul(self.z3_ctx, &[&offset.z3_term, &stride_term])
-                    };
-                    let new_term = Int::add(self.z3_ctx, &[&base.z3_term, &adjusted_offset]);
-                    let is_field_offset = offset.is_field_offset()
-                        && base
-                            .provenance
-                            .as_ref()
-                            .is_some_and(|p| p.offset.as_u64() == Some(0));
-                    let element_offset = if stride == Some(1) {
-                        None
-                    } else {
-                        match base.provenance.as_ref().and_then(|p| match &p.offset_kind {
-                            Some(OffsetKind::Element(e)) => Some(e.clone()),
-                            _ => None,
-                        }) {
-                            Some(e) => Some(Int::add(self.z3_ctx, &[&e, &offset.z3_term])),
-                            None if base
-                                .provenance
-                                .as_ref()
-                                .is_some_and(|p| p.offset.as_u64() == Some(0)) =>
-                            {
-                                Some(offset.z3_term.clone())
-                            }
-                            None => None,
-                        }
-                    };
-                    let offset_kind = if is_field_offset {
-                        Some(OffsetKind::Field)
-                    } else if let Some(e) = element_offset {
-                        Some(OffsetKind::Element(e))
-                    } else {
-                        Some(OffsetKind::Byte)
-                    };
-                    let adjusted_provenance = base.provenance.as_ref().map(|prov| Provenance {
-                        alloc_id: prov.alloc_id,
-                        offset: Int::add(self.z3_ctx, &[&prov.offset, &adjusted_offset]),
-                        offset_kind,
-                    });
-                    let align_n = match stride {
-                        Some(s) => self.compute_pointer_add_align(base, s),
-                        None => base.facts.align_n.clone(),
-                    };
-                    let val = VmValue {
-                        z3_term: new_term,
-                        ty: self.body().local_decls[dest].ty,
-                        provenance: adjusted_provenance,
-                        facts: ValueFacts {
-                            non_null: base.facts.non_null,
-                            in_bounds: *dereferenceable,
-                            align_n,
-                            init: base.facts.init,
-                        },
-                        source: ValueSource::None,
-                    };
-                    self.set_local(dest, val);
+                    self.apply_pointer_add(dest, base, offset, *stride, *dereferenceable);
                 }
             }
             CallEffect::ReturnPointerSub {
@@ -2173,6 +2162,102 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 self.size_sym(pointee)
             }
         }
+    }
+
+    /// Model `dest = base.offset(offset)` with element/byte stride and tracked
+    /// provenance (`offset_kind`), shared by the `ReturnPointerAdd` call effect
+    /// and the inlined `Offset` MIR statement.
+    pub(crate) fn apply_pointer_add(
+        &mut self,
+        dest: Local,
+        base: &VmValue<'z3, 'tcx>,
+        offset: &VmValue<'z3, 'tcx>,
+        stride: Option<u64>,
+        dereferenceable: bool,
+    ) {
+        // `sub` lowers `intrinsics::unchecked_sub(0, n)` to a unary negation `-n`
+        // (`eval_binary_op` folds `0 - x` to `-x`).  Recover the positive count
+        // and model the result as `base - count*stride` (a negated product) so a
+        // later `+ count*stride` in `Allocated`'s byte-coverage query cancels
+        // linearly, instead of `base + (-count)*stride` whose `(-count)*stride`
+        // product Z3's nonlinear solver cannot factor out.
+        let (offset_term, subtract) = if offset.z3_term.num_children() == 1
+            && let Some(positive) = offset.z3_term.nth_child(0).and_then(|c| c.as_int())
+        {
+            (positive, true)
+        } else {
+            (offset.z3_term.clone(), false)
+        };
+        let stride_term = self.pointer_stride_term(dest, stride);
+        let adjusted_offset = if stride == Some(1) {
+            offset_term.clone()
+        } else {
+            Int::mul(self.z3_ctx, &[&offset_term, &stride_term])
+        };
+        let combine = |l: &Int<'z3>, r: &Int<'z3>| {
+            if subtract {
+                Int::sub(self.z3_ctx, &[l, r])
+            } else {
+                Int::add(self.z3_ctx, &[l, r])
+            }
+        };
+        let new_term = combine(&base.z3_term, &adjusted_offset);
+        let is_field_offset = offset.is_field_offset()
+            && base
+                .provenance
+                .as_ref()
+                .is_some_and(|p| p.offset.as_u64() == Some(0));
+        let element_offset = if stride == Some(1) {
+            None
+        } else {
+            match base.provenance.as_ref().and_then(|p| match &p.offset_kind {
+                Some(OffsetKind::Element(e)) => Some(e.clone()),
+                _ => None,
+            }) {
+                Some(e) => Some(combine(&e, &offset_term)),
+                None if base
+                    .provenance
+                    .as_ref()
+                    .is_some_and(|p| p.offset.as_u64() == Some(0)) =>
+                {
+                    Some(if subtract {
+                        -offset_term.clone()
+                    } else {
+                        offset_term.clone()
+                    })
+                }
+                None => None,
+            }
+        };
+        let offset_kind = if is_field_offset {
+            Some(OffsetKind::Field)
+        } else if let Some(e) = element_offset {
+            Some(OffsetKind::Element(e))
+        } else {
+            Some(OffsetKind::Byte)
+        };
+        let adjusted_provenance = base.provenance.as_ref().map(|prov| Provenance {
+            alloc_id: prov.alloc_id,
+            offset: combine(&prov.offset, &adjusted_offset),
+            offset_kind,
+        });
+        let align_n = match stride {
+            Some(s) => self.compute_pointer_add_align(base, s),
+            None => base.facts.align_n.clone(),
+        };
+        let val = VmValue {
+            z3_term: new_term,
+            ty: self.body().local_decls[dest].ty,
+            provenance: adjusted_provenance,
+            facts: ValueFacts {
+                non_null: base.facts.non_null,
+                in_bounds: dereferenceable,
+                align_n,
+                init: base.facts.init,
+            },
+            source: ValueSource::None,
+        };
+        self.set_local(dest, val);
     }
 
     pub(crate) fn propagate_const_bytes_to_tracked(&mut self, args: &[Spanned<Operand<'tcx>>]) {

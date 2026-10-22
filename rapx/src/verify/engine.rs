@@ -313,7 +313,7 @@ impl<'tcx> VerifyEngine<'tcx> {
         let mut entry_cursor: HashMap<(DefId, DefId), usize> = HashMap::new();
 
         for item in items {
-            let (cur_def_id, cur_arg) = match &item {
+            let (cur_def_id, cur_arg, cur_is_term) = match &item {
                 RelevantItem::Statement {
                     def_id,
                     block,
@@ -324,10 +324,14 @@ impl<'tcx> VerifyEngine<'tcx> {
                         StatementKind::Assign(assign) => Some(assign.0.local.as_usize()),
                         _ => None,
                     };
-                    (Some(*def_id), dest)
+                    (Some(*def_id), dest, false)
                 }
-                RelevantItem::Terminator { def_id, .. } => (Some(*def_id), None),
-                _ => (None, None),
+                RelevantItem::Terminator { def_id, .. } => {
+                    (Some(*def_id), None, true)
+                }
+                _ => {
+                    (None, None, false)
+                }
             };
 
             if let Some(cur) = cur_def_id {
@@ -400,18 +404,26 @@ impl<'tcx> VerifyEngine<'tcx> {
                                     if matching.is_empty() {
                                         matching = globals.to_vec();
                                     }
-                                    // Disambiguate by the caller's argument local when
-                                    // the callee takes a single argument (e.g. the
-                                    // `&mut` borrow temp passed to `as_ptr`/`as_mut_ptr`).
-                                    // Multi-arg callees are left to the positional cursor:
-                                    // their argument temps may be reused across call sites,
-                                    // so a local index is not a reliable discriminator.
-                                    if let Some(arg) = prev_arg
-                                        && matching.iter().all(|&g| {
-                                            tree.inline_binding(g).map(|b| b.arg_locals.len())
-                                                == Some(1)
-                                        })
-                                    {
+                                    // Disambiguate by the caller's argument local: the
+                                    // destination of the most recent relevant `Assign`.
+                                    // Applies to single-arg callees (a borrow temp for
+                                    // `as_ptr`/`as_mut_ptr`) and to pointer-arithmetic
+                                    // callees (the freshly materialized `count` of
+                                    // `ptr::add`/`ptr::sub`).  For other multi-arg
+                                    // callees (e.g. `ptr::write`, whose `value` aggregate
+                                    // temp may be reused across call sites) the local is
+                                    // not a reliable discriminator, so the positional
+                                    // cursor below decides.
+                                    let all_single_arg = matching.iter().all(|&g| {
+                                        tree.inline_binding(g).map(|b| b.arg_locals.len())
+                                            == Some(1)
+                                    });
+                                    let is_ptr_arith =
+                                        crate::verify::api_classify::is_pointer_add(Some(cur))
+                                            || crate::verify::api_classify::is_pointer_sub(Some(
+                                                cur,
+                                            ));
+                                    if (all_single_arg || is_ptr_arith) && let Some(arg) = prev_arg {
                                         let by_arg: Vec<usize> = matching
                                             .iter()
                                             .copied()
@@ -475,6 +487,8 @@ impl<'tcx> VerifyEngine<'tcx> {
                                         out.push(RelevantItem::CalleeEntry {
                                             callee: *pd,
                                             args: binding.arg_locals.clone(),
+                                            consts: binding.arg_consts.clone(),
+                                            field_offsets: binding.arg_field_offsets.clone(),
                                         });
                                         active.push((*pd, binding.dest_local, *pe));
                                     }
@@ -485,6 +499,8 @@ impl<'tcx> VerifyEngine<'tcx> {
                                     out.push(RelevantItem::CalleeEntry {
                                         callee: cur,
                                         args: binding.arg_locals.clone(),
+                                        consts: binding.arg_consts.clone(),
+                                        field_offsets: binding.arg_field_offsets.clone(),
                                     });
                                     active.push((cur, binding.dest_local, global));
                                 }
@@ -492,7 +508,17 @@ impl<'tcx> VerifyEngine<'tcx> {
                         }
                     }
                 prev_def_id = Some(cur);
-                prev_arg = cur_arg;
+                // Track the caller's most recent value-producing `Assign`
+                // destination for argument disambiguation.  A non-value statement
+                // (`StorageLive`/`StorageDead`/`FakeRead`, whose `dest` is `None`)
+                // must not clobber it — the argument local is still the previous
+                // `Assign`'s destination — but a `Terminator` is a control-flow
+                // boundary, so the previous argument is stale there.
+                if cur_arg.is_some() {
+                    prev_arg = cur_arg;
+                } else if cur_is_term {
+                    prev_arg = None;
+                }
             }
 
             out.push(item);

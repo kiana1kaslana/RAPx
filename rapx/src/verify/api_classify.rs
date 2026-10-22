@@ -154,14 +154,24 @@ pub fn is_str_as_bytes(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::str_as_bytes()])
 }
 
-/// `core::ub_checks::check_language_ub` (and its `runtime`/`compiletime`
-/// helpers) gates `assert_unsafe_precondition!` behind `debug_assertions` /
-/// `ub_checks`.  The VM models release semantics (checks disabled), so this
-/// gate always evaluates to "no check" (`false`); letting it inline would pull
-/// in the branchy `panic!` bodies (`maybe_is_aligned`, `is_null`, …) up to the
-/// recursion limit for no constraint value.
-pub fn is_ub_checks_gate(tcx: TyCtxt<'_>, callee: DefId) -> bool {
-    tcx.def_path_str(callee).contains("ub_checks::check_language_ub")
+/// The whole `assert_unsafe_precondition!` machinery: the `check_language_ub`
+/// gate, the generated `precondition_check` body, and the
+/// `#[cfg(debug_assertions)]` check helpers (`runtime_add_nowrap`,
+/// `maybe_is_aligned*`, `is_valid_allocation_size`, `maybe_is_nonoverlapping`).
+///
+/// All of these are debug-only / ub-checks-gated and model release semantics
+/// (checks disabled), so they must be skipped rather than inlined: the gate
+/// folds to `false` (no check), and the body/helpers' divergence branches would
+/// otherwise leave pointer results uninitialized (e.g. `swap_unchecked`'s
+/// `ptr.add(b)` on the failed-check arm).
+pub fn is_ub_check(tcx: TyCtxt<'_>, callee: DefId) -> bool {
+    let s = tcx.def_path_str(callee);
+    s.contains("ub_checks::check_language_ub")
+        || s.contains("::precondition_check")
+        || s.contains("::runtime_add_nowrap")
+        || s.contains("ub_checks::maybe_is_aligned")
+        || s.contains("ub_checks::is_valid_allocation_size")
+        || s.contains("ub_checks::maybe_is_nonoverlapping")
 }
 
 // ── Pointer arithmetic ────────────────────────────────────────────
@@ -259,6 +269,14 @@ pub fn is_intrinsic_ptr_offset_from(callee: Option<DefId>) -> bool {
             def_id::intrinsics_ptr_offset_from_unsigned(),
         ],
     )
+}
+
+/// `intrinsics::arith_offset` is the *wrapping* pointer offset backing
+/// `wrapping_add`/`wrapping_offset`.  Unlike `intrinsics::offset` (which the
+/// MIR builder lowers to `BinOp::Offset`), it stays a `Call` to the intrinsic,
+/// so it must be classified here rather than reaching the `Offset` rvalue rule.
+pub fn is_intrinsic_arith_offset(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_arith_offset()])
 }
 
 // ── Layout constants ──────────────────────────────────────────────
@@ -392,6 +410,15 @@ pub fn is_len(callee: Option<DefId>) -> bool {
 /// local re-implementations), instead of substring-matching `def_path_str`.
 pub fn is_from_raw_parts(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::from_raw_parts_fns())
+}
+
+/// `*const T::with_metadata_of` / `*mut T::with_metadata_of` (used by
+/// `byte_add`/`byte_offset`): re-attaches metadata onto a data address.  For a
+/// sized pointee it is a no-op cast and must preserve the pointer's provenance
+/// and non-nullness (rather than going through `from_raw_parts`, whose
+/// fresh-allocation effect would reset them).
+pub fn is_with_metadata_of(callee: Option<DefId>) -> bool {
+    any_def(callee, def_id::with_metadata_of_fns())
 }
 
 /// Whether `callee` is a `from_raw_parts_mut` constructor.

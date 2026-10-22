@@ -403,6 +403,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let field_ty = mir_utils::field_ty(self.tcx, field, substs);
                     let field_align = self.align_sym(field_ty);
                     self.constraints.assertions.push(a.rem(&field_align)._eq(&zero));
+                    // Linear lower bound: a struct/union's alignment is at least
+                    // each field's alignment (both powers of two), so Z3 can
+                    // decide `align_struct >= align_field` without chaining the
+                    // nonlinear `% == 0` (e.g. `align_of(MaybeUninit<T>) >=
+                    // align_of(T)` for `swap`'s scratch slot).
+                    self.constraints.assertions.push(a.ge(&field_align));
                 }
                 // A struct's size is at least the sum of its fields (padding may
                 // add more).  This relates the symbolic `sizeof_Struct` constant

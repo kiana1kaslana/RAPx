@@ -222,6 +222,14 @@ pub struct PathGraph<'tcx> {
 pub struct InlineBinding {
     /// Caller argument locals (callee param `_i+1` ← `arg_locals[i]`).
     pub arg_locals: Vec<usize>,
+    /// Constant argument values: `(param, value)` for a `Const` argument that
+    /// has no local (`callee param `_param` ← const `value``).
+    pub arg_consts: Vec<(usize, u64)>,
+    /// Callee parameters bound to an `offset_of!` const argument (a symbolic
+    /// field offset, not a concrete `u64`).  Preserved so the VM can mark the
+    /// value as a `FieldOffset` (keeping `Align` dischargeable) instead of
+    /// leaving the parameter as a fresh `unknown`.
+    pub arg_field_offsets: Vec<usize>,
     /// Caller destination local (receives the callee's `_0`).
     pub dest_local: usize,
 }
@@ -784,6 +792,7 @@ impl<'tcx> PathGraph<'tcx> {
                 };
                 let has_fn_sim =
                     crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee));
+                let is_ub_check = crate::verify::api_classify::is_ub_check(tcx, callee);
                 // Skip cross-crate trait methods with a default body (they call a
                 // further required method whose effect we can't attribute).
                 let cross_crate_trait_method = cross_crate
@@ -792,6 +801,7 @@ impl<'tcx> PathGraph<'tcx> {
                 if !tcx.is_mir_available(callee)
                     || expanded.contains(&callee)
                     || has_fn_sim
+                    || is_ub_check
                     || cross_crate_trait_method
                 {
                     continue;
@@ -840,7 +850,7 @@ impl<'tcx> PathGraph<'tcx> {
         // The caller block may itself be an inlined callee (nested inlining), so
         // its MIR successor indices must be shifted into the global block space.
         let caller_base = caller_idx - self.cfg.block(caller_idx).local_index;
-        let (caller_target, caller_unwind, arg_locals, dest_local) = match self.terminator(caller_idx)
+        let (caller_target, caller_unwind, arg_locals, arg_consts, arg_field_offsets, dest_local) = match self.terminator(caller_idx)
         {
             Some(term) => match &term.kind {
                 TerminatorKind::Call {
@@ -859,11 +869,36 @@ impl<'tcx> PathGraph<'tcx> {
                         .iter()
                         .filter_map(|a| a.node.place().map(|p| p.local.as_usize()))
                         .collect();
-                    (target, unwind, arg_locals, destination.local.as_usize())
+                    let arg_consts: Vec<(usize, u64)> = args
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, a)| {
+                            mir_utils::operand_const_u64(&a.node).map(|v| (i + 1, v))
+                        })
+                        .collect();
+                    let arg_field_offsets: Vec<usize> = args
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, a)| {
+                            let Operand::Constant(c) = &a.node else {
+                                return None;
+                            };
+                            mir_utils::offset_of_container(self.tcx(), &c.const_)
+                                .map(|_| i + 1)
+                        })
+                        .collect();
+                    (
+                        target,
+                        unwind,
+                        arg_locals,
+                        arg_consts,
+                        arg_field_offsets,
+                        destination.local.as_usize(),
+                    )
                 }
-                _ => (None, None, Vec::new(), 0),
+                _ => (None, None, Vec::new(), Vec::new(), Vec::new(), 0),
             },
-            None => (None, None, Vec::new(), 0),
+            None => (None, None, Vec::new(), Vec::new(), Vec::new(), 0),
         };
         let Some(target) = caller_target else {
             return;
@@ -982,6 +1017,8 @@ impl<'tcx> PathGraph<'tcx> {
             base,
             InlineBinding {
                 arg_locals,
+                arg_consts,
+                arg_field_offsets,
                 dest_local,
             },
         );
@@ -1735,6 +1772,69 @@ impl<'tcx> PathGraph<'tcx> {
                         .map(|v| v as usize),
                     _ => None,
                 };
+
+                // `T::IS_ZST` for a generic `T` is unevaluated; fold it to
+                // `false` (non-ZST).  The `IS_ZST` guard in pointer arithmetic
+                // (`add`/`sub`/`offset`) only skips redundant arithmetic (a ZST
+                // pointee makes the offset a no-op), so the non-ZST path is
+                // correct for ZST too and avoids the ZST branch returning `self`
+                // with a stale element offset (e.g. `reverse`'s `end.sub(half_len)`
+                // would otherwise return `end` unchanged and fail the downstream
+                // `from_raw_parts_mut` `InBound`).
+                let mut is_zst_guard = false;
+                match discr {
+                    Operand::Constant(c) => {
+                        if let rustc_middle::mir::Const::Unevaluated(uneval, _) = c.const_
+                            && mir_utils::is_sized_type_property(
+                                self.cfg.tcx,
+                                uneval.def,
+                                "IS_ZST",
+                            )
+                        {
+                            is_zst_guard = true;
+                        }
+                    }
+                    Operand::Copy(p) | Operand::Move(p) => {
+                        let body = self.cfg.tcx.optimized_mir(self.cfg.block(cur).def_id);
+                        for bbd in body.basic_blocks.iter() {
+                            for stmt in bbd.statements.iter() {
+                                let rustc_middle::mir::StatementKind::Assign(assign) =
+                                    &stmt.kind
+                                else {
+                                    continue;
+                                };
+                                let (dest, rvalue) = &**assign;
+                                if dest != p {
+                                    continue;
+                                }
+                                if let rustc_middle::mir::Rvalue::Use(operand, ..) = rvalue
+                                    && let Operand::Constant(constant) = operand
+                                    && let rustc_middle::mir::Const::Unevaluated(uneval, _) =
+                                        constant.const_
+                                    && mir_utils::is_sized_type_property(
+                                        self.cfg.tcx,
+                                        uneval.def,
+                                        "IS_ZST",
+                                    )
+                                {
+                                    is_zst_guard = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if is_zst_guard {
+                    // Only the non-ZST (`false`) arm is reachable.
+                    let expected = base + resolve_switch_target(targets, 0);
+                    if next != expected {
+                        return false;
+                    }
+                    if let Some(local) = constraint_local {
+                        cs.consts.insert(local, 0);
+                    }
+                    return true;
+                }
 
                 if let Some(val) = const_val {
                     // Discriminant is a literal constant — only one target is

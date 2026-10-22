@@ -181,6 +181,32 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
 
     let lhs = state.value_of_operand(lhs_op);
     let rhs = state.value_of_operand(rhs_op);
+    // `Offset(ptr, count)` is the MIR lowering of `ptr.add(count)`/`ptr.sub(count)`
+    // (via `intrinsics::offset`): pointer arithmetic in *element* units. Model it
+    // with the same stride/provenance/align precision as the `ReturnPointerAdd`
+    // effect, so inlined pointer arithmetic keeps `ValidPtr`/`Align` dischargeable.
+    if op == BinOp::Offset {
+        // The *base* operand carries the monomorphized pointee type (e.g. the
+        // caller's `*const u32`), whereas `dest_ty` is the callee's declared
+        // generic `*const T`.  Derive the stride from the base's value type so
+        // a generic `T` doesn't turn the stride into an unrelated `size_sym(T)`
+        // symbol that breaks `Allocated`'s byte-coverage query.
+        let pointee = mir_utils::pointee_ty(lhs.ty);
+        let stride = pointee.and_then(|p| {
+            let (_, s) = mir_utils::type_layout(
+                state.tcx,
+                state.current_frame.current_def_id,
+                p,
+            )?;
+            if s == 0 && mir_utils::ty_has_type_param(p) {
+                None
+            } else {
+                Some(s)
+            }
+        });
+        state.apply_pointer_add(dest_place.local, &lhs, &rhs, stride, false);
+        return state.local_value(dest_place.local).cloned();
+    }
     let term = state.eval_binary_op(op, &lhs.z3_term, &rhs.z3_term);
     let provenance = state.provenance_for_binary_op(op, &lhs, &rhs);
     let invariants = state.facts_for_binary_op(op, &lhs, &rhs, &provenance);
@@ -257,21 +283,40 @@ pub(crate) fn eval_unary_op<'z3, 'tcx>(
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let val = state.value_of_operand(operand);
     let is_bool = matches!(val.ty.kind(), rustc_middle::ty::TyKind::Bool);
+    let mut result_ty = dest_ty;
     let term = if matches!(op, UnOp::PtrMetadata) {
         // `PtrMetadata` on a `&[T]` gives the slice length, which is the
         // allocation size divided by the element size. Reuse the same symbolic
         // term as the allocation size so downstream InBound checks
         // (`offset <= len`) agree with the `len` used in loop guards
         // (`offset <= len - 16`).
-        state
-            .slice_len_from_value(&val)
-            .unwrap_or_else(|| state.fresh_int("ptr_metadata"))
+        let is_dst = mir_utils::pointee_ty(val.ty).is_some_and(|p| {
+            !p.is_sized(
+                state.tcx,
+                rustc_middle::ty::TypingEnv::post_analysis(
+                    state.tcx,
+                    state.current_frame.current_def_id,
+                ),
+            )
+        });
+        if is_dst {
+            state
+                .slice_len_from_value(&val)
+                .unwrap_or_else(|| state.fresh_int("ptr_metadata"))
+        } else {
+            // A *sized* pointee has `()` metadata.  Re-type the value as unit
+            // so `aggregate_raw_ptr` (`Rvalue::Aggregate(RawPtr(..))`) can
+            // recognize the thin-pointer case and fold it to the data pointer
+            // instead of materializing a fresh fat-pointer symbol.
+            result_ty = state.tcx.types.unit;
+            state.fresh_int("ptr_metadata")
+        }
     } else {
         state.eval_unary_op(*op, &val.z3_term, is_bool)
     };
     Some(VmValue {
         z3_term: term,
-        ty: dest_ty,
+        ty: result_ty,
         provenance: val.provenance,
         facts: val.facts,
         source: ValueSource::None,
@@ -358,6 +403,32 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
     };
     let kind = &**kind;
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
+
+    // `intrinsics::aggregate_raw_ptr` lowers to `Rvalue::Aggregate(RawPtr(..))`
+    // (`_0 = *const T from (data, meta)`).  For a *sized* pointee the metadata
+    // operand is `()` and the result *is* the data pointer (a no-op cast used by
+    // `byte_add`'s `with_metadata_of`), so return operand 0 preserving its
+    // provenance and non-nullness instead of a fresh `aggregate` symbol.
+    if let rustc_middle::mir::AggregateKind::RawPtr(pointee_ty, _) = kind
+        && let Some(data_operand) = operands.iter().next()
+    {
+        let sized = pointee_ty.is_sized(
+            state.tcx,
+            rustc_middle::ty::TypingEnv::post_analysis(
+                state.tcx,
+                state.current_frame.current_def_id,
+            ),
+        ) || operands
+            .iter()
+            .nth(1)
+            .is_some_and(|meta| state.value_of_operand(meta).ty.is_unit());
+        if sized {
+            let data_val = state.value_of_operand(data_operand);
+            let mut val = data_val.clone();
+            val.ty = dest_ty;
+            return Some(val);
+        }
+    }
 
     // For an enum aggregate, remember whether this is the data-carrying variant
     // of `Option`/`Result` (`Some`/`Ok`), so the nested-field flattening below

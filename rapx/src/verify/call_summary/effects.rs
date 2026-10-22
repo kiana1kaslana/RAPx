@@ -82,11 +82,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
     ED!(api_classify::is_checked_next_pow2, eff_return_option_some_nonzero),
-    // Pointer arithmetic: direction × granularity.
-    ED!(api_classify::is_element_ptr_add, eff_ptr_add),
-    ED!(api_classify::is_element_ptr_sub, eff_ptr_sub),
-    ED!(api_classify::is_byte_ptr_add, eff_ptr_add_byte),
-    ED!(api_classify::is_byte_ptr_sub, eff_ptr_sub_byte),
     // Raw-pointer `cast` is excluded (`is_as_ptr_valid`) — left to inlining.
     ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
@@ -100,6 +95,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_drop_in_place, eff_drop_memory),
     ED!(api_classify::is_split_at, eff_split_at),
     ED!(api_classify::is_from_raw_parts, eff_from_raw_parts),
+    ED!(api_classify::is_with_metadata_of, eff_with_metadata_of),
     ED!(api_classify::is_align_offset, eff_align_offset),
     ED!(api_classify::is_cstr_from_ptr, eff_alias_arg0),
     ED!(api_classify::is_slice_range, eff_slice_range),
@@ -196,6 +192,13 @@ fn eff_alias_arg0(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 /// value and provenance (element offset included), inheriting non-nullness from
 /// the source rather than asserting it.
 fn eff_new_unchecked(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnPointerFromArg { arg: 0 }]
+}
+
+/// `*const T::with_metadata_of(self, meta)` (used by `byte_add`/`byte_offset`):
+/// for a sized pointee it is a no-op cast onto `self`'s data address, so return
+/// `self` (arg 0) preserving its provenance and non-nullness.
+fn eff_with_metadata_of(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnPointerFromArg { arg: 0 }]
 }
 
@@ -379,6 +382,21 @@ fn eff_mem_replace(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 }
 
 fn eff_from_raw_parts(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    // The DST *pointer* constructor (`ptr::from_raw_parts`, used by
+    // `with_metadata_of` in `byte_add`/`byte_offset`) is a no-op cast for a
+    // *sized* pointee: preserve the pointer's provenance and non-nullness
+    // instead of materializing a fresh allocation.
+    if let Some(d) = ctx.dest {
+        let ty = ctx.tcx.optimized_mir(ctx.caller).local_decls[d].ty;
+        if let Some(pointee) = mir_utils::pointee_ty(ty)
+            && pointee.is_sized(
+                ctx.tcx,
+                rustc_middle::ty::TypingEnv::post_analysis(ctx.tcx, ctx.caller),
+            )
+        {
+            return vec![CallEffect::ReturnPointerFromArg { arg: 0 }];
+        }
+    }
     let elem = from_raw_parts_elem_size(ctx.tcx, ctx.caller, ctx.dest);
     let mut eff = vec![
         CallEffect::ReturnFreshAllocation {

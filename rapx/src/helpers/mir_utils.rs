@@ -139,6 +139,38 @@ pub(crate) fn rvalue_runtime_checks_value(rvalue: &Rvalue<'_>) -> Option<u64> {
     None
 }
 
+/// Like [`rvalue_runtime_checks_value`], but only folds the *check* gates
+/// (`UbChecks`/`ContractChecks`) that guard `unreachable_unchecked`-style
+/// precondition checks.  `OverflowChecks` instead selects between wrapping and
+/// trapping arithmetic, so it must follow the build's actual value.
+pub(crate) fn rvalue_ub_checks_value(rvalue: &Rvalue<'_>) -> Option<u64> {
+    #[cfg(rapx_rvalue_has_nullary_op)]
+    {
+        if let Rvalue::NullaryOp(rustc_middle::mir::NullOp::RuntimeChecks(rc)) = rvalue
+            && matches!(
+                rc,
+                rustc_middle::mir::RuntimeChecks::UbChecks
+                    | rustc_middle::mir::RuntimeChecks::ContractChecks
+            )
+        {
+            return Some(0);
+        }
+    }
+    #[cfg(not(rapx_rvalue_has_nullary_op))]
+    {
+        if let Rvalue::Use(Operand::RuntimeChecks(rc), ..) = rvalue
+            && matches!(
+                rc,
+                rustc_middle::mir::RuntimeChecks::UbChecks
+                    | rustc_middle::mir::RuntimeChecks::ContractChecks
+            )
+        {
+            return Some(0);
+        }
+    }
+    None
+}
+
 /// The concrete `core::ops::Range*` struct a `DefId` denotes.
 pub(crate) enum RangeKind {
     RangeTo,
@@ -851,6 +883,14 @@ pub(crate) fn offset_of_container<'tcx>(
         }
     }
     None
+}
+
+/// Whether `def` is a `SizedTypeProperties::<ASSOC>` associated const — a
+/// compiler-internal layout constant (`SIZE`, `ALIGN`, `IS_ZST`) that has no
+/// lang/diagnostic item, so it is matched by its def-path suffix.
+pub(crate) fn is_sized_type_property(tcx: TyCtxt<'_>, def: DefId, assoc: &str) -> bool {
+    tcx.def_path_str(def)
+        .ends_with(&format!("SizedTypeProperties::{assoc}"))
 }
 
 /// Whether a `DefId` is a const-like item that `mir_for_ctfe` accepts.

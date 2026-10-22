@@ -58,8 +58,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let terminator = body.basic_blocks[*block].terminator();
                     self.exec_terminator(terminator, *switch_succ);
                 }
-                RelevantItem::CalleeEntry { callee, args } => {
-                    self.handle_callee_entry(*callee, args);
+                RelevantItem::CalleeEntry { callee, args, consts, field_offsets } => {
+                    self.handle_callee_entry(*callee, args, consts, field_offsets);
                 }
                 RelevantItem::CalleeExit { dest } => {
                     self.handle_callee_exit(*dest);
@@ -74,7 +74,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Enter an inlined callee during path execution: save the caller context,
     /// switch to the callee body, and bind the caller's argument locals to the
     /// callee's parameters.
-    fn handle_callee_entry(&mut self, callee: DefId, arg_locals: &[usize]) {
+    fn handle_callee_entry(&mut self, callee: DefId, arg_locals: &[usize], arg_consts: &[(usize, u64)], arg_field_offsets: &[usize]) {
         let frame = self.save_frame();
 
         // Collect the caller argument fields from the saved map, so the callee's
@@ -138,6 +138,33 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }
         }
 
+        // Bind `Const` arguments (which have no local) to their literal value,
+        // so a fresh symbolic param does not leak into pointer arithmetic (e.g.
+        // `ptr.add(1)`'s `count == 1` must stay concrete for `InBound`).
+        for &(param, val) in arg_consts {
+            let local = Local::from_usize(param);
+            let ty = self.body().local_decls[local].ty;
+            self.set_local(local, VmValue::new(Int::from_u64(self.z3_ctx, val), ty));
+        }
+
+        // Bind `offset_of!` const arguments as a symbolic `FieldOffset` value,
+        // preserving the field-offset marker so pointer arithmetic keeps
+        // `offset_kind == Field` and downstream `Align` stays dischargeable.
+        for &param in arg_field_offsets {
+            let local = Local::from_usize(param);
+            let ty = self.body().local_decls[local].ty;
+            self.set_local(
+                local,
+                VmValue {
+                    z3_term: self.fresh_int("field_offset"),
+                    ty,
+                    provenance: None,
+                    facts: ValueFacts::default(),
+                    source: ValueSource::FieldOffset,
+                },
+            );
+        }
+
         for (callee_param, fields, fv) in arg_fields {
             self.set_field_value(Local::from_usize(callee_param), fields, fv);
         }
@@ -145,8 +172,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         self.caller_frames.push(frame);
     }
 
-    /// Exit an inlined callee: capture the callee's return value, restore the
-    /// caller context, and write the return value to the caller's destination.
+     /// Exit an inlined callee: capture the callee's return value, restore the
+     /// caller context, and write the return value to the caller's destination.
     fn handle_callee_exit(&mut self, dest: usize) {
         let ret = self.local_value(Local::from_usize(0)).cloned();
         let ret_fields: Vec<(Vec<usize>, VmValue<'z3, 'tcx>)> = self
@@ -1564,7 +1591,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 Int::add(self.z3_ctx, &[lhs, rhs])
             }
             BinOp::Sub | BinOp::SubWithOverflow | BinOp::SubUnchecked => {
-                Int::sub(self.z3_ctx, &[lhs, rhs])
+                // `intrinsics::unchecked_sub(0, n)` lowers to `0 - n`; normalize it
+                // to a unary negation `-n` so `apply_pointer_add`'s single-child
+                // detection recovers the positive count (`ptr.sub(n)`).
+                if lhs.as_u64() == Some(0) {
+                    -rhs.clone()
+                } else {
+                    Int::sub(self.z3_ctx, &[lhs, rhs])
+                }
             }
             BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked => {
                 // `us_len = (len / ts) * us`: a non-exact division result times

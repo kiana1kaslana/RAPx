@@ -1165,9 +1165,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // `init_parameters`) so they agree with allocation sizes and
                 // pointer strides instead of being unrelated fresh constants.
                 if let rustc_middle::mir::Const::Unevaluated(uneval, _) = constant.const_ {
-                    let def_name = self.tcx.def_path_str(uneval.def);
-                    let is_size = def_name.ends_with("SizedTypeProperties::SIZE");
-                    let is_align = def_name.ends_with("SizedTypeProperties::ALIGN");
+                    let is_size = mir_utils::is_sized_type_property(self.tcx, uneval.def, "SIZE");
+                    let is_align =
+                        mir_utils::is_sized_type_property(self.tcx, uneval.def, "ALIGN");
                     if (is_size || is_align) && !uneval.args.is_empty() {
                         let ty = uneval.args.type_at(0);
                         let term = if is_size {

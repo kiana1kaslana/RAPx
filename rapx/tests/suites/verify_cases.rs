@@ -148,6 +148,9 @@ fn std_challenge_01() {
 #[test]
 fn std_challenge_17() {
     let output = run_with_args("verify_cases/std-challenge-17", CMD_VERIFY_TARGETED);
+    if output.contains("UNSOUND") {
+        eprintln!("=== STD-CHALLENGE-17 OUTPUT ===\n{output}");
+    }
     assert!(
         !output.contains("UNSOUND"),
         "unexpected UNSOUND in std-challenge-17"
