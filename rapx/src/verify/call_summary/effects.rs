@@ -96,7 +96,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_drop_in_place, eff_drop_memory),
     ED!(api_classify::is_split_at, eff_split_at),
     ED!(api_classify::is_from_raw_parts, eff_from_raw_parts),
-    ED!(api_classify::is_with_metadata_of, eff_with_metadata_of),
+    ED!(api_classify::is_with_metadata_of, eff_return_pointer_arg),
     ED!(api_classify::is_align_offset, eff_align_offset),
     ED!(api_classify::is_cstr_from_ptr, eff_alias_arg0),
     ED!(api_classify::is_slice_range, eff_slice_range),
@@ -108,7 +108,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_strlen, eff_scan_length),
     // ── MIR available — deliberately opaque ─────────────────────────
     // `eff_none` keeps the call in the registry so the path graph does not inline.
-    ED!(api_classify::is_nonnull_new_unchecked, eff_new_unchecked),
+    ED!(api_classify::is_nonnull_new_unchecked, eff_return_pointer_arg),
     ED!(api_classify::is_maybe_uninit_uninit, eff_none),
     ED!(
         api_classify::is_maybe_uninit_assume_init,
@@ -189,34 +189,8 @@ fn eff_alias_arg0(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnAliasArg { arg: 0 }]
 }
 
-/// `NonNull::new_unchecked(ptr)`: a transparent re-wrap that preserves `ptr`'s
-/// value and provenance (element offset included), inheriting non-nullness from
-/// the source rather than asserting it.
-fn eff_new_unchecked(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+fn eff_return_pointer_arg(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnPointerFromArg { arg: 0 }]
-}
-
-/// `*const T::with_metadata_of(self, meta)` (used by `byte_add`/`byte_offset`):
-/// for a sized pointee it is a no-op cast onto `self`'s data address, so return
-/// `self` (arg 0) preserving its provenance and non-nullness.
-fn eff_with_metadata_of(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnPointerFromArg { arg: 0 }]
-}
-
-fn eff_ptr_add(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    eff_ptr_arith(ctx, PtrDirection::Add, PtrGranularity::Element)
-}
-
-fn eff_ptr_sub(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    eff_ptr_arith(ctx, PtrDirection::Sub, PtrGranularity::Element)
-}
-
-fn eff_ptr_add_byte(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    eff_ptr_arith(ctx, PtrDirection::Add, PtrGranularity::Byte)
-}
-
-fn eff_ptr_sub_byte(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    eff_ptr_arith(ctx, PtrDirection::Sub, PtrGranularity::Byte)
 }
 
 fn eff_ptr_offset_from(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
@@ -224,50 +198,6 @@ fn eff_ptr_offset_from(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
         ptr_arg: 0,
         base_arg: 1,
     }]
-}
-
-enum PtrDirection {
-    Add,
-    Sub,
-}
-
-enum PtrGranularity {
-    Element,
-    Byte,
-}
-
-/// Shared model for `ReturnPointerAdd`/`ReturnPointerSub`.
-///
-/// `wrapping_add`/`wrapping_sub` are shared between integers and raw pointers.
-/// When the destination is not a pointer type the call is an integer
-/// `wrapping_add`, whose result may wrap to zero, so it is left unconstrained
-/// rather than modelled as pointer arithmetic.
-fn eff_ptr_arith(
-    ctx: &EffCtx<'_, '_>,
-    dir: PtrDirection,
-    granularity: PtrGranularity,
-) -> Vec<CallEffect> {
-    if !dest_is_pointer(ctx.tcx, ctx.caller, ctx.dest) {
-        return Vec::new();
-    }
-    let stride = match granularity {
-        PtrGranularity::Byte => Some(1),
-        PtrGranularity::Element => destination_stride(ctx.tcx, ctx.caller, ctx.dest),
-    };
-    let effect = match dir {
-        PtrDirection::Sub => CallEffect::ReturnPointerSub {
-            base_arg: 0,
-            offset_arg: 1,
-            stride,
-        },
-        PtrDirection::Add => CallEffect::ReturnPointerAdd {
-            base_arg: 0,
-            offset_arg: 1,
-            stride,
-            dereferenceable: false,
-        },
-    };
-    vec![effect]
 }
 
 fn eff_write_mem(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

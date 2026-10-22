@@ -59,12 +59,6 @@ pub(crate) enum CallEffect {
         /// opposed to plain `add` arithmetic whose result may be one-past-end.
         dereferenceable: bool,
     },
-    /// The return value is `base - offset * stride`.
-    ReturnPointerSub {
-        base_arg: usize,
-        offset_arg: usize,
-        stride: Option<u64>,
-    },
     ReturnPtrOffsetFrom { ptr_arg: usize, base_arg: usize },
     /// The return value is known to be non-zero.
     ReturnNonZero,

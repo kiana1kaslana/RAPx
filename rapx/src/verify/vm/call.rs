@@ -931,60 +931,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.apply_pointer_add(dest, base, offset, *stride, *dereferenceable);
                 }
             }
-            CallEffect::ReturnPointerSub {
-                base_arg,
-                offset_arg,
-                stride,
-            } => {
-                let stride = *stride;
-                if let (Some(base), Some(offset)) = (args.get(*base_arg), args.get(*offset_arg)) {
-                    let stride_term = self.pointer_stride_term(dest, stride);
-                    let scaled = if stride == Some(1) {
-                        offset.z3_term.clone()
-                    } else {
-                        Int::mul(self.z3_ctx, &[&offset.z3_term, &stride_term])
-                    };
-                    let new_term = Int::sub(self.z3_ctx, &[&base.z3_term, &scaled]);
-                    let element_offset = if stride == Some(1) {
-                        None
-                    } else {
-                        match base.provenance.as_ref().and_then(|p| match &p.offset_kind {
-                            Some(OffsetKind::Element(e)) => Some(e.clone()),
-                            _ => None,
-                        }) {
-                            Some(e) => Some(Int::sub(self.z3_ctx, &[&e, &offset.z3_term])),
-                            None => None,
-                        }
-                    };
-                    let offset_kind = if let Some(e) = element_offset {
-                        Some(OffsetKind::Element(e))
-                    } else {
-                        Some(OffsetKind::Byte)
-                    };
-                    let adjusted_provenance = base.provenance.as_ref().map(|prov| Provenance {
-                        alloc_id: prov.alloc_id,
-                        offset: Int::sub(self.z3_ctx, &[&prov.offset, &scaled]),
-                        offset_kind,
-                    });
-                    let align_n = match stride {
-                        Some(s) => self.compute_pointer_add_align(base, s),
-                        None => base.facts.align_n.clone(),
-                    };
-                    let val = VmValue {
-                        z3_term: new_term,
-                        ty: self.body().local_decls[dest].ty,
-                        provenance: adjusted_provenance,
-                        facts: ValueFacts {
-                            non_null: base.facts.non_null,
-                            in_bounds: base.facts.in_bounds,
-                            align_n,
-                            init: base.facts.init,
-                        },
-                        source: ValueSource::None,
-                    };
-                    self.set_local(dest, val);
-                }
-            }
             CallEffect::ReturnPtrOffsetFrom { ptr_arg, base_arg } => {
                 let dest_ty = self.body().local_decls[dest].ty;
                 let ptr = args.get(*ptr_arg).cloned();
