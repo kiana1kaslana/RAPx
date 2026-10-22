@@ -8,7 +8,6 @@ use crate::verify::checkpoint::Checkpoint;
 use crate::verify::contract::Property;
 use crate::verify::report::{CheckResult, UnknownReason};
 use crate::verify::vm::state::VmState;
-use z3::ast::Ast;
 
 use super::PropertyChecker;
 
@@ -55,22 +54,6 @@ impl PropertyChecker {
         // (whose provenance names the container allocation) is a valid owner.
         if vm_state.alloc(alloc_id).facts.for_each.owning {
             return CheckResult::ProvedByRule;
-        }
-        // Checker-level count: the accessed range `size_of(T) * count` must lie
-        // within the allocation (a missing `count` defaults to `1`).
-        let access = self.access_bytes(vm_state, property, 1, 2, checkpoint, &value);
-        let size = vm_state.allocation_size(alloc_id);
-        if let (Some(off), Some(size_val), Some(access_val)) = (
-            value
-                .provenance
-                .as_ref()
-                .and_then(|p| p.offset.simplify().as_u64()),
-            size.as_u64(),
-            access.as_u64(),
-        ) {
-            if off.saturating_add(access_val) > size_val {
-                return CheckResult::Failed;
-            }
         }
         // Owning(p): p is the sole carrier of *p's ownership. A live `needs_drop`
         // owner whose buffer aliases `alloc_id` means a second owner will drop the

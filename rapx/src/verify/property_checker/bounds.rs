@@ -450,41 +450,38 @@ impl PropertyChecker {
                 return CheckResult::ProvedByRule;
             }
 
-        // Try range-based overlap detection when count and element size are available.
-        if let Some(count_term) = checkpoint
+        let Some(count_term) = checkpoint
             .args
             .get(2)
             .map(|op| vm_state.value_of_operand(op).z3_term)
-        {
-            // Use the pointee element size from either pointer type.
-            let elem_size = vm_state
-                .pointee_elem_size(v1.ty)
-                .max(vm_state.pointee_elem_size(v2.ty))
-                .max(1);
-            if let Some(count) = count_term.simplify().as_u64() {
-                let range = Int::from_u64(vm_state.z3_ctx, elem_size * count.max(1));
-                let src_end = Int::add(vm_state.z3_ctx, &[&v1.z3_term, &range]);
-                let dst_end = Int::add(vm_state.z3_ctx, &[&v2.z3_term, &range]);
-                solver.push();
-                let overlap = Bool::and(
-                    vm_state.z3_ctx,
-                    &[&v1.z3_term.lt(&dst_end), &v2.z3_term.lt(&src_end)],
-                );
-                solver.assert(&overlap);
-                let r = match solver.check() {
-                    SatResult::Unsat => CheckResult::ProvedBySmt,
-                    SatResult::Sat => CheckResult::Failed,
-                    _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
-                };
-                solver.pop(1);
-                return r;
-            }
+        else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        };
+        let elem_size = vm_state
+            .pointee_elem_size(v1.ty)
+            .max(vm_state.pointee_elem_size(v2.ty));
+        if count_term.simplify().as_u64() == Some(0) {
+            return CheckResult::ProvedByRule;
         }
-
-        // Fallback: check pointer-distinctness.
+        if elem_size == 0 {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        }
+        let range = Int::mul(
+            vm_state.z3_ctx,
+            &[&Int::from_u64(vm_state.z3_ctx, elem_size), &count_term],
+        );
+        let src_end = Int::add(vm_state.z3_ctx, &[&v1.z3_term, &range]);
+        let dst_end = Int::add(vm_state.z3_ctx, &[&v2.z3_term, &range]);
         solver.push();
-        let ne = v1.z3_term._eq(&v2.z3_term).not();
-        solver.assert(&ne);
+        let overlap = Bool::and(
+            vm_state.z3_ctx,
+            &[
+                &range.gt(&Int::from_u64(vm_state.z3_ctx, 0)),
+                &v1.z3_term.lt(&dst_end),
+                &v2.z3_term.lt(&src_end),
+            ],
+        );
+        solver.assert(&overlap);
         let r = match solver.check() {
             SatResult::Unsat => CheckResult::ProvedBySmt,
             SatResult::Sat => CheckResult::Failed,

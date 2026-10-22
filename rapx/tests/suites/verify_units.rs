@@ -492,9 +492,47 @@ sound_tests! {
     nonoverlap_sound_02: "verify_units/nonoverlap_sound_02" => "sound_copy_nonoverlapping_disjoint",
 }
 
+#[test]
+fn nonoverlap_sound_zero_copy() {
+    let output = run_with_args("verify_units/nonoverlap_sound_02", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_zero_copy_same_pointer", "SOUND");
+}
+
+#[test]
+fn nonoverlap_sound_symbolic() {
+    let output = run_with_args("verify_units/nonoverlap_sound_02", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_symbolic_disjoint_copy", "SOUND");
+}
+
+#[test]
+fn manually_drop_reinit_sound() {
+    let output = run_with_args("verify_units/manually_drop_reinit", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_reinitialize_after_drop", "SOUND");
+}
+
+#[test]
+fn manually_drop_reinit_box_sound() {
+    let output = run_with_args("verify_units/manually_drop_reinit", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_reinitialize_box_after_drop", "SOUND");
+}
+
+#[test]
+fn manually_drop_double_drop_unsound() {
+    let output = run_with_args("verify_units/manually_drop_reinit", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "unsound_double_drop_box", "UNSOUND");
+}
+
 // ================ NonOverlap Unsound Cases =============
 unsound_tests! {
     nonoverlap_unsound_01: "verify_units/nonoverlap_unsound_01" => "unsound_copy_nonoverlapping_overlap" => "NonOverlap",
+}
+
+#[test]
+fn nonoverlap_unsound_symbolic() {
+    let output = run_with_args("verify_units/nonoverlap_unsound_01", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "unsound_symbolic_overlapping_copy", "UNSOUND");
+    let block = extract_block_after(&output, "function: unsound_symbolic_overlapping_copy");
+    assert_contain(&block, "NonOverlap | Failed");
 }
 
 // ================ NoPadding (intrinsics::raw_eq) Cases =============

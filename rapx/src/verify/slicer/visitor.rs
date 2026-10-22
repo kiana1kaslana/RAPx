@@ -194,16 +194,13 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 bind_callsite_roots(visitor.tcx, &mut relevant, cs);
             }
             let mut items = Vec::new();
-            // The block's *terminator* is the checkpoint for an unsafe call, but
-            // for a statement-level checkpoint (raw-ptr-deref / static-mut-access)
-            // the terminator executes *after* the checked statement, so it must not
-            // be part of the slice: a `drop(box)` in the same block would otherwise
-            // mark the heap dead before the deref's `Allocated` check reads it.
-            let is_statement_checkpoint = matches!(
+            let skip_terminator = matches!(
                 bind_checkpoint.map(|c| c.kind),
                 Some(CheckpointKind::RawPtrDeref) | Some(CheckpointKind::StaticMutAccess)
+            ) || crate::verify::api_classify::is_manually_drop_drop(
+                bind_checkpoint.and_then(|c| c.callee),
             );
-            if !is_statement_checkpoint {
+            if !skip_terminator {
                 items.push(RelevantItem::Terminator {
                     def_id: caller,
                     block: checkpoint_block,

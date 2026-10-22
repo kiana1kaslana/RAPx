@@ -11,3 +11,11 @@ pub fn unsound_copy_nonoverlapping_overlap(data: &mut [u32; 4]) {
         std::ptr::copy_nonoverlapping(src, dst, 2);
     }
 }
+
+#[rapx::verify]
+pub fn unsound_symbolic_overlapping_copy(data: &mut [u32; 4], n: usize) {
+    if n == 1 {
+        let ptr = data.as_mut_ptr();
+        unsafe { std::ptr::copy_nonoverlapping(ptr, ptr, n) };
+    }
+}

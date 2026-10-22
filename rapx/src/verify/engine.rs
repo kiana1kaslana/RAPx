@@ -26,6 +26,12 @@ use super::{
     vm::SymbolicVm,
 };
 
+enum LocalAccess {
+    None,
+    Read,
+    Reinitialized,
+}
+
 /// The three verification stages: a backward [`BackwardSlicer`], a
 /// [`SymbolicVm`], and a [`PropertyChecker`].
 pub(crate) struct VerifyEngine<'tcx> {
@@ -162,9 +168,13 @@ impl<'tcx> VerifyEngine<'tcx> {
                         if def2 != caller {
                             continue;
                         }
-                        if Self::block_uses_local(self.tcx, caller, local2, slot) {
-                            used = true;
-                            break;
+                        match Self::block_local_access(self.tcx, caller, local2, slot) {
+                            LocalAccess::None => {}
+                            LocalAccess::Read => {
+                                used = true;
+                                break;
+                            }
+                            LocalAccess::Reinitialized => break,
                         }
                     }
                 }
@@ -221,41 +231,57 @@ impl<'tcx> VerifyEngine<'tcx> {
         }
     }
 
-    /// Whether any statement or terminator in `block` reads/writes `local`.
-    fn block_uses_local(tcx: TyCtxt<'tcx>, caller: DefId, block: usize, local: Local) -> bool {
+    /// Classify the first access to `local` in `block` after a manual drop.
+    fn block_local_access(
+        tcx: TyCtxt<'tcx>,
+        caller: DefId,
+        block: usize,
+        local: Local,
+    ) -> LocalAccess {
         let body = tcx.optimized_mir(caller);
         let data = &body.basic_blocks[BasicBlock::from(block)];
         for stmt in &data.statements {
             if let StatementKind::Assign(assign) = &stmt.kind {
                 let (target, rvalue) = assign.as_ref();
-                if target.local == local {
-                    return true;
-                }
                 if mir_utils::rvalue_any_place_matching(rvalue, &mut |p| {
                     p.local == local
                 }) {
-                    return true;
+                    return LocalAccess::Read;
+                }
+                if target.local == local {
+                    return if target.projection.is_empty() {
+                        LocalAccess::Reinitialized
+                    } else {
+                        LocalAccess::Read
+                    };
                 }
             }
         }
         if let Some(terminator) = &data.terminator {
             use rustc_middle::mir::TerminatorKind;
             match &terminator.kind {
-                TerminatorKind::Call { args, .. } => {
+                TerminatorKind::Call { args, destination, .. } => {
                     if args.iter().any(|a| match &a.node {
                         Operand::Copy(p) | Operand::Move(p) => p.local == local,
                         Operand::Constant(_) => false,
                         #[cfg(rapx_ge_95)]
                         Operand::RuntimeChecks(_) => false,
                     }) {
-                        return true;
+                        return LocalAccess::Read;
+                    }
+                    if destination.local == local {
+                        return if destination.projection.is_empty() {
+                            LocalAccess::Reinitialized
+                        } else {
+                            LocalAccess::Read
+                        };
                     }
                 }
                 TerminatorKind::SwitchInt { discr, .. }
                 | TerminatorKind::Assert { cond: discr, .. } => match discr {
                     Operand::Copy(p) | Operand::Move(p) => {
                         if p.local == local {
-                            return true;
+                            return LocalAccess::Read;
                         }
                     }
                     Operand::Constant(_) => {}
@@ -264,12 +290,12 @@ impl<'tcx> VerifyEngine<'tcx> {
                 },
                 TerminatorKind::Drop { place, .. }
                     if place.local == local => {
-                        return true;
+                        return LocalAccess::Read;
                     }
                 _ => {}
             }
         }
-        false
+        LocalAccess::None
     }
 
     /// Insert `CalleeEntry`/`CalleeExit` markers into a forward item stream by
