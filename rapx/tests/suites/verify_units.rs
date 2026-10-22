@@ -273,10 +273,23 @@ unsound_tests! {
     call_summary_conditional_write: "verify_units/call_summary_unsound" => "conditional_write" => "ValidNum",
     call_summary_conditional_write_noninlined: "verify_units/call_summary_unsound" => "conditional_write_noninlined" => "ValidNum",
     call_summary_unconditional_write: "verify_units/call_summary_unsound" => "unconditional_write" => "ValidNum",
+    call_summary_aliased_write: "verify_units/call_summary_unsound" => "aliased_write" => "ValidNum",
+    call_summary_aliased_write_noninlined: "verify_units/call_summary_unsound" => "aliased_write_noninlined" => "ValidNum",
+    call_summary_reborrowed_write: "verify_units/call_summary_unsound" => "reborrowed_write" => "ValidNum",
+    call_summary_ptr_write_in_helper: "verify_units/call_summary_unsound" => "ptr_write_in_helper" => "ValidNum",
+    call_summary_copied_zero: "verify_units/call_summary_unsound" => "copied_zero" => "ValidNum",
+    call_summary_copied_zero_in_helper: "verify_units/call_summary_unsound" => "copied_zero_in_helper" => "ValidNum",
     call_summary_saturating_sub: "verify_units/call_summary_unsound" => "saturating_sub_zero" => "ValidNum",
     call_summary_saturating_add: "verify_units/call_summary_unsound" => "saturating_add_max" => "ValidNum",
     call_summary_wrapping_sub: "verify_units/call_summary_unsound" => "wrapping_sub_max" => "ValidNum",
     validnum_ifelse_unsound_01: "verify_units/validnum_ifelse_unsound_1" => "unsound_sized_ifelse" => "ValidNum",
+}
+
+#[test]
+fn call_summary_copy_controls() {
+    let output = run_with_args("verify_units/call_summary_unsound", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "copied_positive", "SOUND");
+    assert_function_result(&output, "zero_count_copy", "SOUND");
 }
 
 // ================ ValidNum Manual Unsound Cases =============

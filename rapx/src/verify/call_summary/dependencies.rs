@@ -31,6 +31,13 @@ fn trace_to_callee_arg<'tcx>(
         Operand::Copy(place) | Operand::Move(place) => place.local,
         _ => return None,
     };
+    trace_local_to_callee_arg(body, local)
+}
+
+fn trace_local_to_callee_arg(
+    body: &rustc_middle::mir::Body<'_>,
+    local: rustc_middle::mir::Local,
+) -> Option<usize> {
     let mut queue = VecDeque::from([local]);
     let mut seen = HashSet::from([local]);
     while let Some(current) = queue.pop_front() {
@@ -226,7 +233,7 @@ fn write_args_on_path<'tcx>(
             };
             let dest = &assign.0;
             if dest.projection.first() == Some(&ProjectionElem::Deref)
-                && let Some(arg) = helpers::arg_of_local(dest.local, body.arg_count) {
+                && let Some(arg) = trace_local_to_callee_arg(body, dest.local) {
                     writes.insert(arg);
                 }
         }
@@ -245,6 +252,16 @@ fn write_args_on_path<'tcx>(
                 .and_then(|arg| trace_to_callee_arg(body, &arg.node))
             {
                 writes.insert(pointer_arg);
+            }
+            continue;
+        }
+
+        if crate::verify::api_classify::is_ptr_copy(helpers::dep_callee_def_id(func)) {
+            if let Some(destination_arg) = args
+                .get(1)
+                .and_then(|arg| trace_to_callee_arg(body, &arg.node))
+            {
+                writes.insert(destination_arg);
             }
             continue;
         }

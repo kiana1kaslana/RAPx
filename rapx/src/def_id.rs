@@ -927,6 +927,14 @@ intrinsics! {
         "std::ptr::write_bytes",
         "core::ptr::write_bytes"
     ],
+    ptr_copy: &[
+        "std::ptr::copy",
+        "core::ptr::copy"
+    ],
+    ptr_copy_nonoverlapping: &[
+        "std::ptr::copy_nonoverlapping",
+        "core::ptr::copy_nonoverlapping"
+    ],
     // ── Core intrinsics ──
     intrinsics_copy: &[
         "std::intrinsics::copy",

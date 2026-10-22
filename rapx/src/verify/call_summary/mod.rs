@@ -74,6 +74,7 @@ pub(crate) enum CallEffect {
     ReturnConst { value: u64 },
     /// The call writes one initialized element through a pointer argument.
     WriteMemory { pointer_arg: usize },
+    CopyMemory { source_arg: usize, destination_arg: usize, count_arg: usize },
     /// The return value is a pointer backed by a fresh allocation of
     /// `size_arg` elements × `elem_size` bytes. The base address is taken
     /// from `pointer_arg`. Used for `from_raw_parts(ptr, len)`.
@@ -238,6 +239,11 @@ pub(crate) fn dependency_summary<'tcx>(
     // MIR dataflow first: works for local and cross-crate (`#[inline]`)
     // callees alike, no hand-written table needed.
     if let Some(callee) = callee {
+        if crate::verify::api_classify::is_ptr_copy(Some(callee)) && arg_count > 1 {
+            let mut summary = CallDependencySummary::fallback(arg_count);
+            summary.write_args.push(1);
+            return summary;
+        }
         if tcx.intrinsic(callee).is_some() || mir_utils::is_drop_in_place(callee) {
             return CallDependencySummary::fallback(arg_count);
         }

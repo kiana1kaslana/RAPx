@@ -19,7 +19,7 @@ use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
 use crate::verify::api_classify;
 use crate::verify::call_summary::{self, BoundedArithmeticOp, CallEffect, OverflowOp};
-use super::state::{AllocId, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
+use super::state::{AllocId, AllocKind, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Execute a call terminator, dispatching by precision:
@@ -228,15 +228,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // Apply deferred field writes (`(*self).field = val` through a
         // `&mut self` reborrow) collected during the callee's execution, now
         // that the caller's frame (and its address map) is live again.
-        for (local, path, value) in std::mem::take(&mut self.inline.deferred_field_writes) {
-            if path.is_empty() {
-                self.set_local(local, value);
-            } else {
-                self.set_field_value(local, path, value);
-            }
-        }
+        let writes = std::mem::take(&mut self.inline.deferred_field_writes);
         self.inline.arg_referents = saved_inline_arg_referents;
         self.inline.deferred_field_writes = saved_deferred_field_writes;
+        self.replay_deferred_writes(writes);
 
         // ── Write return value to caller destination ──
         let dest_ty = self.body().local_decls[dest].ty;
@@ -1272,6 +1267,51 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     vec![0],
                     VmValue::new(term, payload_ty),
                 );
+            }
+            CallEffect::CopyMemory { source_arg, destination_arg, count_arg } => {
+                if let (Some(source), Some(target), Some(count)) = (
+                    args.get(*source_arg),
+                    args.get(*destination_arg),
+                    args.get(*count_arg),
+                ) {
+                    let concrete_count = count.z3_term.simplify().as_u64();
+                    if concrete_count == Some(0) {
+                        return;
+                    }
+                    let pointee_ty = match target.ty.kind() {
+                        TyKind::Ref(_, inner, _) | TyKind::RawPtr(inner, _) => *inner,
+                        _ => return,
+                    };
+                    let local_target = self.find_local_by_address(&target.z3_term)
+                        .is_some_and(|local| self.body().local_decls[local].ty == pointee_ty);
+                    let object_target = target.provenance.as_ref().is_some_and(|prov| {
+                        let alloc = self.alloc(prov.alloc_id);
+                        matches!(&alloc.kind, AllocKind::Object)
+                            && alloc.element_ty.as_ty() == Some(pointee_ty)
+                            && prov.offset.simplify().as_u64() == Some(0)
+                    });
+                    if !local_target && !object_target {
+                        return;
+                    }
+                    let source_value = self.find_local_by_address(&source.z3_term)
+                        .and_then(|local| self.local_value(local).cloned())
+                        .or_else(|| source.provenance.as_ref()
+                            .and_then(|prov| self.load_value(prov.alloc_id, pointee_ty, &[]).cloned()));
+                    let copied = if concrete_count == Some(1) {
+                        source_value.unwrap_or_else(|| VmValue::new(self.fresh_int("copy_value"), pointee_ty))
+                    } else {
+                        VmValue::new(self.fresh_int("copy_value"), pointee_ty)
+                    };
+                    if let Some(prov) = &target.provenance {
+                        let content = self.content_mut(prov.alloc_id);
+                        content.values.clear();
+                        content.byte_array = None;
+                        content.byte_written.clear();
+                        content.facts.cstr_trusted = false;
+                        content.facts.utf8_trusted = false;
+                    }
+                    self.write_through_pointer(target, Vec::new(), copied);
+                }
             }
             CallEffect::WriteMemory { pointer_arg } => {
                 if let Some(arg_val) = args.get(*pointer_arg)
@@ -2453,6 +2493,48 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }
         }
         None
+    }
+
+    pub(crate) fn write_through_pointer(
+        &mut self,
+        pointer: &VmValue<'z3, 'tcx>,
+        path: Vec<usize>,
+        value: VmValue<'z3, 'tcx>,
+    ) {
+        let caller_referent = self.inline.arg_referents.iter().enumerate().find_map(|(i, referent)| {
+            let param = Local::from_usize(i + 1);
+            self.local_value(param)
+                .filter(|arg| arg.z3_term == pointer.z3_term)
+                .and_then(|_| *referent)
+        });
+        if let Some(local) = caller_referent {
+            self.inline.deferred_field_writes.push((local, path, value));
+        } else if let Some(local) = self.find_local_by_address(&pointer.z3_term) {
+            if path.is_empty() {
+                self.set_local(local, value);
+            } else {
+                self.set_field_value(local, path, value);
+            }
+        }
+    }
+
+    pub(crate) fn replay_deferred_writes(
+        &mut self,
+        writes: Vec<(Local, Vec<usize>, VmValue<'z3, 'tcx>)>,
+    ) {
+        for (local, path, value) in writes {
+            let arg_idx = local.as_usize().checked_sub(1);
+            let outer_referent = arg_idx
+                .and_then(|i| self.inline.arg_referents.get(i).copied().flatten())
+                .filter(|_| matches!(self.body().local_decls[local].ty.kind(), TyKind::Ref(..) | TyKind::RawPtr(..)));
+            if let Some(referent) = outer_referent {
+                self.inline.deferred_field_writes.push((referent, path, value));
+            } else if path.is_empty() {
+                self.set_local(local, value);
+            } else {
+                self.set_field_value(local, path, value);
+            }
+        }
     }
 
     /// Resolve a *whole-place* reborrow (`_7 = &mut (*_1)` / `_7 = &(*_1)`,

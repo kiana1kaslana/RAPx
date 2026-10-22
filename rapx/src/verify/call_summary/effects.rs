@@ -67,6 +67,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
     ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
     ED!(api_classify::is_intrinsic_wrapping_sub, eff_wrapping_sub),
+    ED!(api_classify::is_ptr_copy, eff_copy_memory),
     ED!(api_classify::is_intrinsic_nonzero_preserving, eff_return_nonzero_iff),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
@@ -271,6 +272,14 @@ fn eff_ptr_arith(
 
 fn eff_write_mem(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::WriteMemory { pointer_arg: 0 }]
+}
+
+fn eff_copy_memory(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::CopyMemory {
+        source_arg: 0,
+        destination_arg: 1,
+        count_arg: 2,
+    }]
 }
 
 fn eff_cmp_min(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

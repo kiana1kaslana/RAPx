@@ -326,6 +326,18 @@ pub fn is_ptr_write(callee: Option<DefId>) -> bool {
     )
 }
 
+pub fn is_ptr_copy(callee: Option<DefId>) -> bool {
+    any_opt(
+        callee,
+        &[
+            def_id::ptr_copy(),
+            def_id::ptr_copy_nonoverlapping(),
+            def_id::intrinsics_copy(),
+            def_id::intrinsics_copy_nonoverlapping(),
+        ],
+    )
+}
+
 /// Whether `callee` reads through a raw pointer or copies memory
 /// (`ptr::read`/`read_unaligned`/`read_volatile`, `copy_to`/`copy_from`,
 /// `MaybeUninit::assume_init_read`, and intrinsics `copy`/`copy_nonoverlapping`).

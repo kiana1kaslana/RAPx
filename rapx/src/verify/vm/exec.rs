@@ -199,19 +199,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if let Some(frame) = self.caller_frames.pop() {
             self.restore_frame(frame);
         }
-        for (local, path, value) in std::mem::take(&mut self.inline.deferred_field_writes) {
-            if path.is_empty() {
-                self.set_local(local, value);
-            } else {
-                self.set_field_value(local, path, value);
-            }
-        }
+        let writes = std::mem::take(&mut self.inline.deferred_field_writes);
         self.inline.arg_referents = self.inline.path_saved_arg_referents.pop().unwrap_or_default();
         self.inline.deferred_field_writes = self
             .inline
             .path_saved_deferred_writes
             .pop()
             .unwrap_or_default();
+        self.replay_deferred_writes(writes);
         if let Some(mut v) = ret {
             let dest_ty = self.body().local_decls[Local::from_usize(dest)].ty;
             v.ty = dest_ty;
