@@ -18,7 +18,7 @@ use crate::compat::{FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
 use crate::verify::api_classify;
-use crate::verify::call_summary::{self, CallEffect, OverflowOp};
+use crate::verify::call_summary::{self, BoundedArithmeticOp, CallEffect, OverflowOp};
 use super::state::{AllocId, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
@@ -229,7 +229,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // `&mut self` reborrow) collected during the callee's execution, now
         // that the caller's frame (and its address map) is live again.
         for (local, path, value) in std::mem::take(&mut self.inline.deferred_field_writes) {
-            self.set_field_value(local, path, value);
+            if path.is_empty() {
+                self.set_local(local, value);
+            } else {
+                self.set_field_value(local, path, value);
+            }
         }
         self.inline.arg_referents = saved_inline_arg_referents;
         self.inline.deferred_field_writes = saved_deferred_field_writes;
@@ -484,6 +488,45 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             let dest_ty = self.body().local_decls[dest].ty;
             self.set_local(dest, VmValue::new(f(&lhs.z3_term, &rhs.z3_term), dest_ty));
         }
+    }
+
+    pub(crate) fn integer_limits(&self, ty: Ty<'tcx>) -> Option<(Int<'z3>, Int<'z3>, Int<'z3>, bool)> {
+        let signed = match ty.kind() {
+            TyKind::Int(_) => true,
+            TyKind::Uint(_) => false,
+            _ => return None,
+        };
+        let (_, bytes) = mir_utils::type_layout(self.tcx, self.current_frame.current_def_id, ty)?;
+        let bits = bytes.checked_mul(8)?;
+        if bits == 0 || bits > 128 {
+            return None;
+        }
+        let unsigned_max = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+        let modulus = Int::add(self.z3_ctx, &[
+            &Int::from_str(self.z3_ctx, &unsigned_max.to_string())?,
+            &Int::from_u64(self.z3_ctx, 1),
+        ]);
+        let (min, max) = if signed {
+            let signed_max = if bits == 128 {
+                i128::MAX
+            } else {
+                (1i128 << (bits - 1)) - 1
+            };
+            let signed_min = if bits == 128 {
+                i128::MIN
+            } else {
+                -(1i128 << (bits - 1))
+            };
+            (signed_min.to_string(), signed_max.to_string())
+        } else {
+            ("0".to_string(), unsigned_max.to_string())
+        };
+        Some((
+            Int::from_str(self.z3_ctx, &min)?,
+            Int::from_str(self.z3_ctx, &max)?,
+            modulus,
+            signed,
+        ))
     }
 
     /// Apply a unary numeric effect: compute `f(a.z3_term)` and store it as the
@@ -1085,15 +1128,40 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     Int::add(self.z3_ctx, &[lhs, rhs])
                 });
             }
-            CallEffect::ReturnSub { lhs_arg, rhs_arg } => {
-                self.apply_binary_num(dest, args, *lhs_arg, *rhs_arg, |lhs, rhs| {
-                    Int::sub(self.z3_ctx, &[lhs, rhs])
-                });
-            }
             CallEffect::ReturnMul { lhs_arg, rhs_arg } => {
                 self.apply_binary_num(dest, args, *lhs_arg, *rhs_arg, |lhs, rhs| {
                     Int::mul(self.z3_ctx, &[lhs, rhs])
                 });
+            }
+            CallEffect::ReturnBoundedArithmetic { lhs_arg, rhs_arg, op } => {
+                if let (Some(lhs), Some(rhs)) = (args.get(*lhs_arg), args.get(*rhs_arg)) {
+                    let dest_ty = self.body().local_decls[dest].ty;
+                    let Some((min, max, modulus, signed)) = self.integer_limits(dest_ty)
+                        .or_else(|| self.integer_limits(lhs.ty))
+                    else {
+                        return;
+                    };
+                    let raw = match op {
+                        BoundedArithmeticOp::SaturatingAdd =>
+                            Int::add(self.z3_ctx, &[&lhs.z3_term, &rhs.z3_term]),
+                        BoundedArithmeticOp::SaturatingSub | BoundedArithmeticOp::WrappingSub =>
+                            Int::sub(self.z3_ctx, &[&lhs.z3_term, &rhs.z3_term]),
+                    };
+                    let term = match op {
+                        BoundedArithmeticOp::SaturatingAdd | BoundedArithmeticOp::SaturatingSub => {
+                            raw.lt(&min).ite(&min, &raw.gt(&max).ite(&max, &raw))
+                        }
+                        BoundedArithmeticOp::WrappingSub => {
+                            let wrapped = raw.modulo(&modulus);
+                            if signed {
+                                wrapped.gt(&max).ite(&Int::sub(self.z3_ctx, &[&wrapped, &modulus]), &wrapped)
+                            } else {
+                                wrapped
+                            }
+                        }
+                    };
+                    self.set_local(dest, VmValue::new(term, dest_ty));
+                }
             }
             CallEffect::ReturnWithOverflow {
                 lhs_arg,

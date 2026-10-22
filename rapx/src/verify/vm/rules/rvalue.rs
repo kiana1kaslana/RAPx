@@ -207,7 +207,23 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
         state.apply_pointer_add(dest_place.local, &lhs, &rhs, stride, false);
         return state.local_value(dest_place.local).cloned();
     }
-    let term = state.eval_binary_op(op, &lhs.z3_term, &rhs.z3_term);
+    let raw_term = state.eval_binary_op(op, &lhs.z3_term, &rhs.z3_term);
+    let term = if op == BinOp::Sub
+        && api_classify::is_integer_wrapping_sub_method(Some(state.current_frame.current_def_id))
+    {
+        if let Some((_, max, modulus, signed)) = state.integer_limits(lhs.ty) {
+            let wrapped = raw_term.modulo(&modulus);
+            if signed {
+                wrapped.gt(&max).ite(&Int::sub(state.z3_ctx, &[&wrapped, &modulus]), &wrapped)
+            } else {
+                wrapped
+            }
+        } else {
+            raw_term
+        }
+    } else {
+        raw_term
+    };
     let provenance = state.provenance_for_binary_op(op, &lhs, &rhs);
     let invariants = state.facts_for_binary_op(op, &lhs, &rhs, &provenance);
     let lhs_pk = mir_utils::operand_place(lhs_op);

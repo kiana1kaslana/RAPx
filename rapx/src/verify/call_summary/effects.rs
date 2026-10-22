@@ -12,7 +12,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 
-use super::{CallEffect, CallEffectSummary, OverflowOp};
+use super::{BoundedArithmeticOp, CallEffect, CallEffectSummary, OverflowOp};
 use crate::def_id;
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
 use crate::verify::api_classify;
@@ -62,11 +62,11 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
     ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
     ED!(api_classify::is_intrinsic_integer_max, eff_return_max),
-    ED!(api_classify::is_intrinsic_saturating_add, eff_return_add),
-    ED!(api_classify::is_intrinsic_saturating_sub, eff_return_sub),
+    ED!(api_classify::is_intrinsic_saturating_add, eff_saturating_add),
+    ED!(api_classify::is_intrinsic_saturating_sub, eff_saturating_sub),
     ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
     ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
-    ED!(api_classify::is_intrinsic_wrapping_sub, eff_return_sub),
+    ED!(api_classify::is_intrinsic_wrapping_sub, eff_wrapping_sub),
     ED!(api_classify::is_intrinsic_nonzero_preserving, eff_return_nonzero_iff),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
@@ -302,17 +302,34 @@ fn eff_return_add(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     }]
 }
 
-fn eff_return_sub(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnSub {
+fn eff_return_mul(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnMul {
         lhs_arg: 0,
         rhs_arg: 1,
     }]
 }
 
-fn eff_return_mul(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnMul {
+fn eff_saturating_add(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnBoundedArithmetic {
         lhs_arg: 0,
         rhs_arg: 1,
+        op: BoundedArithmeticOp::SaturatingAdd,
+    }]
+}
+
+fn eff_saturating_sub(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnBoundedArithmetic {
+        lhs_arg: 0,
+        rhs_arg: 1,
+        op: BoundedArithmeticOp::SaturatingSub,
+    }]
+}
+
+fn eff_wrapping_sub(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnBoundedArithmetic {
+        lhs_arg: 0,
+        rhs_arg: 1,
+        op: BoundedArithmeticOp::WrappingSub,
     }]
 }
 

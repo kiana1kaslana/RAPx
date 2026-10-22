@@ -578,7 +578,15 @@ impl<'tcx> BackwardSlicer<'tcx> {
             _ => false,
         };
 
-        if defs.intersects(relevant) || is_provenance_carrier || is_iter_ptr_write || is_byte_write
+        let is_pointee_write = matches!(&statement.kind, StatementKind::Assign(assign) if
+            assign.0.projection.first().is_some_and(|p|
+                matches!(p.kind(), rustc_middle::mir::ProjectionElem::Deref)));
+
+        if defs.intersects(relevant)
+            || is_provenance_carrier
+            || is_iter_ptr_write
+            || is_byte_write
+            || is_pointee_write
         {
             let mut uses = collect_statement_uses(statement, block, statement_index, flow, &defs);
             items.push(RelevantItem::Statement {

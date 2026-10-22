@@ -738,6 +738,10 @@ pub fn is_intrinsic_unchecked_mul(callee: Option<DefId>) -> bool {
 pub fn is_intrinsic_wrapping_sub(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_wrapping_sub()])
 }
+
+pub fn is_integer_wrapping_sub_method(callee: Option<DefId>) -> bool {
+    any_def(callee, def_id::integer_wrapping_sub_fns())
+}
 pub fn is_checked_next_pow2(callee: Option<DefId>) -> bool {
     any_def(callee, def_id::checked_next_pow2_fns())
 }

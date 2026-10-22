@@ -92,10 +92,13 @@ pub(crate) enum CallEffect {
     ReturnMax { lhs_arg: usize, rhs_arg: usize },
     /// The return value is `lhs_arg + rhs_arg`.
     ReturnAdd { lhs_arg: usize, rhs_arg: usize },
-    /// The return value is `lhs_arg - rhs_arg`.
-    ReturnSub { lhs_arg: usize, rhs_arg: usize },
     /// The return value is `lhs_arg * rhs_arg`.
     ReturnMul { lhs_arg: usize, rhs_arg: usize },
+    ReturnBoundedArithmetic {
+        lhs_arg: usize,
+        rhs_arg: usize,
+        op: BoundedArithmeticOp,
+    },
     ReturnWithOverflow {
         lhs_arg: usize,
         rhs_arg: usize,
@@ -215,6 +218,13 @@ pub(crate) enum OverflowOp {
     Add,
     Sub,
     Mul,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BoundedArithmeticOp {
+    SaturatingAdd,
+    SaturatingSub,
+    WrappingSub,
 }
 
 /// Return dependency information for a MIR call terminator.

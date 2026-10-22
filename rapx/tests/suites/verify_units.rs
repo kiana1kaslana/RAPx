@@ -270,6 +270,12 @@ unsound_tests! {
     validnum_unsound_03: "verify_units/validnum_unsound_3" => "unsound_partial_sum_guard" => "ValidNum",
     validnum_unsound_04: "verify_units/validnum_unsound_4" => "unsound_trait_bound_missing_size_limit" => "ValidNum",
     validnum_unsound_05: "verify_units/validnum_unsound_5" => "unsound_interval_inclusive_guard" => "ValidNum",
+    call_summary_conditional_write: "verify_units/call_summary_unsound" => "conditional_write" => "ValidNum",
+    call_summary_conditional_write_noninlined: "verify_units/call_summary_unsound" => "conditional_write_noninlined" => "ValidNum",
+    call_summary_unconditional_write: "verify_units/call_summary_unsound" => "unconditional_write" => "ValidNum",
+    call_summary_saturating_sub: "verify_units/call_summary_unsound" => "saturating_sub_zero" => "ValidNum",
+    call_summary_saturating_add: "verify_units/call_summary_unsound" => "saturating_add_max" => "ValidNum",
+    call_summary_wrapping_sub: "verify_units/call_summary_unsound" => "wrapping_sub_max" => "ValidNum",
     validnum_ifelse_unsound_01: "verify_units/validnum_ifelse_unsound_1" => "unsound_sized_ifelse" => "ValidNum",
 }
 

@@ -422,6 +422,8 @@ pub(crate) struct InlineCtx<'z3, 'tcx> {
     /// `exec_assign` to resolve `(*self).field = val` writes through a `&mut
     /// self` reborrow temp back to the caller's referent.
     pub arg_referents: Vec<Option<Local>>,
+    pub path_saved_arg_referents: Vec<Vec<Option<Local>>>,
+    pub path_saved_deferred_writes: Vec<Vec<(Local, Vec<usize>, VmValue<'z3, 'tcx>)>>,
     /// Field writes through a `&mut` argument collected during
     /// `exec_inline_call`, replayed against the caller's field values after
     /// `restore_frame` (the caller's address map is parked while the callee

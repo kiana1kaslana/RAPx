@@ -170,8 +170,6 @@ fn write_args_rec(
         graph.find_scc();
         let mut enumerator = PathEnumerator::new(&graph);
         let paths = enumerator.enumerate_paths_repeat(0);
-        // An intersection over only some of the paths can claim a write that a
-        // missing path skips.
         if paths.is_truncated() {
             return None;
         }
@@ -183,7 +181,10 @@ fn write_args_rec(
             }
             let writes = write_args_on_path(tcx, body, &path, depth, memo);
             write = Some(match write {
-                Some(current) => current.intersection(&writes).copied().collect(),
+                Some(mut current) => {
+                    current.extend(writes);
+                    current
+                }
                 None => writes,
             });
         }

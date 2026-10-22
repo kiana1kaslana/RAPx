@@ -149,7 +149,23 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
                     _ => None,
                 })
                 .collect();
-            if !field_indices.is_empty() {
+            if field_indices.is_empty() {
+                let pointed = state.local_value(place.local).cloned();
+                if let Some(pointed) = pointed {
+                    let outer_referent = place.local.as_usize().checked_sub(1).and_then(|arg_idx| {
+                        state.inline.arg_referents.get(arg_idx).copied().flatten()
+                    });
+                    if let Some(referent) = outer_referent {
+                        state
+                            .inline
+                            .deferred_field_writes
+                            .push((referent, Vec::new(), value));
+                    } else if let Some(referent) = state.find_local_by_address(&pointed.z3_term) {
+                        state.set_local(referent, value);
+                    }
+                }
+                return true;
+            } else {
                 // `&mut self` (and other reference parameters) materialize their
                 // pointee's scalar fields keyed by the *reference* local itself,
                 // so a `(*self).field = val` write must land in the reference
@@ -168,9 +184,7 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
                 // against the known local addresses.
                 let pointed = state.local_value(place.local).cloned();
                 if let Some(pointed) = pointed {
-                    if let Some(referent) = state.find_local_by_address(&pointed.z3_term) {
-                        state.set_field_value(referent, field_indices, value);
-                    } else if let Some(arg_idx) = place.local.as_usize().checked_sub(1) {
+                    if let Some(arg_idx) = place.local.as_usize().checked_sub(1) {
                         // Inline frame: the caller's address map is saved away, so
                         // resolve through the precomputed `&mut self` referent and
                         // defer the write until the caller's frame is restored.
@@ -182,7 +196,11 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
                                 field_indices,
                                 value,
                             ));
+                            return true;
                         }
+                    }
+                    if let Some(referent) = state.find_local_by_address(&pointed.z3_term) {
+                        state.set_field_value(referent, field_indices, value);
                     }
                 }
             }

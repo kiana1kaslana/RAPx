@@ -75,6 +75,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// switch to the callee body, and bind the caller's argument locals to the
     /// callee's parameters.
     fn handle_callee_entry(&mut self, callee: DefId, arg_locals: &[usize], arg_consts: &[(usize, u64)], arg_field_offsets: &[usize]) {
+        let arg_referents: Vec<Option<Local>> = arg_locals
+            .iter()
+            .map(|arg| {
+                self.local_value(Local::from_usize(*arg))
+                    .and_then(|value| self.find_local_by_address(&value.z3_term))
+            })
+            .collect();
+        let saved_referents = std::mem::replace(&mut self.inline.arg_referents, arg_referents);
+        self.inline.path_saved_arg_referents.push(saved_referents);
+        let saved_writes = std::mem::take(&mut self.inline.deferred_field_writes);
+        self.inline.path_saved_deferred_writes.push(saved_writes);
         let frame = self.save_frame();
 
         // Collect the caller argument fields from the saved map, so the callee's
@@ -188,6 +199,19 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if let Some(frame) = self.caller_frames.pop() {
             self.restore_frame(frame);
         }
+        for (local, path, value) in std::mem::take(&mut self.inline.deferred_field_writes) {
+            if path.is_empty() {
+                self.set_local(local, value);
+            } else {
+                self.set_field_value(local, path, value);
+            }
+        }
+        self.inline.arg_referents = self.inline.path_saved_arg_referents.pop().unwrap_or_default();
+        self.inline.deferred_field_writes = self
+            .inline
+            .path_saved_deferred_writes
+            .pop()
+            .unwrap_or_default();
         if let Some(mut v) = ret {
             let dest_ty = self.body().local_decls[Local::from_usize(dest)].ty;
             v.ty = dest_ty;
