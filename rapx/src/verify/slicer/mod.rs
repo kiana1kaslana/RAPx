@@ -4,7 +4,7 @@
 //! to keep only the MIR items that are data-relevant to the property, producing
 //! one [`ProofGoal`] per path for the symbolic VM to execute forward.
 
-mod call_visit;
+mod rules;
 pub(crate) mod types;
 mod visitor;
 

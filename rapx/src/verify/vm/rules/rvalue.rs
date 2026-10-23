@@ -6,7 +6,7 @@ use rustc_middle::mir::{AggregateKind, BinOp, Operand, Place, UnOp};
 use rustc_middle::ty::Ty;
 use z3::ast::{Ast, Int};
 
-use super::super::state::{ValueFacts, ValueSource, VmState, VmValue};
+use super::super::state::{Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 use crate::helpers::mir_utils;
 use crate::verify::api_classify;
@@ -752,5 +752,173 @@ pub(crate) fn eval_reborrow<'z3, 'tcx>(
             ..Default::default()
         },
         source: ValueSource::None,
+    }
+}
+
+impl<'z3, 'tcx> VmState<'z3, 'tcx> {
+    /// Compute provenance for a binary operation on pointer values.
+    /// Propagates provenance with adjusted offset for pointer arithmetic
+    /// (`ptr + offset`, `ptr - offset`, `Offset`).
+    fn provenance_for_binary_op(
+        &self,
+        op: BinOp,
+        lhs: &VmValue<'z3, 'tcx>,
+        rhs: &VmValue<'z3, 'tcx>,
+    ) -> Option<Provenance<'z3>> {
+        // `ptr ⊙ ptr` (rhs is a pointer) yields an integer / is meaningless, so
+        // it carries no provenance.  `Div`/`Rem` keep `lhs`'s provenance
+        // regardless (ptr ÷ scalar), so they are excluded here.
+        if rhs.is_pointer() && !matches!(op, BinOp::Div | BinOp::Rem) {
+            return None;
+        }
+        match op {
+            BinOp::Add | BinOp::AddWithOverflow | BinOp::AddUnchecked | BinOp::Offset => {
+                // ptr + scalar → propagate with adjusted offset
+                lhs.provenance.as_ref().map(|prov| Provenance {
+                    alloc_id: prov.alloc_id,
+                    offset: Int::add(self.z3_ctx, &[&prov.offset, &rhs.z3_term]),
+                    offset_kind: None,
+                })
+            }
+            BinOp::Sub | BinOp::SubWithOverflow | BinOp::SubUnchecked => {
+                lhs.provenance.as_ref().map(|prov| Provenance {
+                    alloc_id: prov.alloc_id,
+                    offset: Int::sub(self.z3_ctx, &[&prov.offset, &rhs.z3_term]),
+                    offset_kind: None,
+                })
+            }
+            BinOp::BitAnd => {
+                lhs.provenance.as_ref().map(|prov| Provenance {
+                    alloc_id: prov.alloc_id,
+                    // Alignment rounding changes the intra-allocation offset
+                    // unpredictably; use a fresh symbolic offset constrained
+                    // by the BitAnd path conditions emitted in eval_binary_op.
+                    offset: self.fresh_int("align_offset"),
+                    offset_kind: None,
+                })
+            }
+            BinOp::BitXor | BinOp::Shr | BinOp::ShrUnchecked => {
+                lhs.provenance.clone()
+            }
+            BinOp::BitOr | BinOp::Shl | BinOp::ShlUnchecked => {
+                lhs.provenance.as_ref().map(|prov| Provenance {
+                    alloc_id: prov.alloc_id,
+                    offset: Int::add(self.z3_ctx, &[&prov.offset, &rhs.z3_term]),
+                    offset_kind: None,
+                })
+            }
+            BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked => {
+                lhs.provenance.as_ref().map(|prov| Provenance {
+                    alloc_id: prov.alloc_id,
+                    offset: Int::mul(self.z3_ctx, &[&prov.offset, &rhs.z3_term]),
+                    offset_kind: None,
+                })
+            }
+            BinOp::Div | BinOp::Rem => lhs.provenance.clone(),
+            _ => None,
+        }
+    }
+
+    /// Compute facts for a binary operation.
+    /// Propagates non_null from pointer arithmetic and align_n from compatible ops.
+    fn facts_for_binary_op(
+        &self,
+        op: BinOp,
+        lhs: &VmValue<'z3, 'tcx>,
+        rhs: &VmValue<'z3, 'tcx>,
+        provenance: &Option<Provenance<'z3>>,
+    ) -> ValueFacts<'z3> {
+        // A bitwise AND may clear the low bits entirely (`ptr & mask == 0` for a
+        // small/aligned-to-zero pointer), so the result is not guaranteed
+        // non-null even when the lhs pointer is.  Other pointer arithmetic
+        // (`add`/`sub`/`offset`) preserves non-nullness under the VM's
+        // no-wrap assumption.
+        let non_null =
+            !matches!(op, BinOp::BitAnd) && provenance.is_some() && lhs.facts.non_null;
+
+        let align_n = match op {
+            BinOp::Add
+            | BinOp::AddWithOverflow
+            | BinOp::AddUnchecked
+            | BinOp::Sub
+            | BinOp::SubWithOverflow
+            | BinOp::SubUnchecked
+            | BinOp::Offset => {
+                // If both LHS and RHS are known to be n-aligned, sum/diff is n-aligned
+                match (&lhs.facts.align_n, &rhs.facts.align_n) {
+                    (Some(a), Some(b)) if a == b => Some(a.clone()),
+                    // LHS has alignment, RHS is a constant multiple of it
+                    (Some(a), None) => match a.simplify().as_u64() {
+                        Some(au) => {
+                            let c = rhs.z3_term.as_u64().unwrap_or(1);
+                            if c.is_multiple_of(au) { Some(a.clone()) } else { None }
+                        }
+                        // Symbolic alignment: only a zero RHS is a guaranteed
+                        // multiple of `align_T`.
+                        None => {
+                            if rhs.z3_term.as_u64() == Some(0) {
+                                Some(a.clone())
+                            } else {
+                                None
+                            }
+                        }
+                    },
+                    // LHS has alignment, RHS is the result of Mul by constant factor
+                    (Some(a), _) if self.rhs_is_aligned_multiple(rhs, a) => Some(a.clone()),
+                    _ => None,
+                }
+            }
+            BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked => match rhs.z3_term.as_u64() {
+                Some(c) => pow2_factor(c).map(|p| Int::from_u64(self.z3_ctx, p)),
+                None => lhs
+                    .z3_term
+                    .as_u64()
+                    .and_then(pow2_factor)
+                    .map(|p| Int::from_u64(self.z3_ctx, p)),
+            },
+            _ => lhs.facts.align_n.clone(),
+        };
+
+        ValueFacts {
+            non_null,
+            align_n,
+            ..Default::default()
+        }
+    }
+
+    /// Check if a value is known to be a multiple of `align` (e.g. the result
+    /// of a Mul by a constant factor of `align`).
+    fn rhs_is_aligned_multiple(&self, val: &VmValue<'z3, 'tcx>, align: &Int<'z3>) -> bool {
+        // If both the value's align_n and `align` are concrete, compare directly.
+        if let Some(au) = align.simplify().as_u64() {
+            if let Some(a) = val
+                .facts
+                .align_n
+                .as_ref()
+                .and_then(|a| a.simplify().as_u64())
+                && a >= au && a % au == 0 {
+                    return true;
+                }
+            // If the value is a constant, check directly
+            if let Some(c) = val.z3_term.as_u64()
+                && c % au == 0 {
+                    return true;
+                }
+        }
+        false
+    }
+}
+
+/// Largest power-of-two factor of a non-negative constant (the alignment
+/// implied by multiplying by `c`): `c` itself if it is a power of two,
+/// otherwise `2^trailing_zeros(c)`.
+fn pow2_factor(c: u64) -> Option<u64> {
+    if c > 0 && c.is_power_of_two() {
+        Some(c)
+    } else if c > 0 {
+        let factor = 1u64 << c.trailing_zeros();
+        if factor > 1 { Some(factor) } else { None }
+    } else {
+        None
     }
 }

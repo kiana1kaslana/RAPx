@@ -4,17 +4,7 @@ use rustc_middle::mir::{BasicBlock, Operand, Place, SwitchTargets};
 use z3::ast::{Ast, Int};
 
 use super::super::state::VmState;
-use crate::compat::Spanned;
-
-pub(crate) fn exec_call<'z3, 'tcx>(
-    state: &mut VmState<'z3, 'tcx>,
-    func: &Operand<'tcx>,
-    args: &[Spanned<Operand<'tcx>>],
-    destination: &Place<'tcx>,
-) {
-    let caller_id = state.current_frame.current_def_id;
-    state.exec_call(func, args, destination.local, caller_id);
-}
+use crate::helpers::def_use::PlaceKey;
 
 pub(crate) fn exec_switch_int<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -123,4 +113,136 @@ pub(crate) fn exec_drop<'z3, 'tcx>(
             }
         }
     }
+}
+
+impl<'z3, 'tcx> VmState<'z3, 'tcx> {
+    /// The `(lhs, rhs, op)` of the binary-op/comparison source recorded on the
+    /// value bound to `pk`'s local, if any.
+    fn op_source_of(
+        &self,
+        pk: &PlaceKey,
+    ) -> Option<(Option<PlaceKey>, Option<PlaceKey>, rustc_middle::mir::BinOp)> {
+        let local = pk.local()?;
+        let val = self.local_value(local)?;
+        val.source
+            .operands()
+            .map(|(l, r, o)| (l.clone(), r.clone(), o))
+    }
+
+    /// The `PlaceKey` of a `Copy`/`Move` operand.
+    fn operand_place_key(op: &Operand<'tcx>) -> Option<PlaceKey> {
+        match op {
+            Operand::Copy(p) | Operand::Move(p) => Some(PlaceKey::from_mir_place(p)),
+            _ => None,
+        }
+    }
+
+    /// Infer alignment constraints from guards of the form `(x % n) == 0`.
+    fn infer_guard_align(&mut self, cond: &Operand<'tcx>, expected: bool) {
+        if !expected {
+            return;
+        }
+        let Some(cond_pk) = Self::operand_place_key(cond) else {
+            return;
+        };
+
+        // Check if cond is a Ne/Eq comparison of (x % n) or (x & (align-1)) against 0
+        if let Some((lhs_pk, rhs_pk, _)) = self.op_source_of(&cond_pk) {
+            // The lhs is (x % n) / (x & (align-1)), rhs is constant 0
+            let inner_pk = match (&lhs_pk, &rhs_pk) {
+                (Some(pk), None) => pk.clone(),
+                (None, Some(pk)) => pk.clone(),
+                _ => return,
+            };
+            if let Some((div_lhs, div_rhs, inner_op)) = self.op_source_of(&inner_pk) {
+                match inner_op {
+                    // `x % n == 0`: div_rhs is the concrete divisor constant.
+                    rustc_middle::mir::BinOp::Rem => {
+                        if let Some(divisor) = resolve_u64_from_place_key(&div_rhs, self)
+                            && divisor > 0 {
+                                self.mark_align_n(&div_lhs, Int::from_u64(self.z3_ctx, divisor));
+                            }
+                    }
+                    // `x & (align-1) == 0`: the mask is `align-1` (symbolic for a
+                    // generic `T`), so `align = mask + 1`.
+                    rustc_middle::mir::BinOp::BitAnd => {
+                        if let Some(rhs_local) = div_rhs.as_ref().and_then(|pk| pk.local())
+                            && let Some(rhs_val) = self.local_value(rhs_local) {
+                                let one = Int::from_u64(self.z3_ctx, 1);
+                                let align = Int::add(self.z3_ctx, &[&rhs_val.z3_term, &one]);
+                                self.mark_align_n(&div_lhs, align);
+                            }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn mark_align_n(&mut self, src_pk: &Option<PlaceKey>, align: Int<'z3>) {
+        if let Some(src_pk) = src_pk
+            && let Some(local) = src_pk.local()
+                && let Some(mut val) = self.local_value(local).cloned() {
+                    val.facts.align_n = Some(align);
+                    self.set_local(local, val);
+                }
+    }
+
+    /// Infer non_null invariants from branch guards.
+    fn infer_guard_non_null(&mut self, cond: &Operand<'tcx>, expected: bool) {
+        if !expected {
+            return;
+        }
+        let Some(cond_pk) = Self::operand_place_key(cond) else {
+            return;
+        };
+
+        // Check if cond was defined by BinaryOp(Ne, (ptr, 0)) or similar:
+        // mark the non-constant side as non-null.  Only `Ne` guards imply
+        // non-nullness; an `Eq` guard (`assert (addr & mask) == 0`, the
+        // alignment check) means the value *is* zero, not non-null.
+        if let Some((lhs_pk, rhs_pk, op)) = self.op_source_of(&cond_pk) {
+            if op != rustc_middle::mir::BinOp::Ne {
+                return;
+            }
+            if rhs_pk.is_none() {
+                self.mark_guard_pointer(&lhs_pk, &None);
+            }
+            if lhs_pk.is_none() {
+                self.mark_guard_pointer(&rhs_pk, &None);
+            }
+        }
+    }
+
+    /// Infer non_null from SwitchInt discriminant.
+    fn infer_switch_guard(&mut self, discr: &Operand<'tcx>) {
+        let Some(pk) = Self::operand_place_key(discr) else {
+            return;
+        };
+        if let Some((lhs_pk, rhs_pk, _)) = self.op_source_of(&pk) {
+            self.mark_guard_pointer(&lhs_pk, &rhs_pk);
+        }
+    }
+
+    fn mark_guard_pointer(&mut self, lhs: &Option<PlaceKey>, rhs: &Option<PlaceKey>) {
+        for pk in [lhs, rhs].into_iter().flatten() {
+            if let Some(local) = pk.local()
+                && let Some(mut val) = self.local_value(local).cloned() {
+                    val.facts.non_null = true;
+                    self.set_local(local, val);
+                }
+        }
+    }
+
+}
+
+/// Try to resolve a u64 constant from a PlaceKey's source in the VM state.
+fn resolve_u64_from_place_key<'z3, 'tcx>(
+    pk: &Option<PlaceKey>,
+    state: &VmState<'z3, 'tcx>,
+) -> Option<u64> {
+    let pk = pk.as_ref()?;
+    let local = pk.local()?;
+    let val = state.local_value(local)?;
+    val.z3_term.as_u64()
 }

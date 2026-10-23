@@ -12,6 +12,7 @@ pub(crate) mod display;
 pub(crate) mod driver;
 pub(crate) mod engine;
 pub(crate) mod loop_sensitivity;
+pub(crate) mod mir_support;
 pub(crate) mod path_extractor;
 
 pub(crate) mod property_checker;

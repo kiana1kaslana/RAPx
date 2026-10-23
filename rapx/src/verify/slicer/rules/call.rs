@@ -13,10 +13,10 @@ use rustc_middle::ty::{TyCtxt, TyKind};
 
 use crate::analysis::dataflow::types::DataflowGraph;
 
-use super::super::call_summary;
+use crate::verify::call_summary;
 use crate::helpers::def_use::{call_args_uses_at, PlaceKey, RelevantPlaces};
 
-use super::types::RelevantItem;
+use super::super::types::RelevantItem;
 
 /// Visit a call terminator using a dependency summary.
 #[allow(clippy::too_many_arguments)]
@@ -106,4 +106,3 @@ pub(crate) fn visit<'tcx>(
             }
     }
 }
-

@@ -139,38 +139,6 @@ pub(crate) fn rvalue_runtime_checks_value(rvalue: &Rvalue<'_>) -> Option<u64> {
     None
 }
 
-/// Like [`rvalue_runtime_checks_value`], but only folds the *check* gates
-/// (`UbChecks`/`ContractChecks`) that guard `unreachable_unchecked`-style
-/// precondition checks.  `OverflowChecks` instead selects between wrapping and
-/// trapping arithmetic, so it must follow the build's actual value.
-pub(crate) fn rvalue_ub_checks_value(rvalue: &Rvalue<'_>) -> Option<u64> {
-    #[cfg(rapx_rvalue_has_nullary_op)]
-    {
-        if let Rvalue::NullaryOp(rustc_middle::mir::NullOp::RuntimeChecks(rc)) = rvalue
-            && matches!(
-                rc,
-                rustc_middle::mir::RuntimeChecks::UbChecks
-                    | rustc_middle::mir::RuntimeChecks::ContractChecks
-            )
-        {
-            return Some(0);
-        }
-    }
-    #[cfg(not(rapx_rvalue_has_nullary_op))]
-    {
-        if let Rvalue::Use(Operand::RuntimeChecks(rc), ..) = rvalue
-            && matches!(
-                rc,
-                rustc_middle::mir::RuntimeChecks::UbChecks
-                    | rustc_middle::mir::RuntimeChecks::ContractChecks
-            )
-        {
-            return Some(0);
-        }
-    }
-    None
-}
-
 /// The concrete `core::ops::Range*` struct a `DefId` denotes.
 pub(crate) enum RangeKind {
     RangeTo,

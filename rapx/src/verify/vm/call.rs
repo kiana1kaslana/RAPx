@@ -1,8 +1,7 @@
 //! Call handling for the symbolic VM.
 //!
 //! Bridges the existing call summary infrastructure (`call_summary`)
-//! with the new symbolic VM state. The `exec_call` method is called
-//! from `exec.rs` when a `Call` terminator is encountered.
+//! with the symbolic VM state. The `Call` terminator rule invokes `exec_call`.
 //!
 //! When the callee has MIR available, the VM recursively inlines the
 //! callee's body to achieve context-sensitive precision, unless a

@@ -27,7 +27,7 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
 
     if !place.projection.is_empty() {
         state.record_projected_store(place, &value);
-        state.record_indexed_store_for_vm(place, &value);
+        state.record_indexed_store(place, &value);
     }
     value.facts.init = true;
 
@@ -209,7 +209,7 @@ pub(crate) fn exec_storage_dead<'z3, 'tcx>(
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Record byte-level values when assigning to a place with projections.
     /// This handles patterns like `buf[i] = 0u8` (nul-store) and `arr[i] = val`.
-    pub(crate) fn record_projected_store(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
+    fn record_projected_store(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
         // Prefer the value's provenance (pointee alloc) over slots
         // (reference alloc) for ref/ptr parameters.
         let Some(alloc_id) = self
@@ -280,7 +280,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// Track byte-level values for index-based stores (e.g. `buf[i] = 0u8`)
     /// that `record_projected_store` skips due to Index projections.
-    pub(crate) fn record_indexed_store_for_vm(
+    fn record_indexed_store(
         &mut self,
         place: &Place<'tcx>,
         value: &VmValue<'z3, 'tcx>,

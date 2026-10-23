@@ -1,43 +1,16 @@
 //! MIR transfer functions for the symbolic VM.
 
 use rustc_middle::mir::{
-    BasicBlock, NonDivergingIntrinsic, Place, Rvalue, Statement, StatementKind, Terminator,
+    BasicBlock, Place, Rvalue, Statement, StatementKind, Terminator,
     TerminatorKind,
 };
 
 use super::state::{VmState, VmValue};
+use crate::verify::mir_support;
 
 pub(crate) mod rvalue;
 pub(crate) mod statement;
 pub(crate) mod terminator;
-
-pub(crate) fn unsupported_statement(kind: &StatementKind<'_>) -> bool {
-    if let StatementKind::Intrinsic(intrinsic) = kind {
-        return !matches!(&**intrinsic, NonDivergingIntrinsic::Assume(..));
-    }
-    !matches!(
-        kind,
-        StatementKind::Assign(..)
-            | StatementKind::StorageLive(..)
-            | StatementKind::StorageDead(..)
-            | StatementKind::FakeRead(..)
-            | StatementKind::AscribeUserType(..)
-            | StatementKind::Coverage(..)
-            | StatementKind::PlaceMention(..)
-            | StatementKind::ConstEvalCounter
-            | StatementKind::Nop
-    )
-}
-
-pub(crate) fn unsupported_terminator(kind: &TerminatorKind<'_>) -> bool {
-    matches!(
-        kind,
-        TerminatorKind::InlineAsm { .. }
-            | TerminatorKind::TailCall { .. }
-            | TerminatorKind::Yield { .. }
-            | TerminatorKind::CoroutineDrop
-    )
-}
 
 pub(crate) fn eval_rvalue<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -78,7 +51,8 @@ pub(crate) fn exec_terminator<'z3, 'tcx>(
             destination,
             ..
         } => {
-            terminator::exec_call(state, func, args, destination);
+            let caller_id = state.current_frame.current_def_id;
+            state.exec_call(func, args, destination.local, caller_id);
         }
         TerminatorKind::SwitchInt { discr, targets } => {
             terminator::exec_switch_int(state, discr, targets, switch_succ);
@@ -94,10 +68,8 @@ pub(crate) fn exec_terminator<'z3, 'tcx>(
         | TerminatorKind::UnwindTerminate(_)
         | TerminatorKind::FalseEdge { .. }
         | TerminatorKind::FalseUnwind { .. } => {}
-        TerminatorKind::InlineAsm { .. }
-        | TerminatorKind::TailCall { .. }
-        | TerminatorKind::Yield { .. }
-        | TerminatorKind::CoroutineDrop => {
+        _ => {
+            debug_assert!(mir_support::unsupported_terminator(&terminator.kind));
             state.unsupported_mir = true;
         }
     }
@@ -114,7 +86,7 @@ pub(crate) fn exec_statement<'z3, 'tcx>(
         }
         StatementKind::StorageLive(local) => statement::exec_storage_live(state, *local),
         StatementKind::StorageDead(local) => statement::exec_storage_dead(state, *local),
-        _ if unsupported_statement(&statement.kind) => state.unsupported_mir = true,
+        _ if mir_support::unsupported_statement(&statement.kind) => state.unsupported_mir = true,
         _ => {}
     }
 }
