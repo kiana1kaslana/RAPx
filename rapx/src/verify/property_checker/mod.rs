@@ -220,6 +220,9 @@ impl PropertyChecker {
         checkpoint: &Checkpoint<'tcx>,
         property: &Property<'tcx>,
     ) -> CheckResult {
+        if vm_state.unsupported_mir {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        }
         self.check_inner(vm_state, checkpoint, property)
     }
 

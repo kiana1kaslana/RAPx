@@ -659,6 +659,13 @@ fn unknown_unsound_01() {
     assert_contain(&output, "result: UNKNOWN");
 }
 
+#[test]
+fn unsupported_mir_01() {
+    let output = run_with_args("verify_units/unsupported_mir_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "unknown_inline_asm_write", "UNKNOWN");
+    assert_function_result(&output, "unknown_intrinsic_copy", "UNKNOWN");
+}
+
 // ================ AsChunks Sound Cases =============
 sound_tests_multi! {
     as_chunks_sound: "verify_units/as_chunks_sound_01" => [

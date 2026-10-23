@@ -1,38 +1,27 @@
-//! `Terminator` interpretation rules: one `exec` per kind.  Each returns `true`
-//! when it handled the terminator, `false` to decline and let the next rule try.
+//! Transfer functions for MIR terminators.
 
-use rustc_middle::mir::{BasicBlock, Terminator, TerminatorKind};
+use rustc_middle::mir::{BasicBlock, Operand, Place, SwitchTargets};
 use z3::ast::{Ast, Int};
 
 use super::super::state::VmState;
+use crate::compat::Spanned;
 
 pub(crate) fn exec_call<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    terminator: &Terminator<'tcx>,
-    _switch_succ: Option<BasicBlock>,
-) -> bool {
-    let TerminatorKind::Call {
-        func,
-        args,
-        destination,
-        ..
-    } = &terminator.kind
-    else {
-        return false;
-    };
+    func: &Operand<'tcx>,
+    args: &[Spanned<Operand<'tcx>>],
+    destination: &Place<'tcx>,
+) {
     let caller_id = state.current_frame.current_def_id;
     state.exec_call(func, args, destination.local, caller_id);
-    true
 }
 
 pub(crate) fn exec_switch_int<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    terminator: &Terminator<'tcx>,
+    discr: &Operand<'tcx>,
+    targets: &SwitchTargets,
     switch_succ: Option<BasicBlock>,
-) -> bool {
-    let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
-        return false;
-    };
+) {
     let discr_val = state.value_of_operand(discr);
 
     // If the discriminator is a comparison result, record the direct boolean
@@ -57,7 +46,7 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
                 } else if let Some(ref cond) = cmp_cond {
                     state.constraints.assertions.push(cond.not());
                 }
-                return true;
+                return;
             }
         }
         // Otherwise branch: the discrim is NOT any of the explicit values.
@@ -83,21 +72,13 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
             }
         }
     }
-    true
 }
 
 pub(crate) fn exec_assert<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    terminator: &Terminator<'tcx>,
-    _switch_succ: Option<BasicBlock>,
-) -> bool {
-    let TerminatorKind::Assert {
-        cond, expected, ..
-    } = &terminator.kind
-    else {
-        return false;
-    };
-    let expected = *expected;
+    cond: &Operand<'tcx>,
+    expected: bool,
+) {
     let cond_val = state.value_of_operand(cond);
     // If the asserted operand is a comparison result, record the direct boolean
     // condition (`idx < len`) alongside the ite-encoded fact, so the SMT solver
@@ -126,38 +107,11 @@ pub(crate) fn exec_assert<'z3, 'tcx>(
     state.infer_guard_non_null(cond, expected);
     // Infer alignment from == 0 guards on Rem expressions
     state.infer_guard_align(cond, expected);
-    true
 }
 
 pub(crate) fn exec_drop<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    terminator: &Terminator<'tcx>,
-    _switch_succ: Option<BasicBlock>,
-) -> bool {
-    let TerminatorKind::Drop { place, .. } = &terminator.kind else {
-        return false;
-    };
+    place: &Place<'tcx>,
+) {
     state.exec_drop(place);
-    true
-}
-
-pub(crate) fn exec_nop<'z3, 'tcx>(
-    _state: &mut VmState<'z3, 'tcx>,
-    terminator: &Terminator<'tcx>,
-    _switch_succ: Option<BasicBlock>,
-) -> bool {
-    matches!(
-        &terminator.kind,
-        TerminatorKind::Goto { .. }
-            | TerminatorKind::Return
-            | TerminatorKind::Unreachable
-            | TerminatorKind::UnwindResume
-            | TerminatorKind::UnwindTerminate(_)
-            | TerminatorKind::Yield { .. }
-            | TerminatorKind::CoroutineDrop
-            | TerminatorKind::FalseEdge { .. }
-            | TerminatorKind::FalseUnwind { .. }
-            | TerminatorKind::InlineAsm { .. }
-            | TerminatorKind::TailCall { .. }
-    )
 }

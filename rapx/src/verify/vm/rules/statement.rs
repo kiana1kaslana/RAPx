@@ -1,21 +1,16 @@
-//! `Statement` interpretation rules: one `(match, exec)` pair per kind.
+//! Transfer functions for state-changing MIR statements.
 
-use rustc_middle::mir::{Operand, Place, ProjectionElem, Rvalue, Statement, StatementKind};
+use rustc_middle::mir::{Local, Operand, Place, ProjectionElem, Rvalue};
 use z3::ast::Int;
 
 use super::super::state::{Provenance, VmState};
 use super::eval_rvalue;
 
-
 pub(crate) fn exec_assign<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    statement: &Statement<'tcx>,
-) -> bool {
-    let StatementKind::Assign(assign) = &statement.kind else {
-        return false;
-    };
-    let (place, rvalue) = &**assign;
-
+    place: &Place<'tcx>,
+    rvalue: &Rvalue<'tcx>,
+) {
     let mut value = eval_rvalue(state, place, rvalue);
 
     let has_deref = place
@@ -154,7 +149,7 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
                 if let Some(pointed) = pointed {
                     state.write_through_pointer(&pointed, Vec::new(), value);
                 }
-                return true;
+                return;
             } else {
                 // `&mut self` (and other reference parameters) materialize their
                 // pointee's scalar fields keyed by the *reference* local itself,
@@ -167,7 +162,7 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
                     if is_iter_field {
                         state.track_iter_ptr_update(place.local);
                     }
-                    return true;
+                    return;
                 }
                 // Otherwise resolve the dereferenced pointer (a reference/reborrow
                 // temp) back to the local it points at, matching its address term
@@ -179,45 +174,22 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             }
         }
     }
-    true
 }
-
 
 pub(crate) fn exec_storage_live<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    statement: &Statement<'tcx>,
-) -> bool {
-    let StatementKind::StorageLive(local) = &statement.kind else {
-        return false;
-    };
-    let local = *local;
+    local: Local,
+) {
     state.ensure_local_allocation(local);
     let alloc_id = state.current_frame.local_alloc[&local];
     state.alloc_mut(alloc_id).facts.dead = false;
-    true
 }
-
 
 pub(crate) fn exec_storage_dead<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    statement: &Statement<'tcx>,
-) -> bool {
-    let StatementKind::StorageDead(local) = &statement.kind else {
-        return false;
-    };
-    let local = *local;
+    local: Local,
+) {
     if let Some(alloc_id) = state.current_frame.local_alloc.get(&local).copied() {
         state.alloc_mut(alloc_id).facts.dead = true;
     }
-    true
-}
-
-/// Any statement kind without a dedicated rule is a no-op (`FakeRead`,
-/// `SetDiscriminant`, `AscribeUserType`, `Coverage`, `PlaceMention`,
-/// `Intrinsic`, `ConstEvalCounter`, `Nop`, `Retag`, …).
-pub(crate) fn exec_nop<'z3, 'tcx>(_state: &mut VmState<'z3, 'tcx>, statement: &Statement<'tcx>) -> bool {
-    !matches!(
-        &statement.kind,
-        StatementKind::Assign(..) | StatementKind::StorageLive(..) | StatementKind::StorageDead(..)
-    )
 }

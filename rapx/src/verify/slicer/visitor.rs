@@ -427,6 +427,14 @@ impl<'tcx> BackwardSlicer<'tcx> {
         keep_invalidations: bool,
         keep_owner: bool,
     ) {
+        if crate::verify::vm::rules::unsupported_statement(&statement.kind) {
+            items.push(RelevantItem::Statement {
+                def_id,
+                block,
+                statement_index,
+            });
+            return;
+        }
         if keep_invalidations
             && matches!(
                 statement.kind,
@@ -636,6 +644,10 @@ impl<'tcx> BackwardSlicer<'tcx> {
         keep_owner: bool,
         successor: Option<BasicBlock>,
     ) {
+        if crate::verify::vm::rules::unsupported_terminator(&terminator.kind) {
+            items.push(RelevantItem::Terminator { def_id, block, switch_succ: None });
+            return;
+        }
         if keep_invalidations {
             if matches!(terminator.kind, TerminatorKind::Drop { .. }) {
                 items.push(RelevantItem::Terminator { def_id, block, switch_succ: None });

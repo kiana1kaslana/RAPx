@@ -660,6 +660,9 @@ pub(crate) struct VmState<'z3, 'tcx> {
     /// pushed/popped on inline entry/exit).
     pub(crate) inline: InlineCtx<'z3, 'tcx>,
 
+    /// A retained MIR operation with a possible state effect has no transfer rule.
+    pub(crate) unsupported_mir: bool,
+
     /// Root allocations of the `Alias` sources the caller's contract declares
     /// (a hazard like `Alias(self, ret)`, or a `Ptr2Ref` precondition like
     /// `Alias(self.0)`).  `check_read_memory_alias`/`check_view_alias` discharge
@@ -694,6 +697,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             caller_frames: Vec::default(),
             units: Vec::default(),
             inline: InlineCtx::default(),
+            unsupported_mir: false,
             constraints,
             alias_hazard_allocs: FxHashSet::default(),
         }

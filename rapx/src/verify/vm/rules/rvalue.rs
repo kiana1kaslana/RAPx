@@ -1,6 +1,9 @@
-//! `Rvalue` interpretation rules: one `(match, eval)` pair per constructor.
+//! Transfer functions for MIR rvalues.
 
-use rustc_middle::mir::{BinOp, Place, Rvalue, UnOp};
+use rustc_abi::FieldIdx;
+use rustc_index::IndexVec;
+use rustc_middle::mir::{AggregateKind, BinOp, Operand, Place, UnOp};
+use rustc_middle::ty::Ty;
 use z3::ast::{Ast, Int};
 
 use super::super::state::{ValueFacts, ValueSource, VmState, VmValue};
@@ -8,15 +11,11 @@ use super::super::state::{ValueFacts, ValueSource, VmState, VmValue};
 use crate::helpers::mir_utils;
 use crate::verify::api_classify;
 
-
 pub(crate) fn eval_use<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::Use(operand, ..) = rvalue else {
-        return None;
-    };
+    operand: &Operand<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let mut val = state.value_of_operand(operand);
     if let rustc_middle::mir::Operand::Constant(c) = operand
         && place.projection.is_empty() {
@@ -25,18 +24,15 @@ pub(crate) fn eval_use<'z3, 'tcx>(
     state.try_materialize_const_bytes(&mut val, operand);
     state.inject_layout_constraints(operand, &val);
     state.try_emit_gcd_divisibility(operand, &val);
-    Some(val)
+    val
 }
 
 
 pub(crate) fn eval_ref<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::Ref(_, _borrow_kind, place) = rvalue else {
-        return None;
-    };
+    place: &Place<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     if let Some(addr) = state.address_of_place(place) {
         let alloc_align = state.alloc_align_of(&addr);
@@ -107,10 +103,10 @@ pub(crate) fn eval_ref<'z3, 'tcx>(
         // provenance to be live (`exec_assign` only stores `val` afterwards).
         state.set_local(dest_place.local, val.clone());
         state.assert_pointee_struct_invariants(dest_ty, dest_place.local);
-        Some(val)
+        val
     } else {
         let term = state.fresh_int("ref_addr");
-        Some(VmValue {
+        VmValue {
             z3_term: term,
             ty: dest_ty,
             provenance: None,
@@ -120,7 +116,7 @@ pub(crate) fn eval_ref<'z3, 'tcx>(
                 ..Default::default()
             },
             source: ValueSource::None,
-        })
+        }
     }
 }
 
@@ -128,18 +124,15 @@ pub(crate) fn eval_ref<'z3, 'tcx>(
 pub(crate) fn eval_raw_ptr<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::RawPtr(_, place) = rvalue else {
-        return None;
-    };
+    place: &Place<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     if let Some(addr) = state.address_of_place(place) {
         let alloc_align = state.alloc_align_of(&addr);
         let source_in_bounds = state
             .local_value(place.local)
             .is_some_and(|v| v.facts.in_bounds);
-        Some(VmValue {
+        VmValue {
             z3_term: addr.z3_term,
             ty: dest_ty,
             provenance: addr.provenance,
@@ -150,10 +143,10 @@ pub(crate) fn eval_raw_ptr<'z3, 'tcx>(
                 ..Default::default()
             },
             source: ValueSource::None,
-        })
+        }
     } else {
         let term = state.fresh_int("rawptr_addr");
-        Some(VmValue {
+        VmValue {
             z3_term: term,
             ty: dest_ty,
             provenance: None,
@@ -162,7 +155,7 @@ pub(crate) fn eval_raw_ptr<'z3, 'tcx>(
                 ..Default::default()
             },
             source: ValueSource::None,
-        })
+        }
     }
 }
 
@@ -170,13 +163,10 @@ pub(crate) fn eval_raw_ptr<'z3, 'tcx>(
 pub(crate) fn eval_binary_op<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::BinaryOp(op, pair) = rvalue else {
-        return None;
-    };
-    let op = *op;
-    let (lhs_op, rhs_op) = &**pair;
+    op: BinOp,
+    pair: &(Operand<'tcx>, Operand<'tcx>),
+) -> VmValue<'z3, 'tcx> {
+    let (lhs_op, rhs_op) = pair;
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
 
     let lhs = state.value_of_operand(lhs_op);
@@ -205,7 +195,10 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
             }
         });
         state.apply_pointer_add(dest_place.local, &lhs, &rhs, stride, false);
-        return state.local_value(dest_place.local).cloned();
+        return state
+            .local_value(dest_place.local)
+            .cloned()
+            .expect("pointer arithmetic must assign its destination");
     }
     let raw_term = state.eval_binary_op(op, &lhs.z3_term, &rhs.z3_term);
     let term = if op == BinOp::Sub
@@ -266,7 +259,7 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
         let overflow_val = VmValue::new(overflow_term, fields[1]);
         state.set_field_value(dest_place.local, vec![1], overflow_val);
     }
-    Some(VmValue {
+    VmValue {
         z3_term: term,
         ty: dest_ty,
         provenance,
@@ -284,18 +277,16 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
                 op,
             },
         },
-    })
+    }
 }
 
 
 pub(crate) fn eval_unary_op<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::UnaryOp(op, operand) = rvalue else {
-        return None;
-    };
+    op: UnOp,
+    operand: &Operand<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let val = state.value_of_operand(operand);
     let is_bool = matches!(val.ty.kind(), rustc_middle::ty::TyKind::Bool);
@@ -328,26 +319,23 @@ pub(crate) fn eval_unary_op<'z3, 'tcx>(
             state.fresh_int("ptr_metadata")
         }
     } else {
-        state.eval_unary_op(*op, &val.z3_term, is_bool)
+        state.eval_unary_op(op, &val.z3_term, is_bool)
     };
-    Some(VmValue {
+    VmValue {
         z3_term: term,
         ty: result_ty,
         provenance: val.provenance,
         facts: val.facts,
         source: ValueSource::None,
-    })
+    }
 }
 
 
 pub(crate) fn eval_cast<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
-    _dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::Cast(_kind, operand, cast_ty) = rvalue else {
-        return None;
-    };
+    operand: &Operand<'tcx>,
+    cast_ty: Ty<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let src_val = state.value_of_operand(operand);
     let src_ty = src_val.ty;
     // A raw-pointer cast to a *different* ADT pointee reinterprets the
@@ -390,9 +378,9 @@ pub(crate) fn eval_cast<'z3, 'tcx>(
             state.constraints.assertions.push(term._eq(&zero).not());
         }
     }
-    Some(VmValue {
+    VmValue {
         z3_term: term,
-        ty: *cast_ty,
+        ty: cast_ty,
         provenance: src_val.provenance,
         facts: ValueFacts {
             non_null: src_val.facts.non_null,
@@ -405,19 +393,16 @@ pub(crate) fn eval_cast<'z3, 'tcx>(
             },
         },
         source: src_val.source.field_offset_only(),
-    })
+    }
 }
 
 
 pub(crate) fn eval_aggregate<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::Aggregate(kind, operands) = rvalue else {
-        return None;
-    };
-    let kind = &**kind;
+    kind: &AggregateKind<'tcx>,
+    operands: &IndexVec<FieldIdx, Operand<'tcx>>,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
 
     // `intrinsics::aggregate_raw_ptr` lowers to `Rvalue::Aggregate(RawPtr(..))`
@@ -442,7 +427,7 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
             let data_val = state.value_of_operand(data_operand);
             let mut val = data_val.clone();
             val.ty = dest_ty;
-            return Some(val);
+            return val;
         }
     }
 
@@ -478,13 +463,13 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
         if let Some(alloc_id) = state.current_frame.local_alloc.get(&dest_local).copied() {
             state.content_mut(alloc_id).facts.initialized = true;
         }
-        return Some(VmValue {
+        return VmValue {
             z3_term: field_val.z3_term,
             ty: dest_ty,
             provenance: field_val.provenance,
             facts: field_val.facts,
             source: ValueSource::None,
-        });
+        };
     }
     let term = state.fresh_int("aggregate");
     let dest_local = dest_place.local;
@@ -620,24 +605,21 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
         }
         _ => ValueSource::None,
     };
-    Some(VmValue {
+    VmValue {
         z3_term: result_term,
         ty: dest_ty,
         provenance: result_prov,
         facts: ValueFacts::default(),
         source,
-    })
+    }
 }
 
 
 pub(crate) fn eval_discriminant<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::Discriminant(place) = rvalue else {
-        return None;
-    };
+    place: &Place<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     // If the ADT's variant is known symbolically (e.g. `Iterator::next` returns
     // `Some` iff the iterator was non-empty), reuse that term so
@@ -671,44 +653,38 @@ pub(crate) fn eval_discriminant<'z3, 'tcx>(
         state.constraints.assertions.push(term.ge(&zero));
         state.constraints.assertions.push(term.le(&two));
     }
-    Some(VmValue::new(term, dest_ty))
+    VmValue::new(term, dest_ty)
 }
 
 #[cfg(not(rapx_ge_99))]
 pub(crate) fn eval_shallow_init_box<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::ShallowInitBox(operand, _ty) = rvalue else {
-        return None;
-    };
+    operand: &Operand<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let val = state.value_of_operand(operand);
-    Some(VmValue {
+    VmValue {
         z3_term: val.z3_term,
         ty: dest_ty,
         provenance: val.provenance,
         facts: val.facts,
         source: ValueSource::None,
-    })
+    }
 }
 
 
 pub(crate) fn eval_copy_for_deref<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::CopyForDeref(place) = rvalue else {
-        return None;
-    };
+    place: &Place<'tcx>,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     if let Some(val) = state.value_of_place(place) {
-        Some(val)
+        val
     } else {
         let term = state.fresh_int("copy_for_deref");
-        Some(VmValue::new(term, dest_ty))
+        VmValue::new(term, dest_ty)
     }
 }
 
@@ -716,39 +692,28 @@ pub(crate) fn eval_copy_for_deref<'z3, 'tcx>(
 pub(crate) fn eval_repeat<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::Repeat(..) = rvalue else {
-        return None;
-    };
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let term = state.fresh_int("repeat");
-    Some(VmValue::new(term, dest_ty))
+    VmValue::new(term, dest_ty)
 }
 
 
 pub(crate) fn eval_thread_local_ref<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::ThreadLocalRef(..) = rvalue else {
-        return None;
-    };
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let term = state.fresh_int("thread_local");
-    Some(VmValue::new(term, dest_ty))
+    VmValue::new(term, dest_ty)
 }
 
 #[cfg(not(rapx_ge_95))]
 pub(crate) fn eval_nullary_op<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::NullaryOp(op) = rvalue else {
-        return None;
-    };
+    op: &impl std::fmt::Debug,
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let term = state.fresh_int("nullary");
     let op_debug = format!("{:?}", op);
@@ -758,35 +723,27 @@ pub(crate) fn eval_nullary_op<'z3, 'tcx>(
         let one = Int::from_u64(state.z3_ctx, 1);
         state.constraints.assertions.push(term.ge(&one));
     }
-    Some(VmValue::new(term, dest_ty))
+    VmValue::new(term, dest_ty)
 }
 
 
 pub(crate) fn eval_wrap_unsafe_binder<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::WrapUnsafeBinder(..) = rvalue else {
-        return None;
-    };
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let term = state.fresh_int("wrap_unsafe_binder");
-    Some(VmValue::new(term, dest_ty))
+    VmValue::new(term, dest_ty)
 }
 
 #[cfg(rapx_rvalue_has_reborrow)]
 pub(crate) fn eval_reborrow<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
-    rvalue: &Rvalue<'tcx>,
-) -> Option<VmValue<'z3, 'tcx>> {
-    let Rvalue::Reborrow(..) = rvalue else {
-        return None;
-    };
+) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let term = state.fresh_int("reborrow");
-    Some(VmValue {
+    VmValue {
         z3_term: term,
         ty: dest_ty,
         provenance: None,
@@ -795,5 +752,5 @@ pub(crate) fn eval_reborrow<'z3, 'tcx>(
             ..Default::default()
         },
         source: ValueSource::None,
-    })
+    }
 }
