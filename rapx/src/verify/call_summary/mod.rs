@@ -253,9 +253,19 @@ pub(crate) fn dependency_summary<'tcx>(
         // Writes and return-dependencies are orthogonal: a callee can both
         // write an argument and return a value depending on another, so compute
         // both rather than clearing `return_depends_on_args` when a write exists.
-        let write_args = dependencies::local_write_args(tcx, callee)
-            .map(|args| args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>())
-            .filter(|args| !args.is_empty());
+        let write_args = match dependencies::local_write_args(tcx, callee) {
+            Some(args) => args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>(),
+            None => tcx.fn_sig(callee).skip_binder().inputs().skip_binder().iter().enumerate()
+                .filter_map(|(i, ty)| {
+                    if i < arg_count && matches!(ty.kind(), rustc_middle::ty::TyKind::Ref(_, _, rustc_middle::ty::Mutability::Mut) | rustc_middle::ty::TyKind::RawPtr(_, rustc_middle::ty::Mutability::Mut)) {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        };
+        let write_args = (!write_args.is_empty()).then_some(write_args);
         let return_deps = if is_branch(Some(callee)) {
             Some(vec![0])
         } else {

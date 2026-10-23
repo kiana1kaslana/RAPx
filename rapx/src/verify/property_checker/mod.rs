@@ -7,8 +7,9 @@
 
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::vm::state::{OffsetKind, VmState};
+use z3::ast::{Ast, Dynamic, Int};
 use crate::verify::{
-    contract::{Property, PropertyKind},
+    contract::{ContractExpr, PlaceBase, Property, PropertyArg, PropertyKind},
     report::{CheckResult, UnknownReason},
 };
 
@@ -244,67 +245,116 @@ impl PropertyChecker {
             Property::Or(_) => self.check_or(vm_state, checkpoint, property),
             Property::And(_) => self.check_and(vm_state, checkpoint, property),
             Property::Atom(atom) => {
+                let target_arg = property.args().first().and_then(|arg| match arg {
+                    PropertyArg::Expr(ContractExpr::Place(place)) => match place.base {
+                        PlaceBase::Arg(index) => Some(index),
+                        _ => None,
+                    },
+                    PropertyArg::Expr(ContractExpr::Const(index)) => usize::try_from(*index).ok(),
+                    _ => None,
+                });
+                if atom.kind == PropertyKind::Init
+                    && (self.target_value(vm_state, checkpoint, property)
+                        .and_then(|value| value.provenance_alloc_id())
+                        .is_some_and(|id| vm_state.possible_uninit_allocs.contains(&id))
+                        || target_arg.and_then(|index| checkpoint.args.get(index))
+                            .and_then(|arg| arg.place())
+                            .and_then(|place| vm_state.current_frame.local_alloc.get(&place.local))
+                            .is_some_and(|id| vm_state.possible_uninit_allocs.contains(id)))
+                {
+                    return CheckResult::Failed;
+                }
                 // A property whose target value (or a checkpoint argument it
                 // reads) depends on a truncated inline cannot be decided:
                 // report `Unknown` instead of failing on the placeholder term.
-                if self.atom_depends_on_truncated_inline(vm_state, checkpoint, property) {
+                if self.atom_depends_on_inline_terms(
+                    vm_state, checkpoint, property, &vm_state.inline.inline_truncated_terms
+                ) {
                     return CheckResult::Unknown(UnknownReason::InlineDepthExceeded);
+                }
+                if self.atom_depends_on_inline_terms(
+                    vm_state, checkpoint, property, &vm_state.inline.inline_branch_terms
+                ) {
+                    return CheckResult::Unknown(UnknownReason::Unimplemented);
+                }
+                if vm_state.incomplete_inline_branch
+                    && (checkpoint.callee.is_some() || !checkpoint.args.is_empty())
+                {
+                    return CheckResult::Unknown(UnknownReason::Unimplemented);
                 }
                 let rule = PROPERTY_RULES
                     .iter()
                     .find(|r| r.kind == atom.kind)
                     .unwrap_or(&UNKNOWN_RULE);
                 crate::rap_debug!("property rule: {}", rule.name);
-                (rule.apply)(self, vm_state, checkpoint, property)
+                let result = (rule.apply)(self, vm_state, checkpoint, property);
+                if vm_state.incomplete_inline_branch && result == CheckResult::Failed {
+                    CheckResult::Unknown(UnknownReason::Unimplemented)
+                } else {
+                    result
+                }
             }
         }
     }
 
-    /// Whether this atom's target value (or a checkpoint argument it reads, or
-    /// its pointer provenance offset) depends on a truncated inline — i.e. it is
-    /// one of `VmState::inline_truncated_terms`.  Such a value is an
-    /// unconstrained placeholder, so any proof/failure would be spurious.
-    fn atom_depends_on_truncated_inline<'z3, 'tcx>(
+    /// Whether this atom's target or a checkpoint argument depends on an
+    /// unconstrained value introduced by incomplete inlining.
+    fn atom_depends_on_inline_terms<'z3, 'tcx>(
         &self,
         vm_state: &VmState<'z3, 'tcx>,
         checkpoint: &Checkpoint<'tcx>,
         property: &Property<'tcx>,
+        terms: &rustc_hash::FxHashSet<Int<'z3>>,
     ) -> bool {
-        let truncated = &vm_state.inline.inline_truncated_terms;
-        if truncated.is_empty() {
+        if terms.is_empty() {
             return false;
         }
         // The checkpoint's argument operands (e.g. `ptr.add(n)`'s `n`) are what
         // the property constrains; a truncated argument makes the check
         // undecidable even when the target pointer itself is well-defined.
         for operand in &checkpoint.args {
-            if self.value_involves_truncated(truncated, &vm_state.value_of_operand(operand)) {
+            if self.value_involves_terms(terms, &vm_state.value_of_operand(operand)) {
                 return true;
             }
         }
         if let Some(value) = self.target_value(vm_state, checkpoint, property)
-            && self.value_involves_truncated(truncated, &value)
+            && self.value_involves_terms(terms, &value)
         {
             return true;
         }
         false
     }
 
-    fn value_involves_truncated<'z3, 'tcx>(
+    fn value_involves_terms<'z3, 'tcx>(
         &self,
-        truncated: &rustc_hash::FxHashSet<z3::ast::Int<'z3>>,
+        terms: &rustc_hash::FxHashSet<Int<'z3>>,
         value: &crate::verify::vm::state::VmValue<'z3, 'tcx>,
     ) -> bool {
-        if truncated.contains(&value.z3_term) {
+        if Self::term_involves(terms, &value.z3_term) {
             return true;
         }
         value.provenance.as_ref().is_some_and(|p| {
-            truncated.contains(&p.offset)
+            Self::term_involves(terms, &p.offset)
                 || matches!(
                     &p.offset_kind,
-                    Some(OffsetKind::Element(e)) if truncated.contains(e)
+                    Some(OffsetKind::Element(e)) if Self::term_involves(terms, e)
                 )
         })
+    }
+
+    fn term_involves<'z3>(terms: &rustc_hash::FxHashSet<Int<'z3>>, term: &Int<'z3>) -> bool {
+        let mut pending = vec![Dynamic::from_ast(term)];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(ast) = pending.pop() {
+            if !seen.insert(ast.clone()) {
+                continue;
+            }
+            if ast.as_int().is_some_and(|value| terms.contains(&value)) {
+                return true;
+            }
+            pending.extend(ast.children());
+        }
+        false
     }
 
     fn check_or<'z3, 'tcx>(

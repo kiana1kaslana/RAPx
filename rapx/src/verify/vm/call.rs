@@ -10,16 +10,17 @@
 //! Otherwise it falls back to the summary-based approach.
 
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::{BasicBlock, Local, Operand, TerminatorKind};
+use rustc_middle::mir::{BasicBlock, Local, Operand, Terminator, TerminatorKind};
 use rustc_middle::ty::{Ty, TyKind};
 use z3::ast::{Ast, Bool, Int};
+use z3::{SatResult, Solver};
 
 use crate::compat::{FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
 use crate::verify::api_classify;
 use crate::verify::call_summary::{self, BoundedArithmeticOp, CallEffect, OverflowOp};
-use super::state::{AllocId, AllocKind, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
+use super::state::{AllocId, AllocKind, ElementTy, MemoryContent, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Execute a call terminator, dispatching by precision:
@@ -134,13 +135,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             self.set_local(dest, VmValue::new(truncated_term, dest_ty));
             return false;
         }
+        let before_inline = self.clone();
         self.inline.inline_depth += 1;
-
-        // Path extraction already inlines callee CFGs (covering their branches),
-        // so inline here need not reject branchy callees: the old branch/return/
-        // arity filters are gone. `inline_execute_body` folds `UbChecks` to the
-        // no-check edge (release semantics) and follows only the live edge for
-        // constant/trivial switches.
 
         // ── Save caller context ──
         // Resolve each arg's referent local (for `&self`/`&mut self` reborrow
@@ -151,6 +147,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .iter()
             .map(|v| self.find_local_by_address(&v.z3_term))
             .collect();
+        let caller_referents = inline_arg_referents.clone();
         // Whole-place reborrow referents, resolved from the *caller's* MIR
         // before the body is switched to the callee (used to propagate the
         // referent's struct fields into the callee for `old = self.ptr`).
@@ -201,7 +198,50 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
 
         // ── Execute callee MIR ──
-        self.inline_execute_body();
+        let pre_uninit: Vec<AllocId> = caller_referents.iter()
+            .flatten()
+            .filter(|local| api_classify::is_maybe_uninit_ty(before_inline.body().local_decls[**local].ty))
+            .filter_map(|local| before_inline.current_frame.local_alloc.get(local).copied())
+            .filter(|id| !before_inline.content(*id).facts.initialized)
+            .collect();
+        let may_recurse = self.body().basic_blocks.iter().any(|block| {
+            let TerminatorKind::Call { func, .. } = &block.terminator().kind else {
+                return false;
+            };
+            mir_utils::dep_callee_resolved_def_id(self.tcx, callee_def_id, func)
+                == Some(callee_def_id)
+        });
+        if !self.inline_execute_body(&pre_uninit) {
+            let witnessed = self.possible_uninit_allocs.clone();
+            *self = before_inline;
+            self.possible_uninit_allocs.extend(witnessed);
+            self.incomplete_inline_branch = true;
+            let dest_ty = self.body().local_decls[dest].ty;
+            let unknown_term = self.fresh_int("inline_branch_unknown");
+            self.inline.inline_branch_terms.insert(unknown_term.clone());
+            if may_recurse {
+                self.inline.inline_truncated_terms.insert(unknown_term.clone());
+            }
+            self.set_local(dest, VmValue::new(unknown_term, dest_ty));
+            let mut unknown_effect =
+                self.tcx.fn_sig(callee_def_id).skip_binder().safety() == rustc_hir::Safety::Unsafe;
+            for (arg, referent) in arg_values.iter().zip(&caller_referents) {
+                match arg.ty.kind() {
+                    TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Uint(_)
+                    | TyKind::Float(_) => {}
+                    TyKind::Ref(..) | TyKind::RawPtr(..) => {
+                        if let Some(local) = referent {
+                            self.forget_inline_referent(*local);
+                        } else {
+                            unknown_effect = true;
+                        }
+                    }
+                    _ => unknown_effect = true,
+                }
+            }
+            self.unsupported_mir |= unknown_effect;
+            return false;
+        }
 
         // ── Capture return value and its per-field values ──
         let return_val = self.local_value(Local::from_usize(0)).cloned();
@@ -272,6 +312,28 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
         self.inline.inline_depth -= 1;
         true
+    }
+
+    fn forget_inline_referent(&mut self, local: Local) {
+        let Some(alloc_id) = self.current_frame.local_alloc.get(&local).copied() else {
+            self.unsupported_mir = true;
+            return;
+        };
+        if self.possible_uninit_allocs.contains(&alloc_id) {
+            return;
+        }
+        let prior = self.local_value(local).cloned();
+        *self.content_mut(alloc_id) = MemoryContent::default();
+        let ty = self.body().local_decls[local].ty;
+        let unknown_term = self.fresh_int("inline_write_unknown");
+        self.inline.inline_branch_terms.insert(unknown_term.clone());
+        let mut unknown = VmValue::new(unknown_term, ty);
+        if let Some(prior) = prior
+            && prior.provenance_alloc_id() == Some(alloc_id)
+        {
+            unknown.provenance = prior.provenance;
+        }
+        self.set_local(local, unknown);
     }
 
     /// Resolve a `SwitchInt` discriminant to a constant `u64`, following a
@@ -350,7 +412,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     }
 
     /// Execute the callee's MIR body.
-    fn inline_execute_body(&mut self) {
+    fn inline_execute_body(&mut self, pre_uninit: &[AllocId]) -> bool {
         let mut visited = FxHashSet::default();
         let mut queue: Vec<BasicBlock> = Vec::new();
         queue.push(BasicBlock::from_usize(0));
@@ -364,7 +426,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
             // Execute statements
             for stmt in bb_data.statements.iter() {
-                self.exec_statement(stmt);
+                crate::verify::vm::rules::exec_statement(self, stmt);
             }
 
             // Process terminator
@@ -378,22 +440,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     // Return value captured in local_0
                 }
                 TerminatorKind::Assert {
-                    cond,
-                    expected,
                     target,
                     ..
                 } => {
-                    let cond_val = self.value_of_operand(cond);
-                    if *expected {
-                        let zero = Int::from_u64(self.z3_ctx, 0);
-                        self.constraints.assertions.push(cond_val.z3_term._eq(&zero).not());
-                    } else {
-                        let zero = Int::from_u64(self.z3_ctx, 0);
-                        self.constraints.assertions.push(cond_val.z3_term._eq(&zero));
-                    }
-                    // Guard inference for inline callee
-                    self.infer_guard_non_null(cond, *expected);
-                    self.infer_guard_align(cond, *expected);
+                    crate::verify::vm::rules::exec_terminator(self, terminator, None);
                     queue.push(*target);
                 }
                 TerminatorKind::SwitchInt { discr, targets } => {
@@ -419,44 +469,112 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         queue.push(targets.otherwise());
                         continue;
                     }
-                    // Conservative: add path conditions for all branches,
-                    // but since we don't fork state, we follow all targets.
-                    // This loses precision for overwritten locals but is sound.
-                    for (value, target) in targets.iter() {
-                        let discr_val = self.value_of_operand(discr);
-                        let val_term = Int::from_u64(self.z3_ctx, value as u64);
-                        self.constraints.assertions.push(discr_val.z3_term._eq(&val_term));
-                        queue.push(target);
-                    }
-                    let otherwise = targets.otherwise();
-                    queue.push(otherwise);
+                    self.possible_uninit_allocs.extend(
+                        self.find_uninit_witness(terminator, pre_uninit)
+                    );
+                    return false;
                 }
                 TerminatorKind::Call {
-                    func,
-                    args,
-                    destination,
                     target,
                     ..
                 } => {
-                    self.exec_call(
-                        func,
-                        args,
-                        destination.local,
-                        self.current_frame.current_def_id,
-                    );
+                    crate::verify::vm::rules::exec_terminator(self, terminator, None);
                     if let Some(t) = target {
                         queue.push(*t);
                     }
                 }
-                TerminatorKind::Drop { place, target, .. } => {
-                    self.exec_drop(place);
+                TerminatorKind::Drop { target, .. } => {
+                    crate::verify::vm::rules::exec_terminator(self, terminator, None);
                     queue.push(*target);
                 }
                 _ => {
-                    // Dead-end or unsupported — stop traversal at this block.
+                    crate::verify::vm::rules::exec_terminator(self, terminator, None);
                 }
             }
         }
+        true
+    }
+
+    fn find_uninit_witness(
+        &self,
+        switch: &Terminator<'tcx>,
+        candidates: &[AllocId],
+    ) -> FxHashSet<AllocId> {
+        let TerminatorKind::SwitchInt { targets, .. } = &switch.kind else {
+            return FxHashSet::default();
+        };
+        if candidates.is_empty() {
+            return FxHashSet::default();
+        }
+        let mut found = FxHashSet::default();
+        let mut stack = Vec::new();
+        for target in targets.all_targets().iter().copied() {
+            let mut state = self.clone();
+            crate::verify::vm::rules::exec_terminator(&mut state, switch, Some(target));
+            stack.push((state, target, FxHashSet::default()));
+        }
+        let mut explored = 0;
+        while let Some((mut state, block, mut visited)) = stack.pop() {
+            if explored >= 512 || !visited.insert(block) {
+                continue;
+            }
+            explored += 1;
+            let data = &state.body().basic_blocks[block];
+            for statement in &data.statements {
+                crate::verify::vm::rules::exec_statement(&mut state, statement);
+            }
+            let terminator = data.terminator();
+            match &terminator.kind {
+                TerminatorKind::Return => {
+                    let solver = Solver::new(state.z3_ctx);
+                    state.assert_all(&solver);
+                    if solver.check() == SatResult::Sat {
+                        for id in candidates {
+                            if !state.content(*id).facts.initialized {
+                                found.insert(*id);
+                            }
+                        }
+                    }
+                    if found.len() == candidates.len() {
+                        break;
+                    }
+                }
+                TerminatorKind::Goto { target } => stack.push((state, *target, visited)),
+                TerminatorKind::SwitchInt { targets, .. } => {
+                    for target in targets.all_targets().iter().copied() {
+                        let mut branch = state.clone();
+                        crate::verify::vm::rules::exec_terminator(
+                            &mut branch, terminator, Some(target)
+                        );
+                        stack.push((branch, target, visited.clone()));
+                    }
+                }
+                TerminatorKind::Assert { target, .. } => {
+                    crate::verify::vm::rules::exec_terminator(&mut state, terminator, None);
+                    stack.push((state, *target, visited));
+                }
+                TerminatorKind::Call { func, target: Some(target), .. } => {
+                    let callee = mir_utils::dep_callee_resolved_def_id(
+                        state.tcx,
+                        state.current_frame.current_def_id,
+                        func,
+                    );
+                    if callee.is_some_and(|def_id| state.tcx.is_mir_available(def_id)) {
+                        let incomplete = state.incomplete_inline_branch;
+                        let truncated = state.inline.inline_truncated_terms.len();
+                        crate::verify::vm::rules::exec_terminator(&mut state, terminator, None);
+                        if !state.unsupported_mir
+                            && state.incomplete_inline_branch == incomplete
+                            && state.inline.inline_truncated_terms.len() == truncated
+                        {
+                            stack.push((state, *target, visited));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
     }
 
     /// Clone `arg_val`, retype it to `dest`'s type, mark it as a non-null,

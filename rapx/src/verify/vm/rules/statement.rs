@@ -1,9 +1,10 @@
 //! Transfer functions for state-changing MIR statements.
 
 use rustc_middle::mir::{Local, Operand, Place, ProjectionElem, Rvalue};
-use z3::ast::Int;
+use z3::ast::{Ast, Int};
 
-use super::super::state::{Provenance, VmState};
+use super::super::state::{Provenance, VmState, VmValue};
+use crate::helpers::mir_utils;
 use super::eval_rvalue;
 
 pub(crate) fn exec_assign<'z3, 'tcx>(
@@ -11,6 +12,12 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
     place: &Place<'tcx>,
     rvalue: &Rvalue<'tcx>,
 ) {
+    let uninit_source = match rvalue {
+        Rvalue::Use(Operand::Copy(source) | Operand::Move(source), ..)
+        | Rvalue::CopyForDeref(source) => state.current_frame.local_alloc.get(&source.local)
+            .is_some_and(|id| state.possible_uninit_allocs.contains(id)),
+        _ => false,
+    };
     let mut value = eval_rvalue(state, place, rvalue);
 
     let has_deref = place
@@ -26,6 +33,11 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
 
     if place.projection.is_empty() {
         state.set_local(place.local, value);
+        if uninit_source
+            && let Some(id) = state.current_frame.local_alloc.get(&place.local)
+        {
+            state.possible_uninit_allocs.insert(*id);
+        }
         // On a whole-place move (`_3 = move _4`), the destination is a fresh
         // container slot: re-point its whole-value provenance from the source's
         // stack slot to its own, so `container_data_alloc` later reads the
@@ -192,4 +204,149 @@ pub(crate) fn exec_storage_dead<'z3, 'tcx>(
     if let Some(alloc_id) = state.current_frame.local_alloc.get(&local).copied() {
         state.alloc_mut(alloc_id).facts.dead = true;
     }
+}
+
+impl<'z3, 'tcx> VmState<'z3, 'tcx> {
+    /// Record byte-level values when assigning to a place with projections.
+    /// This handles patterns like `buf[i] = 0u8` (nul-store) and `arr[i] = val`.
+    pub(crate) fn record_projected_store(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
+        // Prefer the value's provenance (pointee alloc) over slots
+        // (reference alloc) for ref/ptr parameters.
+        let Some(alloc_id) = self
+            .local_value(place.local)
+            .and_then(|v| v.provenance_alloc_id())
+            .or_else(|| self.current_frame.local_alloc.get(&place.local).copied())
+        else {
+            return;
+        };
+
+        let value_ty = value.ty;
+        let value_size = self.size_of_ty(value_ty) as usize;
+
+        let mut byte_offset: usize = 0;
+        let mut concrete = true;
+
+        let base_ty = self.body().local_decls[place.local].ty;
+        let mut cur_ty = base_ty;
+
+        for proj in place.projection.iter() {
+            match proj.kind() {
+                rustc_middle::mir::ProjectionElem::Field(field_idx, _) => {
+                    let off = self.field_offset_in_bytes(cur_ty, field_idx.as_usize()) as usize;
+                    byte_offset += off;
+                    if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = cur_ty.kind()
+                        && !adt_def.is_enum() {
+                            let variant = adt_def.non_enum_variant();
+                            if let Some(field_def) = variant.fields.get(field_idx) {
+                                cur_ty = mir_utils::field_ty(
+                                    self.tcx, field_def, substs,
+                                );
+                            }
+                        }
+                }
+                rustc_middle::mir::ProjectionElem::Deref => {
+                    if let rustc_middle::ty::TyKind::Ref(_, inner, _) = cur_ty.kind() {
+                        cur_ty = *inner;
+                    }
+                }
+                rustc_middle::mir::ProjectionElem::Index(_local) => {
+                    concrete = false;
+                    break;
+                }
+                rustc_middle::mir::ProjectionElem::Subslice {
+                    from,
+                    to: _,
+                    from_end: _,
+                } => {
+                    byte_offset += from as usize;
+                }
+                _ => {}
+            }
+        }
+
+        if concrete && value_size > 0 {
+            self.content_mut(alloc_id).facts.initialized = true;
+
+            let is_u8_write = matches!(
+                value_ty.kind(),
+                rustc_middle::ty::TyKind::Uint(rustc_middle::ty::UintTy::U8)
+            );
+
+            if is_u8_write {
+                self.record_byte_value(alloc_id, byte_offset, value.z3_term.clone());
+            }
+        }
+    }
+
+    /// Track byte-level values for index-based stores (e.g. `buf[i] = 0u8`)
+    /// that `record_projected_store` skips due to Index projections.
+    pub(crate) fn record_indexed_store_for_vm(
+        &mut self,
+        place: &Place<'tcx>,
+        value: &VmValue<'z3, 'tcx>,
+    ) {
+        if place.projection.len() == 1
+            && let rustc_middle::mir::ProjectionElem::Index(index_local) = place.projection[0]
+            && let rustc_middle::ty::TyKind::Array(elem_ty, _) =
+                self.body().local_decls[place.local].ty.kind()
+            && *elem_ty == value.ty
+        {
+            let array_ty = self.body().local_decls[place.local].ty;
+            let index = self
+                .local_value(index_local)
+                .and_then(|v| v.z3_term.simplify().as_u64())
+                .and_then(|v| usize::try_from(v).ok());
+            if let Some(index) = index {
+                if let Some(alloc_id) = self.current_frame.local_alloc.get(&place.local).copied() {
+                    self.content_mut(alloc_id).values.retain(|(ty, path), _| {
+                        *ty != array_ty || path.first() != Some(&index)
+                    });
+                }
+                if matches!(
+                    value.ty.kind(),
+                    rustc_middle::ty::TyKind::Int(_)
+                        | rustc_middle::ty::TyKind::Uint(_)
+                        | rustc_middle::ty::TyKind::Bool
+                        | rustc_middle::ty::TyKind::Char
+                ) {
+                    self.set_field_value(place.local, vec![index], value.clone());
+                }
+            } else if let Some(alloc_id) = self
+                .local_value(place.local)
+                .and_then(|v| v.provenance_alloc_id())
+                .or_else(|| self.current_frame.local_alloc.get(&place.local).copied())
+            {
+                self.content_mut(alloc_id)
+                    .values
+                    .retain(|(ty, path), _| *ty != array_ty || path.is_empty());
+            }
+        }
+        let is_u8 = matches!(
+            value.ty.kind(),
+            rustc_middle::ty::TyKind::Uint(rustc_middle::ty::UintTy::U8)
+        );
+        if !is_u8 {
+            return;
+        }
+        let has_index_with_concrete = place.projection.iter().any(|p| {
+            if let rustc_middle::mir::ProjectionElem::Index(local) = p {
+                self.local_value(local)
+                    .and_then(|v| v.z3_term.simplify().as_u64())
+                    .is_some()
+            } else {
+                false
+            }
+        });
+        if !has_index_with_concrete {
+            return;
+        }
+        if let Some(addr) = self.address_of_place(place)
+            && let Some(ref prov) = addr.provenance {
+                let alloc_id = prov.alloc_id;
+                let byte_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
+                self.content_mut(alloc_id).facts.initialized = true;
+                self.record_byte_value(alloc_id, byte_offset, value.z3_term.clone());
+            }
+    }
+
 }

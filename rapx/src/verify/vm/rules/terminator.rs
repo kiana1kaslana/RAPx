@@ -113,5 +113,14 @@ pub(crate) fn exec_drop<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     place: &Place<'tcx>,
 ) {
-    state.exec_drop(place);
+    if let Some(alloc_id) = state.current_frame.local_alloc.get(&place.local).copied() {
+        state.alloc_mut(alloc_id).facts.dead = true;
+        let is_param = place.local.as_usize() <= state.body().arg_count;
+        if !is_param {
+            let ty = state.body().local_decls[place.local].ty;
+            if let Some(data_id) = state.container_data_alloc(alloc_id, ty) {
+                state.alloc_mut(data_id).facts.dead = true;
+            }
+        }
+    }
 }

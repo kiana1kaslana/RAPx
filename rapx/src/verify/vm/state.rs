@@ -416,6 +416,7 @@ pub(crate) struct InlineCtx<'z3, 'tcx> {
     /// through arithmetic (e.g. `ptr.add(truncated)` keeps `truncated` as its
     /// element offset), so only the directly-dependent properties are affected.
     pub inline_truncated_terms: FxHashSet<Int<'z3>>,
+    pub inline_branch_terms: FxHashSet<Int<'z3>>,
     /// During `exec_inline_call`, maps each callee argument index to the
     /// *caller* local its value points at (resolved from the reference's
     /// address term before the caller's address map is saved away).  Used by
@@ -663,6 +664,9 @@ pub(crate) struct VmState<'z3, 'tcx> {
     /// A retained MIR operation with a possible state effect has no transfer rule.
     pub(crate) unsupported_mir: bool,
 
+    pub(crate) incomplete_inline_branch: bool,
+    pub(crate) possible_uninit_allocs: FxHashSet<AllocId>,
+
     /// Root allocations of the `Alias` sources the caller's contract declares
     /// (a hazard like `Alias(self, ret)`, or a `Ptr2Ref` precondition like
     /// `Alias(self.0)`).  `check_read_memory_alias`/`check_view_alias` discharge
@@ -698,6 +702,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             units: Vec::default(),
             inline: InlineCtx::default(),
             unsupported_mir: false,
+            incomplete_inline_branch: false,
+            possible_uninit_allocs: FxHashSet::default(),
             constraints,
             alias_hazard_allocs: FxHashSet::default(),
         }
@@ -739,6 +745,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     pub(crate) fn set_local(&mut self, local: Local, value: VmValue<'z3, 'tcx>) {
         self.ensure_local_allocation(local);
         let alloc_id = self.current_frame.local_alloc[&local];
+        self.possible_uninit_allocs.remove(&alloc_id);
         let view_ty = self.body().local_decls[local].ty;
         self.store_value(alloc_id, view_ty, vec![], value);
     }

@@ -7,7 +7,7 @@
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{
-        BasicBlock, BinOp, Local, Operand, Place, Rvalue, Statement, StatementKind, Terminator,
+        BinOp, Local, Operand, Place, Rvalue, StatementKind,
         UnOp,
     },
     ty::{Region, Ty},
@@ -51,12 +51,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 } => {
                     let body = self.tcx.optimized_mir(*def_id);
                     let statement = &body.basic_blocks[*block].statements[*statement_index];
-                    self.exec_statement(statement);
+                    crate::verify::vm::rules::exec_statement(self, statement);
                 }
                 RelevantItem::Terminator { def_id, block, switch_succ } => {
                     let body = self.tcx.optimized_mir(*def_id);
                     let terminator = body.basic_blocks[*block].terminator();
-                    self.exec_terminator(terminator, *switch_succ);
+                    crate::verify::vm::rules::exec_terminator(self, terminator, *switch_succ);
                 }
                 RelevantItem::CalleeEntry { callee, args, consts, field_offsets } => {
                     self.handle_callee_entry(*callee, args, consts, field_offsets);
@@ -1356,153 +1356,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
-    pub(crate) fn exec_statement(&mut self, statement: &Statement<'tcx>) {
-        crate::verify::vm::rules::exec_statement(self, statement);
-    }
-
-
-    /// Record byte-level values when assigning to a place with projections.
-    /// This handles patterns like `buf[i] = 0u8` (nul-store) and `arr[i] = val`.
-    pub(crate) fn record_projected_store(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
-        // Prefer the value's provenance (pointee alloc) over slots
-        // (reference alloc) for ref/ptr parameters.
-        let Some(alloc_id) = self
-            .local_value(place.local)
-            .and_then(|v| v.provenance_alloc_id())
-            .or_else(|| self.current_frame.local_alloc.get(&place.local).copied())
-        else {
-            return;
-        };
-
-        let value_ty = value.ty;
-        let value_size = self.size_of_ty(value_ty) as usize;
-
-        let mut byte_offset: usize = 0;
-        let mut concrete = true;
-
-        let base_ty = self.body().local_decls[place.local].ty;
-        let mut cur_ty = base_ty;
-
-        for proj in place.projection.iter() {
-            match proj.kind() {
-                rustc_middle::mir::ProjectionElem::Field(field_idx, _) => {
-                    let off = self.field_offset_in_bytes(cur_ty, field_idx.as_usize()) as usize;
-                    byte_offset += off;
-                    if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = cur_ty.kind()
-                        && !adt_def.is_enum() {
-                            let variant = adt_def.non_enum_variant();
-                            if let Some(field_def) = variant.fields.get(field_idx) {
-                                cur_ty = mir_utils::field_ty(
-                                    self.tcx, field_def, substs,
-                                );
-                            }
-                        }
-                }
-                rustc_middle::mir::ProjectionElem::Deref => {
-                    if let rustc_middle::ty::TyKind::Ref(_, inner, _) = cur_ty.kind() {
-                        cur_ty = *inner;
-                    }
-                }
-                rustc_middle::mir::ProjectionElem::Index(_local) => {
-                    concrete = false;
-                    break;
-                }
-                rustc_middle::mir::ProjectionElem::Subslice {
-                    from,
-                    to: _,
-                    from_end: _,
-                } => {
-                    byte_offset += from as usize;
-                }
-                _ => {}
-            }
-        }
-
-        if concrete && value_size > 0 {
-            self.content_mut(alloc_id).facts.initialized = true;
-
-            let is_u8_write = matches!(
-                value_ty.kind(),
-                rustc_middle::ty::TyKind::Uint(rustc_middle::ty::UintTy::U8)
-            );
-
-            if is_u8_write {
-                self.record_byte_value(alloc_id, byte_offset, value.z3_term.clone());
-            }
-        }
-    }
-
-    /// Track byte-level values for index-based stores (e.g. `buf[i] = 0u8`)
-    /// that `record_projected_store` skips due to Index projections.
-    pub(crate) fn record_indexed_store_for_vm(
-        &mut self,
-        place: &Place<'tcx>,
-        value: &VmValue<'z3, 'tcx>,
-    ) {
-        if place.projection.len() == 1
-            && let rustc_middle::mir::ProjectionElem::Index(index_local) = place.projection[0]
-            && let rustc_middle::ty::TyKind::Array(elem_ty, _) =
-                self.body().local_decls[place.local].ty.kind()
-            && *elem_ty == value.ty
-        {
-            let array_ty = self.body().local_decls[place.local].ty;
-            let index = self
-                .local_value(index_local)
-                .and_then(|v| v.z3_term.simplify().as_u64())
-                .and_then(|v| usize::try_from(v).ok());
-            if let Some(index) = index {
-                if let Some(alloc_id) = self.current_frame.local_alloc.get(&place.local).copied() {
-                    self.content_mut(alloc_id).values.retain(|(ty, path), _| {
-                        *ty != array_ty || path.first() != Some(&index)
-                    });
-                }
-                if matches!(
-                    value.ty.kind(),
-                    rustc_middle::ty::TyKind::Int(_)
-                        | rustc_middle::ty::TyKind::Uint(_)
-                        | rustc_middle::ty::TyKind::Bool
-                        | rustc_middle::ty::TyKind::Char
-                ) {
-                    self.set_field_value(place.local, vec![index], value.clone());
-                }
-            } else if let Some(alloc_id) = self
-                .local_value(place.local)
-                .and_then(|v| v.provenance_alloc_id())
-                .or_else(|| self.current_frame.local_alloc.get(&place.local).copied())
-            {
-                self.content_mut(alloc_id)
-                    .values
-                    .retain(|(ty, path), _| *ty != array_ty || path.is_empty());
-            }
-        }
-        let is_u8 = matches!(
-            value.ty.kind(),
-            rustc_middle::ty::TyKind::Uint(rustc_middle::ty::UintTy::U8)
-        );
-        if !is_u8 {
-            return;
-        }
-        let has_index_with_concrete = place.projection.iter().any(|p| {
-            if let rustc_middle::mir::ProjectionElem::Index(local) = p {
-                self.local_value(local)
-                    .and_then(|v| v.z3_term.simplify().as_u64())
-                    .is_some()
-            } else {
-                false
-            }
-        });
-        if !has_index_with_concrete {
-            return;
-        }
-        if let Some(addr) = self.address_of_place(place)
-            && let Some(ref prov) = addr.provenance {
-                let alloc_id = prov.alloc_id;
-                let byte_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
-                self.content_mut(alloc_id).facts.initialized = true;
-                self.record_byte_value(alloc_id, byte_offset, value.z3_term.clone());
-            }
-    }
-
     /// Inject layout constraints (>= 1) for generic AlignOf/SizeOf constants.
     pub(crate) fn inject_layout_constraints(&mut self, operand: &Operand<'tcx>, val: &VmValue<'z3, 'tcx>) {
         if let Operand::Constant(constant) = operand {
@@ -2115,34 +1968,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
         false
     }
-
-
-    pub(crate) fn exec_drop(&mut self, place: &Place<'tcx>) {
-        if let Some(alloc_id) = self.current_frame.local_alloc.get(&place.local).copied() {
-            self.alloc_mut(alloc_id).facts.dead = true;
-            // Cascade to the container's heap data allocation (the owning field's
-            // provenance), so dropping a locally-created Vec/String/CString kills
-            // its buffer. A *parameter*'s data buffer is owned by the caller (it
-            // is an external allocation), so dropping the parameter here does not
-            // free it.
-            let is_param = place.local.as_usize() <= self.body().arg_count;
-            if !is_param {
-                let ty = self.body().local_decls[place.local].ty;
-                if let Some(data_id) = self.container_data_alloc(alloc_id, ty) {
-                    self.alloc_mut(data_id).facts.dead = true;
-                }
-            }
-        }
-    }
-
-    fn exec_terminator(
-        &mut self,
-        terminator: &Terminator<'tcx>,
-        switch_succ: Option<BasicBlock>,
-    ) {
-        crate::verify::vm::rules::exec_terminator(self, terminator, switch_succ);
-    }
-
 
 
     /// The `(lhs, rhs, op)` of the binary-op/comparison source recorded on the

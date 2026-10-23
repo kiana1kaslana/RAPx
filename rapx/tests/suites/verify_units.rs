@@ -666,6 +666,14 @@ fn unsupported_mir_01() {
     assert_function_result(&output, "unknown_intrinsic_copy", "UNKNOWN");
 }
 
+#[test]
+fn inline_branch_unknown_01() {
+    let output = run_with_args("verify_units/inline_branch_unknown_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "unknown_fallback_branch", "UNKNOWN");
+    assert_function_result(&output, "unknown_fallback_write", "UNKNOWN");
+    assert_not_contain(&output, "result: UNSOUND");
+}
+
 // ================ AsChunks Sound Cases =============
 sound_tests_multi! {
     as_chunks_sound: "verify_units/as_chunks_sound_01" => [
