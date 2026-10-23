@@ -596,7 +596,7 @@ pub(crate) struct TermCaches<'z3, 'tcx> {
     /// Caching both keeps `next`/`len`/`is_empty` checks linear
     /// (`base_len - offset`) instead of a deeply-nested `((base + S) + S) …`
     /// pointer chain that Z3's NIA cannot reason about.
-    pub(crate) iter_ptr_offset: FxHashMap<AllocId, (Int<'z3>, Option<Int<'z3>>)>,
+    pub(crate) iter_ptr_offset: FxHashMap<(AllocId, Int<'z3>), (AllocId, Int<'z3>, Option<Int<'z3>>)>,
 
     /// `UNINIT` sentinel byte value (≥ 256, outside the `u8` value range).
     /// The default element of every byte array; `select(array, i) != UNINIT`
@@ -979,8 +979,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// The buffer an `Iter`/`IterMut` at `local` walks: the provenance of its
     /// `end` field.  This is frame-independent (the buffer allocation is
-    /// path-scoped), unlike the `local` itself, so it keys the per-iterator
-    /// element index in [`TermCaches::iter_ptr_offset`].
+    /// path-scoped), unlike the `local` itself. The iterator's own allocation
+    /// keys its element index in [`TermCaches::iter_ptr_offset`].
     pub(crate) fn iter_buffer(&self, local: Local) -> Option<AllocId> {
         self.field_value(local, &[1])
             .and_then(|end| end.provenance.as_ref())
@@ -1289,6 +1289,27 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return self.local_value(place.local).cloned();
         }
         let place_ty = place.ty(self.body(), self.tcx).ty;
+        if place.projection.len() == 1
+            && matches!(place.projection[0], ProjectionElem::Deref)
+            && let Some(pointer) = self.local_value(place.local)
+            && let Some(provenance) = &pointer.provenance
+            && self.alloc(provenance.alloc_id).element_ty.as_ty() == Some(place_ty)
+            && let Some(offset) = provenance.offset.simplify().as_u64()
+            && let size = self.size_of_ty(place_ty)
+            && size != 0
+            && offset % size == 0
+        {
+            let value = self.units[provenance.alloc_id.0]
+                .content
+                .values
+                .iter()
+                .find_map(|((ty, path), value)| {
+                    (matches!(ty.kind(), rustc_middle::ty::TyKind::Array(elem, _) if *elem == place_ty)
+                        && path.as_slice() == [offset as usize / size as usize])
+                        .then_some(value.clone())
+                });
+            return Some(value.unwrap_or_else(|| self.unknown_value_for_place(place)));
+        }
 
         // Collect field indices from projections
         let field_path: Vec<usize> = place

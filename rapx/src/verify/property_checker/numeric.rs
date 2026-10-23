@@ -146,7 +146,7 @@ impl PropertyChecker {
         // predicate's LHS (typically the loop counter `i` in position).
         // At the assert_unchecked(i < n) point, tracked_offset == i + 1
         // because post_inc_start(1) was just called before the check.
-        for (off, _) in vm_state.constraints.term_caches.iter_ptr_offset.values() {
+        for (_, off, _) in vm_state.constraints.term_caches.iter_ptr_offset.values() {
             let one = Int::from_u64(vm_state.z3_ctx, 1);
             solver.assert(&off._eq(&Int::add(vm_state.z3_ctx, &[&lhs, &one])));
         }

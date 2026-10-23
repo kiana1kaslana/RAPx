@@ -505,6 +505,41 @@ fn nonoverlap_sound_symbolic() {
 }
 
 #[test]
+fn nonoverlap_indices() {
+    let output = run_with_args("verify_units/nonoverlap_indices", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_distinct_indices", "SOUND");
+    assert_function_result(&output, "unsound_duplicate_indices", "UNSOUND");
+    assert_function_result(&output, "unsound_callee_assertion", "UNSOUND");
+    assert_function_result(&output, "unsound_unknown_indices", "UNKNOWN");
+    assert_function_result(&output, "unsound_overwritten_indices", "UNKNOWN");
+    assert_function_result(&output, "sound_guarded_indices", "SOUND");
+    assert_function_result(&output, "unsound_overwritten_duplicate", "UNSOUND");
+    assert_function_result(&output, "unsound_indexed_write", "UNSOUND");
+    assert_function_result(&output, "sound_adjacent_ranges", "SOUND");
+    assert_function_result(&output, "unsound_overlapping_ranges", "UNSOUND");
+    assert_function_result(&output, "unsound_range_indexed_write", "UNKNOWN");
+    assert_function_result(&output, "sound_empty_range_at_edge", "SOUND");
+    assert_function_result(&output, "unsound_empty_range_in_middle", "UNSOUND");
+    assert_function_result(&output, "sound_adjacent_inclusive_ranges", "UNKNOWN");
+    assert_function_result(&output, "unsound_touching_inclusive_ranges", "UNKNOWN");
+    assert_function_result(&output, "sound_checked_generic_indices", "UNKNOWN");
+    assert_function_result(&output, "sound_checked_slice_iter_indices", "UNKNOWN");
+    assert_function_result(&output, "sound_at_most_one_generic_index", "SOUND");
+    assert_function_result(&output, "sound_range_next_indices", "SOUND");
+    assert_function_result(&output, "sound_range_next_symbolic", "SOUND");
+    assert_function_result(&output, "unsound_range_next_duplicate", "UNSOUND");
+    assert_function_result(&output, "sound_iter_next_indices", "SOUND");
+    assert_function_result(&output, "unsound_iter_next_duplicate", "UNSOUND");
+    assert_function_result(&output, "unsound_iter_next_after_write", "UNSOUND");
+    assert_function_result(&output, "sound_independent_iterators", "SOUND");
+    assert_function_result(&output, "unsound_independent_iterators", "UNSOUND");
+    assert_function_result(&output, "sound_moved_iterator", "SOUND");
+    assert_function_result(&output, "sound_inline_field_update", "SOUND");
+    assert_function_result(&output, "unsound_inline_field_update", "UNSOUND");
+    assert_function_result(&output, "unsound_branchy_duplicate", "UNSOUND");
+}
+
+#[test]
 fn manually_drop_reinit_sound() {
     let output = run_with_args("verify_units/manually_drop_reinit", CMD_VERIFY_TARGETED);
     assert_function_result(&output, "sound_reinitialize_after_drop", "SOUND");

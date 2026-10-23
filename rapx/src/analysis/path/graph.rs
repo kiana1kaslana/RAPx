@@ -1191,12 +1191,60 @@ impl<'tcx> PathGraph<'tcx> {
             }
         }
 
+        if self.terminator(cur).is_some_and(|t| matches!(t.kind, TerminatorKind::Return)) {
+            let entry = cur - self.cfg.block(cur).local_index;
+            if let (Some(binding), Some(parent)) = (
+                self.inline_bindings.get(&entry),
+                self.inline_parents.get(&entry),
+            ) {
+                let return_ty = self.tcx().optimized_mir(self.cfg.block(cur).def_id)
+                    .local_decls[Local::from_usize(0)].ty;
+                let is_branch_enum = matches!(return_ty.kind(), TyKind::Adt(adt, _)
+                    if self.tcx().is_diagnostic_item(rustc_span::sym::Result, adt.did())
+                        || self.tcx().is_diagnostic_item(rustc_span::sym::Option, adt.did())
+                        || self.tcx().def_path_str(adt.did()).ends_with("::ControlFlow"));
+                if is_branch_enum {
+                    let return_local = self.remap_local(self.cfg.block(cur).def_id, 0);
+                    let destination = self.remap_local(*parent, binding.dest_local);
+                    if let Some(value) = cs.consts.get(&return_local).copied() {
+                        cs.consts.insert(destination, value);
+                    } else {
+                        cs.consts.remove(&destination);
+                    }
+                }
+            }
+        }
+
         // Track slice lengths from `slice::get`/`slice::len`/`Try::branch`.
         if let Some(terminator) = self.terminator(cur)
             && let TerminatorKind::Call { func, args, destination, .. } = &terminator.kind
             && let Some(callee) = mir_utils::dep_callee_def_id(func)
         {
             let dest = self.remap_local(self.cfg.block(cur).def_id, destination.local.as_usize());
+            if self.tcx().def_path_str(callee).ends_with("::branch")
+                && let Some(source) = args.first().and_then(|arg| arg.node.place())
+            {
+                let source_local = self.remap_local(self.cfg.block(cur).def_id, source.local.as_usize());
+                let source_ty = self.tcx().optimized_mir(self.cfg.block(cur).def_id).local_decls[source.local].ty;
+                if let TyKind::Adt(adt, _) = source_ty.kind()
+                    && let Some(value) = cs.consts.get(&source_local).copied()
+                {
+                    let branch = if self.tcx().is_diagnostic_item(rustc_span::sym::Option, adt.did()) {
+                        match value {
+                            0 => Some(1),
+                            1 => Some(0),
+                            _ => None,
+                        }
+                    } else if self.tcx().is_diagnostic_item(rustc_span::sym::Result, adt.did()) {
+                        (value <= 1).then_some(value)
+                    } else {
+                        None
+                    };
+                    if let Some(branch) = branch {
+                        cs.consts.insert(dest, branch);
+                    }
+                }
+            }
             if crate::verify::api_classify::is_slice_get(Some(callee)) {
                 if let Some(range) = args.get(1)
                     && let Some(range_local) =
@@ -1297,6 +1345,14 @@ impl<'tcx> PathGraph<'tcx> {
         if let Some(binding) = self.inline_bindings.get(&next).cloned() {
             let caller_def_id = self.cfg.block(cur).def_id;
             let callee_def_id = self.cfg.block(next).def_id;
+            let return_ty = self.tcx().optimized_mir(callee_def_id)
+                .local_decls[Local::from_usize(0)].ty;
+            if matches!(return_ty.kind(), TyKind::Adt(adt, _)
+                if self.tcx().is_diagnostic_item(rustc_span::sym::Result, adt.did())
+                    || self.tcx().is_diagnostic_item(rustc_span::sym::Option, adt.did())
+                    || self.tcx().def_path_str(adt.did()).ends_with("::ControlFlow")) {
+                cs.consts.remove(&self.remap_local(callee_def_id, 0));
+            }
             for (i, &arg_local) in binding.arg_locals.iter().enumerate() {
                 let caller_arg = self.remap_local(caller_def_id, arg_local);
                 if self.local_is_known_nonnull(cs, caller_arg) {
@@ -2065,7 +2121,7 @@ impl<'tcx> PathGraph<'tcx> {
 
                 // No prior constraint — conservatively allow any valid target
                 // and record the newly learned constraint from the taken branch.
-                if next == targets.otherwise().as_usize()
+                if next == base + targets.otherwise().as_usize()
                     && let Some(local) = constraint_local
                         && let Some(num_variants) =
                             self.get_variant_count(local, self.cfg.block(cur).def_id)

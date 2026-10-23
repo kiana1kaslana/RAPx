@@ -305,7 +305,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// The array length `N` as a Z3 term (concrete value or symbolic const
     /// generic).  The symbolic name mirrors `value_of_operand`'s formatting so it
     /// is *identical* to the `const N` term appearing in path conditions.
-    fn const_len_term(&self, const_len: &rustc_middle::ty::Const<'tcx>) -> Int<'z3> {
+    pub(crate) fn const_len_term(&self, const_len: &rustc_middle::ty::Const<'tcx>) -> Int<'z3> {
         match const_len.try_to_target_usize(self.tcx) {
             Some(v) => Int::from_u64(self.z3_ctx, v),
             None => {

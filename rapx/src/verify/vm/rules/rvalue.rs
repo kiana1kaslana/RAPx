@@ -612,12 +612,20 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
         };
         (term.clone(), box_prov)
     };
+    let source = match kind {
+        rustc_middle::mir::AggregateKind::Adt(did, variant_idx, ..)
+            if state.tcx.adt_def(*did).is_enum() =>
+        {
+            ValueSource::Discriminant(Int::from_u64(state.z3_ctx, variant_idx.as_usize() as u64))
+        }
+        _ => ValueSource::None,
+    };
     Some(VmValue {
         z3_term: result_term,
         ty: dest_ty,
         provenance: result_prov,
         facts: ValueFacts::default(),
-        source: ValueSource::None,
+        source,
     })
 }
 

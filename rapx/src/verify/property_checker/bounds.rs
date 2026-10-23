@@ -407,6 +407,9 @@ impl PropertyChecker {
         checkpoint: &Checkpoint<'tcx>,
         property: &Property<'tcx>,
     ) -> CheckResult {
+        if property.args().len() == 1 {
+            return self.check_non_overlap_indices(vm_state, checkpoint, property);
+        }
         let solver = Solver::new(vm_state.z3_ctx);
         vm_state.assert_all(&solver);
         let Some(v1) = self.target_value(vm_state, checkpoint, property) else {
@@ -489,6 +492,122 @@ impl PropertyChecker {
         };
         solver.pop(1);
         r
+    }
+
+    fn check_non_overlap_indices<'z3, 'tcx>(
+        &self,
+        vm_state: &VmState<'z3, 'tcx>,
+        checkpoint: &Checkpoint<'tcx>,
+        property: &Property<'tcx>,
+    ) -> CheckResult {
+        let Some(array) = self.target_value(vm_state, checkpoint, property) else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        };
+        let TyKind::Array(elem_ty, len) = array.ty.kind() else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        };
+        let Some(n) = mir_utils::eval_array_len(vm_state.tcx, len)
+            .and_then(|n| usize::try_from(n).ok())
+        else {
+            let solver = Solver::new(vm_state.z3_ctx);
+            vm_state.assert_all(&solver);
+            if solver.check() != SatResult::Sat {
+                return CheckResult::Unknown(UnknownReason::Unimplemented);
+            }
+            let n = vm_state.const_len_term(len);
+            solver.assert(&n.ge(&Int::from_u64(vm_state.z3_ctx, 2)));
+            return match solver.check() {
+                SatResult::Unsat => CheckResult::ProvedBySmt,
+                SatResult::Sat => CheckResult::Unknown(UnknownReason::Unimplemented),
+                SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            };
+        };
+        if n < 2 {
+            return CheckResult::ProvedByRule;
+        }
+        let range_inclusive = if *elem_ty == vm_state.tcx.types.usize {
+            None
+        } else if let TyKind::Adt(def, args) = elem_ty.kind()
+            && args.types().next() == Some(vm_state.tcx.types.usize)
+        {
+            match vm_state.tcx.def_path_str(def.did()).as_str() {
+                "core::ops::range::Range" | "core::ops::Range" | "core::range::Range"
+                | "std::ops::Range" => Some(false),
+                "core::ops::range::RangeInclusive" | "core::ops::RangeInclusive"
+                | "core::range::RangeInclusive" | "std::ops::RangeInclusive" => Some(true),
+                _ => return CheckResult::Unknown(UnknownReason::Unimplemented),
+            }
+        } else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        };
+        let Some(place) = property.target_place() else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        };
+        if !place.projections.is_empty() {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        }
+        let local = match place.base {
+            PlaceBase::Arg(index) => checkpoint
+                .args
+                .get(index)
+                .and_then(Operand::place)
+                .map(|p| p.local),
+            PlaceBase::Local(index) => Some(Local::from_usize(index)),
+            PlaceBase::Return => Some(Local::from_usize(0)),
+        };
+        let Some(local) = local else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        };
+        let Some(elements) = (0..n)
+            .map(|i| {
+                let start_path = if range_inclusive.is_some() {
+                    vec![i, 0]
+                } else {
+                    vec![i]
+                };
+                let start = vm_state.field_value(local, &start_path)?.z3_term.clone();
+                let end = if range_inclusive.is_some() {
+                    Some(vm_state.field_value(local, &[i, 1])?.z3_term.clone())
+                } else {
+                    None
+                };
+                Some((start, end))
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        };
+        let solver = Solver::new(vm_state.z3_ctx);
+        vm_state.assert_all(&solver);
+        if solver.check() == SatResult::Unsat {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        }
+        for (i, (left_start, left_end)) in elements.iter().enumerate() {
+            for (right_start, right_end) in elements.iter().skip(i + 1) {
+                let overlap = match (left_end, right_end, range_inclusive) {
+                    (Some(left_end), Some(right_end), Some(true)) => Bool::and(
+                        vm_state.z3_ctx,
+                        &[&left_start.le(right_end), &right_start.le(left_end)],
+                    ),
+                    (Some(left_end), Some(right_end), Some(false)) => Bool::and(
+                        vm_state.z3_ctx,
+                        &[&left_start.lt(right_end), &right_start.lt(left_end)],
+                    ),
+                    (None, None, None) => left_start._eq(right_start),
+                    _ => return CheckResult::Unknown(UnknownReason::Unimplemented),
+                };
+                solver.push();
+                solver.assert(&overlap);
+                let result = solver.check();
+                solver.pop(1);
+                match result {
+                    SatResult::Unsat => {}
+                    SatResult::Sat => return CheckResult::Failed,
+                    SatResult::Unknown => return CheckResult::Unknown(UnknownReason::SmtTimeout),
+                }
+            }
+        }
+        CheckResult::ProvedBySmt
     }
 
     pub(super) fn all_predicates_are_slice_size_invariant<'z3, 'tcx>(

@@ -196,7 +196,9 @@ impl<'tcx> BackwardSlicer<'tcx> {
             let mut items = Vec::new();
             let skip_terminator = matches!(
                 bind_checkpoint.map(|c| c.kind),
-                Some(CheckpointKind::RawPtrDeref) | Some(CheckpointKind::StaticMutAccess)
+                Some(CheckpointKind::RawPtrDeref)
+                    | Some(CheckpointKind::StaticMutAccess)
+                    | Some(CheckpointKind::UnsafeCall)
             ) || crate::verify::api_classify::is_manually_drop_drop(
                 bind_checkpoint.and_then(|c| c.callee),
             );
@@ -359,7 +361,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
         // slices, but earlier occurrences are also needed for branches
         // that exit the loop (e.g. unwind/cleanup) without hitting the
         // target block again.
-        if !checkpoint_items.is_empty() {
+        if node.block == target_block {
             results.push((
                 vec![node.block],
                 checkpoint_items,
@@ -597,7 +599,11 @@ impl<'tcx> BackwardSlicer<'tcx> {
             // in the walk, skip it to prevent wrong (duplicate) matches.
             let already_seen: crate::compat::FxHashSet<crate::helpers::def_use::PlaceKey> =
                 relevant.places.clone();
-            relevant.remove_all(&defs);
+            let indexed_write = matches!(&statement.kind, StatementKind::Assign(assign) if
+                assign.0.projection.iter().any(|p| matches!(p.kind(), rustc_middle::mir::ProjectionElem::Index(_))));
+            if !indexed_write {
+                relevant.remove_all(&defs);
+            }
             uses.places.retain(|p| !already_seen.contains(p));
             relevant.extend(uses);
             return;

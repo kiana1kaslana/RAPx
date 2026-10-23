@@ -936,7 +936,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 let ptr = args.get(*ptr_arg).cloned();
                 let base = args.get(*base_arg).cloned();
                 let count = match (ptr.as_ref(), base.as_ref()) {
-                    (Some(p), Some(b)) => self.iter_remaining_len_from_ptrs(b, p).unwrap_or_else(
+                    (Some(p), Some(b)) => self.iter_remaining_len_from_ptrs(b, p, None).unwrap_or_else(
                         || self.fresh_int(&format!("ptr_offset_from_{}", dest.as_usize())),
                     ),
                     _ => self.fresh_int(&format!("ptr_offset_from_{}", dest.as_usize())),
@@ -1158,9 +1158,30 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             CallEffect::ReturnBranchPayload { arg } => {
-                // `Try::branch`: copy the `Option` arg's `Some` payload (field 0)
-                // to the `ControlFlow` result's `Continue` payload (field 0),
-                // preserving its provenance so a `?`-operator unwrap survives.
+                let dest_ty = self.body().local_decls[dest].ty;
+                if let Some(value) = args.get(*arg)
+                    && let Some(discr) = value.discriminant()
+                    && let TyKind::Adt(adt, _) = value.ty.kind()
+                {
+                    let branch_discr = if self.tcx.is_diagnostic_item(rustc_span::sym::Option, adt.did()) {
+                        let one = Int::from_u64(self.z3_ctx, 1);
+                        Some(Int::sub(self.z3_ctx, &[&one, discr]))
+                    } else if self.tcx.is_diagnostic_item(rustc_span::sym::Result, adt.did()) {
+                        Some(discr.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(branch_discr) = branch_discr {
+                        let term = self.fresh_int("try_branch");
+                        self.set_local(dest, VmValue {
+                            z3_term: term,
+                            ty: dest_ty,
+                            provenance: None,
+                            facts: ValueFacts::default(),
+                            source: ValueSource::Discriminant(branch_discr),
+                        });
+                    }
+                }
                 let arg_local = caller_arg_locals.get(*arg).copied().flatten();
                 if let Some(l) = arg_local
                     && let Some(payload) = self.field_value(l, &[0]).cloned() {
@@ -2053,6 +2074,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 let Some(local) = self.find_iter_self_local(self_val) else {
                     return;
                 };
+                let Some(iter_prov) = self_val.provenance.as_ref() else {
+                    return;
+                };
+                let iter_key = (iter_prov.alloc_id, iter_prov.offset.simplify());
                 let Some((ptr, end)) = self.iter_ptr_end(local) else {
                     return;
                 };
@@ -2068,23 +2093,23 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 let sz = self.iter_elem_size(&ptr);
                 let ep_offset = ep.offset.clone();
                 let remaining = self
-                    .iter_remaining_len_from_ptrs(&ptr, &end)
+                    .iter_remaining_len_from_ptrs(&ptr, &end, Some(&iter_key))
                     .expect("iter_ptr_end guarantees same-alloc provenance");
                 let is_empty = remaining._eq(&Int::from_u64(self.z3_ctx, 0));
                 // The returned element is the *current* position: the tracked element
                 // index (iter_ptr_offset) scaled by the element stride, or the base
                 // ptr offset on the first call.
                 let zero = Int::from_u64(self.z3_ctx, 0);
-                let cur_off = match self.constraints.term_caches.iter_ptr_offset.get(&buffer) {
-                    Some((prev, _)) => Int::mul(self.z3_ctx, &[prev, &sz]),
+                let cur_off = match self.constraints.term_caches.iter_ptr_offset.get(&iter_key) {
+                    Some((_, prev, _)) => Int::mul(self.z3_ctx, &[prev, &sz]),
                     None => pp.offset.clone(),
                 };
                 let old_ptr_val = VmValue {
-                    z3_term: cur_off.clone(),
+                    z3_term: Int::add(self.z3_ctx, &[self.allocation_base(pp.alloc_id), &cur_off]),
                     ty: ptr.ty,
                     provenance: Some(Provenance {
                         alloc_id: pp.alloc_id,
-                        offset: cur_off,
+                        offset: cur_off.clone(),
                         offset_kind: None,
                     }),
                     facts: ValueFacts {
@@ -2096,29 +2121,27 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 };
                 // Advance ptr when not empty
                 let one_term = Int::from_u64(self.z3_ctx, 1);
-                let (new_offset, base_len_elem) =
-                    match self.constraints.term_caches.iter_ptr_offset.get(&buffer) {
-                        Some((prev, base)) => (Int::add(self.z3_ctx, &[prev, &one_term]), base.clone()),
-                        None => (one_term.clone(), ep_elem),
+                let (old_offset, base_len_elem) =
+                    match self.constraints.term_caches.iter_ptr_offset.get(&iter_key) {
+                        Some((_, prev, base)) => (prev.clone(), base.clone()),
+                        None => (pp.offset.div(&sz), ep_elem),
                     };
-                // Assert !is_empty as path condition (remaining > 0)
-                self.constraints.assertions.push(remaining.gt(&zero));
+                let new_offset = Int::add(self.z3_ctx, &[&old_offset, &one_term]);
                 // Push: base_len >= tracked_offset
-                let base_len = ep_offset.div(&sz);
-                self.constraints.assertions.push(new_offset.le(&base_len));
+                let base_len = base_len_elem.clone().unwrap_or_else(|| ep_offset.div(&sz));
+                self.constraints.assertions.push(Bool::or(
+                    self.z3_ctx,
+                    &[&is_empty, &new_offset.le(&base_len)],
+                ));
                 self.constraints
                     .term_caches
                     .iter_ptr_offset
-                    .insert(buffer, (new_offset, base_len_elem));
+                    .insert(iter_key, (buffer, is_empty.ite(&old_offset, &new_offset), base_len_elem));
                 // Return None or old ptr
                 let result_val = VmValue {
                     z3_term: is_empty.ite(&zero, &old_ptr_val.z3_term),
                     ty: dest_ty,
-                    provenance: if is_empty.as_bool().unwrap_or(false) {
-                        None
-                    } else {
-                        old_ptr_val.provenance.clone()
-                    },
+                    provenance: None,
                     facts: ValueFacts::default(),
                     // Tie the Option's discriminant to the emptiness condition so
                     // `switchInt(discriminant(_n))` only takes the `Some` branch when
@@ -2126,6 +2149,30 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     source: ValueSource::Discriminant(is_empty.ite(&zero, &one_term)),
                 };
                 self.set_local(dest, result_val);
+                self.set_field_value(dest, vec![0], old_ptr_val);
+                let next_off = is_empty.ite(
+                    &cur_off,
+                    &Int::add(self.z3_ctx, &[&cur_off, &sz]),
+                );
+                let mut next_ptr = ptr.clone();
+                next_ptr.z3_term = Int::add(
+                    self.z3_ctx,
+                    &[self.allocation_base(pp.alloc_id), &next_off],
+                );
+                next_ptr.provenance = Some(Provenance {
+                    alloc_id: pp.alloc_id,
+                    offset: next_off,
+                    offset_kind: Some(OffsetKind::Element(is_empty.ite(&old_offset, &new_offset))),
+                });
+                let ptr_path = if self
+                    .field_value(local, &[0])
+                    .is_some_and(|field| field.z3_term == ptr.z3_term)
+                {
+                    vec![0]
+                } else {
+                    vec![0, 0]
+                };
+                self.set_field_value(local, ptr_path, next_ptr);
             }
             CallEffect::ReturnRangeNext => {
                 if args.is_empty() {
@@ -2174,9 +2221,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     source: ValueSource::Discriminant(is_empty.ite(&zero, &one)),
                 };
                 self.set_local(dest, result_val);
-                // Advance `start` by one for the next iteration.
+                self.set_field_value(dest, vec![0], start.clone());
                 let mut advanced = start;
-                advanced.z3_term = Int::add(self.z3_ctx, &[&start_term, &one]);
+                let next = Int::add(self.z3_ctx, &[&start_term, &one]);
+                advanced.z3_term = is_empty.ite(&start_term, &next);
                 self.store_value(alloc_id, range_view_ty, vec![0], advanced);
             }
         }
@@ -2349,15 +2397,23 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// The two pointer fields of an Iter/IterMut local (`[0]` = ptr, `[1]` =
     /// end_or_len), which share the same allocation.  Returns `None` when
     /// either field is missing or the two point into different allocations.
-    fn iter_ptr_end(&self, local: Local) -> Option<(VmValue<'z3, 'tcx>, VmValue<'z3, 'tcx>)> {
-        let ptr = self.field_value(local, &[0])?.clone();
-        let end = self.field_value(local, &[1])?.clone();
-        let same_alloc = ptr
-            .provenance
-            .as_ref()
-            .zip(end.provenance.as_ref())
-            .is_some_and(|(pp, ep)| pp.alloc_id == ep.alloc_id);
-        same_alloc.then_some((ptr, end))
+    pub(crate) fn iter_ptr_end(&self, local: Local) -> Option<(VmValue<'z3, 'tcx>, VmValue<'z3, 'tcx>)> {
+        for (ptr_path, end_path) in [(&[0][..], &[1][..]), (&[0, 0][..], &[0, 1][..])] {
+            let (Some(ptr), Some(end)) =
+                (self.field_value(local, ptr_path), self.field_value(local, end_path))
+            else {
+                continue;
+            };
+            if ptr
+                .provenance
+                .as_ref()
+                .zip(end.provenance.as_ref())
+                .is_some_and(|(pp, ep)| pp.alloc_id == ep.alloc_id)
+            {
+                return Some((ptr.clone(), end.clone()));
+            }
+        }
+        None
     }
 
     /// Element size of the type iterated by an Iter/IterMut pointer, symbolic
@@ -2368,6 +2424,13 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             TyKind::RawPtr(ty, _) | TyKind::Ref(_, ty, _) => Some(*ty),
             _ => None,
         };
+        if elem_ty.is_some_and(|ty| matches!(ty.kind(), TyKind::Param(_)))
+            && let Some(alloc_id) = ptr.provenance_alloc_id()
+            && let Some(concrete) = self.alloc(alloc_id).element_ty.as_ty()
+            && !matches!(concrete.kind(), TyKind::Param(_))
+        {
+            return self.size_sym_read(concrete);
+        }
         match elem_ty {
             Some(t) => self.size_sym_read(t),
             None => Int::from_u64(self.z3_ctx, 1),
@@ -2412,11 +2475,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         &self,
         ptr: &VmValue<'z3, 'tcx>,
         end: &VmValue<'z3, 'tcx>,
+        iter_owner: Option<&(AllocId, Int<'z3>)>,
     ) -> Option<Int<'z3>> {
         let ep = end.provenance.as_ref()?;
         let sz = self.iter_elem_size(ptr);
-        if let Some((offset, _)) = self.constraints.term_caches.iter_ptr_offset.get(&ep.alloc_id) {
-            let base_len = ep.offset.div(&sz);
+        if let Some((_, offset, base_len_elem)) = iter_owner
+            .and_then(|id| self.constraints.term_caches.iter_ptr_offset.get(id))
+        {
+            let base_len = base_len_elem.clone().unwrap_or_else(|| ep.offset.div(&sz));
             let zero = Int::from_u64(self.z3_ctx, 0);
             Some(
                 offset
@@ -2601,6 +2667,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     }
                     None
                 }
+                TyKind::Param(_) => self.find_local_by_address(&arg_val.z3_term).or_else(|| {
+                    let receiver = Local::from_usize(1);
+                    self.iter_ptr_end(receiver).map(|_| receiver)
+                }),
                 _ => None,
             },
             _ => None,

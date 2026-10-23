@@ -233,6 +233,14 @@ pub(crate) fn dependency_summary<'tcx>(
     // MIR dataflow first: works for local and cross-crate (`#[inline]`)
     // callees alike, no hand-written table needed.
     if let Some(callee) = callee {
+        if arg_count > 0
+            && (crate::verify::api_classify::is_iter_next(Some(callee))
+                || crate::verify::api_classify::is_range_next(Some(callee)))
+        {
+            let mut summary = CallDependencySummary::fallback(arg_count);
+            summary.write_args.push(0);
+            return summary;
+        }
         if crate::verify::api_classify::is_ptr_copy(Some(callee)) && arg_count > 1 {
             let mut summary = CallDependencySummary::fallback(arg_count);
             summary.write_args.push(1);

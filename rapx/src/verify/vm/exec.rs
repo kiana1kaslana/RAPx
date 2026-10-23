@@ -691,6 +691,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .unwrap_or_else(|| self.size_sym(pointee_ty));
         let (pointee_alloc_id, pointee_base) =
             self.allocate(pointee_size_term, pointee_align, Some(pointee_ty));
+        if let rustc_middle::ty::TyKind::Array(_, const_len) = pointee_ty.kind() {
+            let n = self.const_len_term(const_len);
+            self.alloc_mut(pointee_alloc_id).set_slice_len(n);
+        }
         if !pointee_is_maybe_uninit {
             self.content_mut(pointee_alloc_id).facts.initialized = true;
         }
@@ -1430,7 +1434,47 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// Track byte-level values for index-based stores (e.g. `buf[i] = 0u8`)
     /// that `record_projected_store` skips due to Index projections.
-    pub(crate) fn record_indexed_store_for_vm(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
+    pub(crate) fn record_indexed_store_for_vm(
+        &mut self,
+        place: &Place<'tcx>,
+        value: &VmValue<'z3, 'tcx>,
+    ) {
+        if place.projection.len() == 1
+            && let rustc_middle::mir::ProjectionElem::Index(index_local) = place.projection[0]
+            && let rustc_middle::ty::TyKind::Array(elem_ty, _) =
+                self.body().local_decls[place.local].ty.kind()
+            && *elem_ty == value.ty
+        {
+            let array_ty = self.body().local_decls[place.local].ty;
+            let index = self
+                .local_value(index_local)
+                .and_then(|v| v.z3_term.simplify().as_u64())
+                .and_then(|v| usize::try_from(v).ok());
+            if let Some(index) = index {
+                if let Some(alloc_id) = self.current_frame.local_alloc.get(&place.local).copied() {
+                    self.content_mut(alloc_id).values.retain(|(ty, path), _| {
+                        *ty != array_ty || path.first() != Some(&index)
+                    });
+                }
+                if matches!(
+                    value.ty.kind(),
+                    rustc_middle::ty::TyKind::Int(_)
+                        | rustc_middle::ty::TyKind::Uint(_)
+                        | rustc_middle::ty::TyKind::Bool
+                        | rustc_middle::ty::TyKind::Char
+                ) {
+                    self.set_field_value(place.local, vec![index], value.clone());
+                }
+            } else if let Some(alloc_id) = self
+                .local_value(place.local)
+                .and_then(|v| v.provenance_alloc_id())
+                .or_else(|| self.current_frame.local_alloc.get(&place.local).copied())
+            {
+                self.content_mut(alloc_id)
+                    .values
+                    .retain(|(ty, path), _| *ty != array_ty || path.is_empty());
+            }
+        }
         let is_u8 = matches!(
             value.ty.kind(),
             rustc_middle::ty::TyKind::Uint(rustc_middle::ty::UintTy::U8)
@@ -2964,9 +3008,29 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if lp.alloc_id != rp.alloc_id {
             return None;
         }
-        let (offset, base_len) = self.constraints.term_caches.iter_ptr_offset.get(&lp.alloc_id)?;
-        let base_len = base_len.as_ref()?;
-        let eq = offset._eq(base_len);
+        let mut candidates = self
+            .constraints
+            .term_caches
+            .iter_ptr_offset
+            .values()
+            .filter(|(buffer, _, _)| *buffer == lp.alloc_id);
+        let (_, offset, base_len) = candidates.next()?;
+        if candidates.next().is_some() {
+            return None;
+        }
+        let is_iter_comparison = self.current_frame.local_alloc.keys().any(|local| {
+            let Some((ptr, end)) = self.iter_ptr_end(*local) else {
+                return false;
+            };
+            (ptr.z3_term.simplify() == lhs.z3_term.simplify()
+                && end.z3_term.simplify() == rhs.z3_term.simplify())
+                || (ptr.z3_term.simplify() == rhs.z3_term.simplify()
+                    && end.z3_term.simplify() == lhs.z3_term.simplify())
+        });
+        if !is_iter_comparison {
+            return None;
+        }
+        let eq = offset._eq(base_len.as_ref()?);
         Some(if matches!(op, rustc_middle::mir::BinOp::Eq) {
             eq
         } else {
@@ -3017,15 +3081,22 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if !self.is_iter_ref(local_val) {
             return;
         }
-        let Some(buffer) = self.iter_buffer(local) else {
+        let Some(iter_local) = self.find_local_by_address(&local_val.z3_term) else {
+            return;
+        };
+        let Some(iter_prov) = local_val.provenance.as_ref() else {
+            return;
+        };
+        let iter_key = (iter_prov.alloc_id, iter_prov.offset.simplify());
+        let Some(buffer) = self.iter_buffer(iter_local) else {
             return;
         };
         let one = Int::from_u64(self.z3_ctx, 1);
-        let (new_offset, base_len) = match self.constraints.term_caches.iter_ptr_offset.get(&buffer) {
-            Some((prev, base)) => (Int::add(self.z3_ctx, &[prev, &one]), base.clone()),
+        let (new_offset, base_len) = match self.constraints.term_caches.iter_ptr_offset.get(&iter_key) {
+            Some((_, prev, base)) => (Int::add(self.z3_ctx, &[prev, &one]), base.clone()),
             None => {
                 let base = self
-                    .field_value(local, &[1])
+                    .field_value(iter_local, &[1])
                     .and_then(|end| end.provenance.as_ref())
                     .and_then(|ep| match &ep.offset_kind {
                         Some(OffsetKind::Element(e)) => Some(e.clone()),
@@ -3040,7 +3111,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if let Some(e) = &base_len {
             self.constraints.assertions.push(new_offset.le(e));
         }
-        self.constraints.term_caches.iter_ptr_offset.insert(buffer, (new_offset, base_len));
+        self.constraints.term_caches.iter_ptr_offset.insert(iter_key, (buffer, new_offset, base_len));
     }
 
     /// Set non_null invariant on the target value.
