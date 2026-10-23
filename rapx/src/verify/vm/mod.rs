@@ -8,10 +8,15 @@
 pub(crate) mod alias;
 pub(crate) mod alias_hazard;
 pub(crate) mod alias_tree;
+pub(crate) mod arithmetic;
 pub(crate) mod call;
+pub(crate) mod contracts;
 pub(crate) mod display;
+pub(crate) mod effects;
 pub(crate) mod exec;
+pub(crate) mod materialize;
 pub(crate) mod memory;
+pub(crate) mod parameters;
 pub(crate) mod region;
 pub(crate) mod rules;
 pub(crate) mod state;
