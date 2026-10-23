@@ -29,11 +29,11 @@ pub(crate) fn eval_rvalue<'z3, 'tcx>(
         #[cfg(not(rapx_ge_99))]
         Rvalue::ShallowInitBox(operand, _) => rvalue::eval_shallow_init_box(state, place, operand),
         Rvalue::CopyForDeref(source) => rvalue::eval_copy_for_deref(state, place, source),
-        Rvalue::Repeat(..) => rvalue::eval_repeat(state, place),
-        Rvalue::ThreadLocalRef(..) => rvalue::eval_thread_local_ref(state, place),
+        Rvalue::Repeat(..) => rvalue::eval_fresh_value(state, place, "repeat"),
+        Rvalue::ThreadLocalRef(..) => rvalue::eval_fresh_value(state, place, "thread_local"),
         #[cfg(not(rapx_ge_95))]
         Rvalue::NullaryOp(op) => rvalue::eval_nullary_op(state, place, op),
-        Rvalue::WrapUnsafeBinder(..) => rvalue::eval_wrap_unsafe_binder(state, place),
+        Rvalue::WrapUnsafeBinder(..) => rvalue::eval_fresh_value(state, place, "wrap_unsafe_binder"),
         #[cfg(rapx_rvalue_has_reborrow)]
         Rvalue::Reborrow(..) => rvalue::eval_reborrow(state, place),
     }

@@ -689,22 +689,13 @@ pub(crate) fn eval_copy_for_deref<'z3, 'tcx>(
 }
 
 
-pub(crate) fn eval_repeat<'z3, 'tcx>(
+pub(crate) fn eval_fresh_value<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
+    name: &str,
 ) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
-    let term = state.fresh_int("repeat");
-    VmValue::new(term, dest_ty)
-}
-
-
-pub(crate) fn eval_thread_local_ref<'z3, 'tcx>(
-    state: &mut VmState<'z3, 'tcx>,
-    dest_place: &Place<'tcx>,
-) -> VmValue<'z3, 'tcx> {
-    let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
-    let term = state.fresh_int("thread_local");
+    let term = state.fresh_int(name);
     VmValue::new(term, dest_ty)
 }
 
@@ -726,15 +717,6 @@ pub(crate) fn eval_nullary_op<'z3, 'tcx>(
     VmValue::new(term, dest_ty)
 }
 
-
-pub(crate) fn eval_wrap_unsafe_binder<'z3, 'tcx>(
-    state: &mut VmState<'z3, 'tcx>,
-    dest_place: &Place<'tcx>,
-) -> VmValue<'z3, 'tcx> {
-    let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
-    let term = state.fresh_int("wrap_unsafe_binder");
-    VmValue::new(term, dest_ty)
-}
 
 #[cfg(rapx_rvalue_has_reborrow)]
 pub(crate) fn eval_reborrow<'z3, 'tcx>(

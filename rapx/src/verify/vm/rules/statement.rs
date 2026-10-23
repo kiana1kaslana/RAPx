@@ -12,12 +12,14 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
     place: &Place<'tcx>,
     rvalue: &Rvalue<'tcx>,
 ) {
-    let uninit_source = match rvalue {
+    let source_place = match rvalue {
         Rvalue::Use(Operand::Copy(source) | Operand::Move(source), ..)
-        | Rvalue::CopyForDeref(source) => state.current_frame.local_alloc.get(&source.local)
-            .is_some_and(|id| state.possible_uninit_allocs.contains(id)),
-        _ => false,
+        | Rvalue::CopyForDeref(source) => Some(source),
+        _ => None,
     };
+    let uninit_source = source_place
+        .and_then(|source| state.current_frame.local_alloc.get(&source.local))
+        .is_some_and(|id| state.possible_uninit_allocs.contains(id));
     let mut value = eval_rvalue(state, place, rvalue);
 
     let has_deref = place
@@ -72,12 +74,7 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
         // the field path by its `Field` projection prefix, so `(_1.2).1` becomes
         // `_11.1` — this keeps the `NonNull` node field's provenance alive across
         // `NodeRef` moves.
-        let src_place: Option<&Place<'tcx>> = match rvalue {
-            Rvalue::Use(Operand::Copy(p) | Operand::Move(p), ..) => Some(p),
-            Rvalue::CopyForDeref(p) => Some(p),
-            _ => None,
-        };
-        if let Some(sp) = src_place {
+        if let Some(sp) = source_place {
             let field_prefix: Vec<usize> = sp
                 .projection
                 .iter()
