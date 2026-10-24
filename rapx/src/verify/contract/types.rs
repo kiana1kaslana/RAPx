@@ -4,6 +4,7 @@
 //! a `PropertyKind` vocabulary of safety tags. All contract front-ends
 //! (attributes, JSON, compound-property macros, pest DSL) produce this IR.
 
+use rustc_hir::def_id::DefId;
 use rustc_middle::mir::Local;
 use rustc_middle::ty::{Region, Ty};
 
@@ -153,7 +154,8 @@ pub(crate) enum ContractExpr<'tcx> {
     },
     SizeOf(Ty<'tcx>),
     AlignOf(Ty<'tcx>),
-    Len(Box<ContractExpr<'tcx>>),
+    Len(Box<ContractExpr<'tcx>>, Option<DefId>),
+    IsEmpty(Box<ContractExpr<'tcx>>, Option<DefId>),
     IndexAccess {
         slice: Box<ContractExpr<'tcx>>,
         index: Box<ContractExpr<'tcx>>,
@@ -434,8 +436,11 @@ impl<'tcx> Property<'tcx> {
             Property::Atom(atom) if atom.contract_kind == ContractKind::Hazard => None,
             Property::Atom(_) => Some(self.clone()),
             Property::And(and) => {
-                let conjuncts: Vec<Property<'tcx>> =
-                    and.conjuncts.iter().filter_map(Property::strip_hazards).collect();
+                let conjuncts: Vec<Property<'tcx>> = and
+                    .conjuncts
+                    .iter()
+                    .filter_map(Property::strip_hazards)
+                    .collect();
                 match conjuncts.len() {
                     0 => None,
                     1 => conjuncts.into_iter().next(),
@@ -447,8 +452,11 @@ impl<'tcx> Property<'tcx> {
                 }
             }
             Property::Or(or) => {
-                let disjuncts: Vec<Property<'tcx>> =
-                    or.disjuncts.iter().filter_map(Property::strip_hazards).collect();
+                let disjuncts: Vec<Property<'tcx>> = or
+                    .disjuncts
+                    .iter()
+                    .filter_map(Property::strip_hazards)
+                    .collect();
                 match disjuncts.len() {
                     0 => None,
                     1 => disjuncts.into_iter().next(),

@@ -25,8 +25,8 @@ use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::{ClauseKind, GenericArgKind, ParamTy, Ty, TyCtxt, TyKind};
 
+use crate::api_ids::other_api;
 use crate::compat::FxHashMap;
-use crate::other_api;
 use crate::verify::checkpoint::{Checkpoint, has_atomic_call, has_raw_ptr_write};
 use crate::verify::vm::state::VmState;
 use crate::verify::{
@@ -279,9 +279,10 @@ pub(crate) fn field_invariant_check<'tcx>(
 
     // The invariant must actually hold, not just be annotated.
     if let Some(result) = invariant_results.get(&adt_def_id)
-        && *result != CheckResult::ProvedByRule {
-            return CheckResult::Failed;
-        }
+        && *result != CheckResult::ProvedByRule
+    {
+        return CheckResult::Failed;
+    }
     CheckResult::ProvedByRule
 }
 
@@ -329,10 +330,11 @@ fn param_bound_is_satisfied(
     for (pred, _) in iter {
         if let ClauseKind::Trait(trait_ref) = pred.kind().skip_binder()
             && trait_ref.def_id() == trait_did
-                && let TyKind::Param(p) = trait_ref.self_ty().kind()
-                    && p.index == param_ty.index {
-                        return true;
-                    }
+            && let TyKind::Param(p) = trait_ref.self_ty().kind()
+            && p.index == param_ty.index
+        {
+            return true;
+        }
     }
     false
 }

@@ -128,7 +128,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "size_of($elem) * len($self) <= isize::MAX"
+        "size_of($elem) * $self.len() <= isize::MAX"
       ]
     },
     {
@@ -136,7 +136,7 @@
       "args": [
         "$self",
         "$elem",
-        "len($self)"
+        "$self.len()"
       ]
     },
     {
@@ -144,7 +144,7 @@
       "args": [
         "$self",
         "$elem",
-        "len($self)"
+        "$self.len()"
       ]
     }
   ]

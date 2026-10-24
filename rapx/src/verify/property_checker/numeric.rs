@@ -4,13 +4,13 @@
 //! `assert_all` plus Euclidean-division (NIA) axioms injected for both the
 //! contract expression and the VM's computed terms.
 
+use crate::api_classify;
+use crate::helpers::def_use::PlaceKey;
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
-use crate::api_classify;
 use crate::verify::contract::{
     ContractExpr, NumericBinOp, PlaceBase, Property, PropertyArg, RelOp,
 };
-use crate::helpers::def_use::PlaceKey;
 use crate::verify::report::{CheckResult, UnknownReason};
 use crate::verify::vm::state::VmState;
 use rustc_hash::FxHashSet;
@@ -37,11 +37,15 @@ impl PropertyChecker {
                 return CheckResult::ProvedByRule;
             }
             for pred in predicates {
-                if let Some(r) =
-                    self.eval_numeric_predicate(vm_state, &solver, Some(checkpoint), pred)
-                    && !r.is_proved() {
-                        return r;
+                match self.eval_numeric_predicate(vm_state, &solver, Some(checkpoint), pred) {
+                    Some(r) if !r.is_proved() => return r,
+                    None if self.expr_has_local_adt_method(vm_state, checkpoint, &pred.lhs)
+                        || self.expr_has_local_adt_method(vm_state, checkpoint, &pred.rhs) =>
+                    {
+                        return CheckResult::Unknown(UnknownReason::Unimplemented);
                     }
+                    _ => {}
+                }
             }
             return CheckResult::ProvedByRule;
         }
@@ -57,8 +61,12 @@ impl PropertyChecker {
                     let min = -(half as i128);
                     let max = (half - 1) as i128;
                     solver.push();
-                    let below = value.z3_term.lt(&Int::from_i64(vm_state.z3_ctx, min as i64));
-                    let above = value.z3_term.gt(&Int::from_i64(vm_state.z3_ctx, max as i64));
+                    let below = value
+                        .z3_term
+                        .lt(&Int::from_i64(vm_state.z3_ctx, min as i64));
+                    let above = value
+                        .z3_term
+                        .gt(&Int::from_i64(vm_state.z3_ctx, max as i64));
                     solver.assert(&Bool::or(vm_state.z3_ctx, &[&below, &above]));
                     let r = match solver.check() {
                         SatResult::Unsat => CheckResult::ProvedBySmt,
@@ -150,17 +158,6 @@ impl PropertyChecker {
             let one = Int::from_u64(vm_state.z3_ctx, 1);
             solver.assert(&off._eq(&Int::add(vm_state.z3_ctx, &[&lhs, &one])));
         }
-        // For Iter/IterMut Le predicates with rhs computed from fields,
-        // inject a lower-bound: the field-based len is >= 1 when the
-        // struct's entry contract contains !self.is_empty().
-        // Without this, Z3 cannot deduce (end-ptr)/sz >= 1 from != 0.
-        if matches!(pred.op, RelOp::Le)
-            && let Some(term) = self.try_get_iter_len_term(vm_state, &pred.rhs)
-                && let Some(one) = lhs.as_u64().or(rhs.as_u64())
-                    && one == 1 {
-                        let one_term = Int::from_u64(vm_state.z3_ctx, 1);
-                        solver.assert(&term.ge(&one_term));
-                    }
         // NIA helper: inject Euclidean division identity for div operands
         // to help Z3 prove (X/N)*N <= X via X = (X/N)*N + X%N, X%N >= 0.
         self.inject_nia_axioms(vm_state, solver, checkpoint, &pred.lhs);
@@ -206,9 +203,7 @@ impl PropertyChecker {
         // If NIA left the check inconclusive and the predicate involves a
         // multiplication, retry with bit-blasting (`nla2bv`), which is decidable
         // for the bounded integer variables the range axioms pin down.
-        if r.is_none()
-            && (self.expr_has_mul(&pred.lhs) || self.expr_has_mul(&pred.rhs))
-        {
+        if r.is_none() && (self.expr_has_mul(&pred.lhs) || self.expr_has_mul(&pred.rhs)) {
             let bv_solver = Tactic::new(vm_state.z3_ctx, "nla2bv").solver();
             vm_state.assert_all(&bv_solver);
             self.inject_nia_axioms(vm_state, &bv_solver, checkpoint, &pred.lhs);
@@ -225,14 +220,57 @@ impl PropertyChecker {
         r
     }
 
+    fn expr_has_local_adt_method<'z3, 'tcx>(
+        &self,
+        vm_state: &VmState<'z3, 'tcx>,
+        checkpoint: &Checkpoint<'tcx>,
+        expr: &ContractExpr<'tcx>,
+    ) -> bool {
+        match expr {
+            ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => self
+                .eval_contract_expr_to_value(vm_state, Some(checkpoint), inner)
+                .is_some_and(|val| {
+                    let ty = mir_utils::pointee_ty(val.ty).unwrap_or(val.ty);
+                    matches!(ty.kind(), TyKind::Adt(adt, _) if adt.did().as_local().is_some())
+                }),
+            ContractExpr::Binary { lhs, rhs, .. } => {
+                self.expr_has_local_adt_method(vm_state, checkpoint, lhs)
+                    || self.expr_has_local_adt_method(vm_state, checkpoint, rhs)
+            }
+            ContractExpr::Unary { expr, .. } => {
+                self.expr_has_local_adt_method(vm_state, checkpoint, expr)
+            }
+            ContractExpr::If {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.expr_has_local_adt_method(vm_state, checkpoint, &cond.lhs)
+                    || self.expr_has_local_adt_method(vm_state, checkpoint, &cond.rhs)
+                    || self.expr_has_local_adt_method(vm_state, checkpoint, then_expr)
+                    || self.expr_has_local_adt_method(vm_state, checkpoint, else_expr)
+            }
+            ContractExpr::IndexAccess { slice, index } => {
+                self.expr_has_local_adt_method(vm_state, checkpoint, slice)
+                    || self.expr_has_local_adt_method(vm_state, checkpoint, index)
+            }
+            _ => false,
+        }
+    }
+
     fn expr_has_mul<'tcx>(&self, expr: &ContractExpr<'tcx>) -> bool {
         match expr {
-            ContractExpr::Binary { op: NumericBinOp::Mul, .. } => true,
+            ContractExpr::Binary {
+                op: NumericBinOp::Mul,
+                ..
+            } => true,
             ContractExpr::Binary { lhs, rhs, .. } => {
                 self.expr_has_mul(lhs) || self.expr_has_mul(rhs)
             }
             ContractExpr::Unary { expr, .. } => self.expr_has_mul(expr),
-            ContractExpr::Len(inner) => self.expr_has_mul(inner),
+            ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => {
+                self.expr_has_mul(inner)
+            }
             ContractExpr::If {
                 then_expr,
                 else_expr,
@@ -271,7 +309,9 @@ impl PropertyChecker {
                 };
                 match v.ty.kind() {
                     TyKind::Int(_) => {
-                        solver.assert(&term.ge(&Int::from_i64(vm_state.z3_ctx, -(min as i128) as i64)));
+                        solver.assert(
+                            &term.ge(&Int::from_i64(vm_state.z3_ctx, -(min as i128) as i64)),
+                        );
                         solver.assert(&term.le(&Int::from_i64(vm_state.z3_ctx, max as i64)));
                     }
                     TyKind::Uint(_) => {
@@ -288,7 +328,7 @@ impl PropertyChecker {
             ContractExpr::Unary { expr, .. } => {
                 self.inject_int_range_axioms(vm_state, solver, checkpoint, expr);
             }
-            ContractExpr::Len(inner) => {
+            ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => {
                 self.inject_int_range_axioms(vm_state, solver, checkpoint, inner);
             }
             ContractExpr::If {
@@ -376,9 +416,10 @@ impl PropertyChecker {
             let mut src: Vec<(Option<PlaceKey>, Option<PlaceKey>)> = Vec::new();
             for (_, val) in vm_state.all_local_values() {
                 if let Some((lhs, rhs, _)) = val.source.operands()
-                    && val.z3_term == *target {
-                        src.push((lhs.clone(), rhs.clone()));
-                    }
+                    && val.z3_term == *target
+                {
+                    src.push((lhs.clone(), rhs.clone()));
+                }
             }
             src
         };
@@ -406,12 +447,7 @@ impl PropertyChecker {
                     && !already_seen.contains(&dest_val.z3_term)
                 {
                     already_seen.insert(dest_val.z3_term.clone());
-                    self.inject_div_axioms_for_term(
-                        vm_state,
-                        solver,
-                        &dest_val.z3_term,
-                        depth - 1,
-                    );
+                    self.inject_div_axioms_for_term(vm_state, solver, &dest_val.z3_term, depth - 1);
                 }
             }
         }
@@ -463,40 +499,6 @@ impl PropertyChecker {
         }
     }
 
-    pub(super) fn try_get_iter_len_term<'z3, 'tcx>(
-        &self,
-        vm_state: &VmState<'z3, 'tcx>,
-        expr: &ContractExpr<'tcx>,
-    ) -> Option<Int<'z3>> {
-        let ContractExpr::Len(_) = expr else {
-            return None;
-        };
-        for (_, val) in vm_state.all_local_values() {
-            let is_iter = match val.ty.kind() {
-                TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                    TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
-                    _ => false,
-                },
-                _ => false,
-            };
-            if !is_iter {
-                continue;
-            }
-            let alloc_id = val.provenance_alloc_id()?;
-            for (l, lv) in vm_state.all_local_values() {
-                if lv.provenance_alloc_id() != Some(alloc_id) {
-                    continue;
-                }
-                if let (Some(ptr), Some(end)) =
-                    (vm_state.field_value(l, &[0]), vm_state.field_value(l, &[1]))
-                    && let Some(len) = vm_state.iter_len_from_ptrs(ptr, end) {
-                        return Some(len);
-                    }
-            }
-        }
-        None
-    }
-
     pub(super) fn try_iter_len_from_fields<'z3, 'tcx>(
         &self,
         vm_state: &VmState<'z3, 'tcx>,
@@ -511,11 +513,7 @@ impl PropertyChecker {
             PlaceBase::Arg(n) => checkpoint.args.get(n)?,
             PlaceBase::Local(n) => {
                 let callee = checkpoint.callee?;
-                let idx = mir_utils::callee_param_index_for_local(
-                    vm_state.tcx,
-                    callee,
-                    n,
-                )?;
+                let idx = mir_utils::callee_param_index_for_local(vm_state.tcx, callee, n)?;
                 checkpoint.args.get(idx)?
             }
             _ => return None,
@@ -528,7 +526,10 @@ impl PropertyChecker {
         let local_val = vm_state.local_value(local)?;
         let is_iter = match local_val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
+                TyKind::Adt(adt_def, _) => {
+                    adt_def.did().as_local().is_none()
+                        && api_classify::is_std_iter_or_itermut(adt_def.did())
+                }
                 _ => false,
             },
             _ => false,
@@ -539,10 +540,10 @@ impl PropertyChecker {
         if let (Some(ptr), Some(end)) = (
             vm_state.field_value(local, &[0]),
             vm_state.field_value(local, &[1]),
-        )
-            && let Some(len) = vm_state.iter_len_from_ptrs(ptr, end) {
-                return Some(len);
-            }
+        ) && let Some(len) = vm_state.iter_len_from_ptrs(ptr, end)
+        {
+            return Some(len);
+        }
         // Fallback: scan all locals for one with same struct alloc.
         let target_alloc = local_val.provenance_alloc_id()?;
         for (scan_local, scan_val) in vm_state.all_local_values() {
@@ -552,10 +553,10 @@ impl PropertyChecker {
             if let (Some(ptr), Some(end)) = (
                 vm_state.field_value(scan_local, &[0]),
                 vm_state.field_value(scan_local, &[1]),
-            )
-                && let Some(len) = vm_state.iter_len_from_ptrs(ptr, end) {
-                    return Some(len);
-                }
+            ) && let Some(len) = vm_state.iter_len_from_ptrs(ptr, end)
+            {
+                return Some(len);
+            }
         }
         None
     }

@@ -14,6 +14,7 @@ pub(crate) mod contracts;
 pub(crate) mod display;
 pub(crate) mod effects;
 pub(crate) mod exec;
+pub(crate) mod method_cache;
 pub(crate) mod materialize;
 pub(crate) mod memory;
 pub(crate) mod parameters;

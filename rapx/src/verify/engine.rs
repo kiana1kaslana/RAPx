@@ -21,10 +21,7 @@ use super::{
 };
 use crate::verify::checkpoint::{Checkpoint, CheckpointLocation};
 
-use super::{
-    property_checker::PropertyChecker,
-    vm::SymbolicVm,
-};
+use super::{property_checker::PropertyChecker, vm::SymbolicVm};
 
 enum LocalAccess {
     None,
@@ -90,7 +87,10 @@ impl<'tcx> VerifyEngine<'tcx> {
         // global entry block per site, so the value is a list in path order.
         let mut local_to_global: HashMap<(DefId, usize), Vec<usize>> = HashMap::new();
         for (global, (def_id, local)) in tree.block_fns().iter().enumerate() {
-            local_to_global.entry((*def_id, *local)).or_default().push(global);
+            local_to_global
+                .entry((*def_id, *local))
+                .or_default()
+                .push(global);
         }
 
         // Process checkpoints in forward (MIR) order so that facts
@@ -115,8 +115,13 @@ impl<'tcx> VerifyEngine<'tcx> {
             items.extend(backward.items);
             // Insert inlined-callee boundary markers (argument binding / return
             // write-back) based on def_id transitions across the path.
-            items =
-                Self::inject_inline_boundaries(self.tcx, items, tree, &local_to_global, checkpoint.caller);
+            items = Self::inject_inline_boundaries(
+                self.tcx,
+                items,
+                tree,
+                &local_to_global,
+                checkpoint.caller,
+            );
 
             let wrapped = crate::verify::slicer::ProofGoal {
                 path: backward.path,
@@ -146,7 +151,10 @@ impl<'tcx> VerifyEngine<'tcx> {
         checkpoint: &Checkpoint<'tcx>,
     ) -> Vec<(CheckResult, String)> {
         let Some(slot) = self.drop_referent_local(checkpoint) else {
-            return vec![(CheckResult::Unknown(UnknownReason::Unimplemented), String::new())];
+            return vec![(
+                CheckResult::Unknown(UnknownReason::Unimplemented),
+                String::new(),
+            )];
         };
         let caller = checkpoint.caller;
         let target = checkpoint.block.as_usize();
@@ -216,11 +224,13 @@ impl<'tcx> VerifyEngine<'tcx> {
                 for stmt in &bb.statements {
                     if let StatementKind::Assign(assign) = &stmt.kind {
                         let (target, rvalue) = assign.as_ref();
-                        if target.local == cur && target.projection.is_empty()
-                            && let Rvalue::Ref(_, _, referent) = rvalue {
-                                next = Some(referent.local);
-                                break 'outer;
-                            }
+                        if target.local == cur
+                            && target.projection.is_empty()
+                            && let Rvalue::Ref(_, _, referent) = rvalue
+                        {
+                            next = Some(referent.local);
+                            break 'outer;
+                        }
                     }
                 }
             }
@@ -243,9 +253,7 @@ impl<'tcx> VerifyEngine<'tcx> {
         for stmt in &data.statements {
             if let StatementKind::Assign(assign) = &stmt.kind {
                 let (target, rvalue) = assign.as_ref();
-                if mir_utils::rvalue_any_place_matching(rvalue, &mut |p| {
-                    p.local == local
-                }) {
+                if mir_utils::rvalue_any_place_matching(rvalue, &mut |p| p.local == local) {
                     return LocalAccess::Read;
                 }
                 if target.local == local {
@@ -260,7 +268,9 @@ impl<'tcx> VerifyEngine<'tcx> {
         if let Some(terminator) = &data.terminator {
             use rustc_middle::mir::TerminatorKind;
             match &terminator.kind {
-                TerminatorKind::Call { args, destination, .. } => {
+                TerminatorKind::Call {
+                    args, destination, ..
+                } => {
                     if args.iter().any(|a| match &a.node {
                         Operand::Copy(p) | Operand::Move(p) => p.local == local,
                         Operand::Constant(_) => false,
@@ -298,10 +308,9 @@ impl<'tcx> VerifyEngine<'tcx> {
                     #[cfg(rapx_ge_95)]
                     Operand::RuntimeChecks(_) => {}
                 },
-                TerminatorKind::Drop { place, .. }
-                    if place.local == local => {
-                        return LocalAccess::Read;
-                    }
+                TerminatorKind::Drop { place, .. } if place.local == local => {
+                    return LocalAccess::Read;
+                }
                 _ => {}
             }
         }
@@ -362,186 +371,179 @@ impl<'tcx> VerifyEngine<'tcx> {
                     };
                     (Some(*def_id), dest, false)
                 }
-                RelevantItem::Terminator { def_id, .. } => {
-                    (Some(*def_id), None, true)
-                }
-                _ => {
-                    (None, None, false)
-                }
+                RelevantItem::Terminator { def_id, .. } => (Some(*def_id), None, true),
+                _ => (None, None, false),
             };
 
             if let Some(cur) = cur_def_id {
                 if let Some(prev) = prev_def_id
-                    && prev != cur {
-                        if cur == caller {
-                            // Returning to the root caller: pop *every* still-active
-                            // frame. Nested inlined callees whose return blocks
-                            // produced no items (a plain `return` has no relevant
-                            // use/def) are skipped in the item stream, so the
-                            // transition can jump several levels at once.
-                            while let Some((_, dest, _)) = active.pop() {
+                    && prev != cur
+                {
+                    if cur == caller {
+                        // Returning to the root caller: pop *every* still-active
+                        // frame. Nested inlined callees whose return blocks
+                        // produced no items (a plain `return` has no relevant
+                        // use/def) are skipped in the item stream, so the
+                        // transition can jump several levels at once.
+                        while let Some((_, dest, _)) = active.pop() {
+                            out.push(RelevantItem::CalleeExit { dest });
+                        }
+                    } else {
+                        // Distinguish an *ascent* (`prev` returns to an
+                        // already-active `cur`, e.g. `post_inc_start` → the
+                        // split `next_unchecked`) from a *descent* (`cur` is
+                        // a fresh callee). In an ascent we pop frames down to
+                        // `cur` and do NOT re-enter it (it is already active).
+                        // Checking membership (rather than only the top's
+                        // parent) handles multi-level skips where several
+                        // callee return blocks produced no items.
+                        let is_ascent = active.iter().any(|(d, _, _)| *d == cur);
+                        if is_ascent {
+                            while let Some(&(top_def, _, _)) = active.last() {
+                                if top_def == cur {
+                                    break;
+                                }
+                                let (_, dest, _) = active.pop().unwrap();
                                 out.push(RelevantItem::CalleeExit { dest });
                             }
                         } else {
-                            // Distinguish an *ascent* (`prev` returns to an
-                            // already-active `cur`, e.g. `post_inc_start` → the
-                            // split `next_unchecked`) from a *descent* (`cur` is
-                            // a fresh callee). In an ascent we pop frames down to
-                            // `cur` and do NOT re-enter it (it is already active).
-                            // Checking membership (rather than only the top's
-                            // parent) handles multi-level skips where several
-                            // callee return blocks produced no items.
-                            let is_ascent = active.iter().any(|(d, _, _)| *d == cur);
-                            if is_ascent {
-                                while let Some(&(top_def, _, _)) = active.last() {
-                                    if top_def == cur {
-                                        break;
+                            let current_parent =
+                                active.last().map(|(d, _, _)| *d).unwrap_or(caller);
+
+                            // The "effective parent" of an entry block: the
+                            // deepest ancestor (via `inline_parent`) that is
+                            // either the root caller or a currently-active
+                            // frame. Intermediate inlined callees whose blocks
+                            // produced no relevant items are skipped in the
+                            // item stream, so a transition can jump straight
+                            // from a shallow frame to a deep descendant.
+                            let eff_parent = |g: usize| -> DefId {
+                                let mut p = tree.inline_parent(g);
+                                while let Some(pd) = p {
+                                    if pd == caller || active.iter().any(|(d, _, _)| *d == pd) {
+                                        return pd;
                                     }
-                                    let (_, dest, _) = active.pop().unwrap();
-                                    out.push(RelevantItem::CalleeExit { dest });
+                                    p = local_to_global
+                                        .get(&(pd, 0))
+                                        .and_then(|gs| gs.first().copied())
+                                        .and_then(|pe| tree.inline_parent(pe));
                                 }
-                            } else {
-                                let current_parent =
-                                    active.last().map(|(d, _, _)| *d).unwrap_or(caller);
+                                caller
+                            };
 
-                                // The "effective parent" of an entry block: the
-                                // deepest ancestor (via `inline_parent`) that is
-                                // either the root caller or a currently-active
-                                // frame. Intermediate inlined callees whose blocks
-                                // produced no relevant items are skipped in the
-                                // item stream, so a transition can jump straight
-                                // from a shallow frame to a deep descendant.
-                                let eff_parent = |g: usize| -> DefId {
-                                    let mut p = tree.inline_parent(g);
-                                    while let Some(pd) = p {
-                                        if pd == caller
-                                            || active.iter().any(|(d, _, _)| *d == pd)
-                                        {
-                                            return pd;
-                                        }
-                                        p = local_to_global
-                                            .get(&(pd, 0))
-                                            .and_then(|gs| gs.first().copied())
-                                            .and_then(|pe| tree.inline_parent(pe));
-                                    }
-                                    caller
-                                };
-
-                                // Select `cur`'s entry block whose effective parent
-                                // matches the current innermost frame.
-                                let mut cur_entry: Option<usize> = None;
-                                if let Some(globals) = local_to_global.get(&(cur, 0)) {
-                                    let mut matching: Vec<usize> = globals
+                            // Select `cur`'s entry block whose effective parent
+                            // matches the current innermost frame.
+                            let mut cur_entry: Option<usize> = None;
+                            if let Some(globals) = local_to_global.get(&(cur, 0)) {
+                                let mut matching: Vec<usize> = globals
+                                    .iter()
+                                    .copied()
+                                    .filter(|&g| eff_parent(g) == current_parent)
+                                    .collect();
+                                if matching.is_empty() {
+                                    matching = globals.to_vec();
+                                }
+                                // Disambiguate by the caller's argument local: the
+                                // destination of the most recent relevant `Assign`.
+                                // Applies to single-arg callees (a borrow temp for
+                                // `as_ptr`/`as_mut_ptr`) and to pointer-arithmetic
+                                // callees (the freshly materialized `count` of
+                                // `ptr::add`/`ptr::sub`).  For other multi-arg
+                                // callees (e.g. `ptr::write`, whose `value` aggregate
+                                // temp may be reused across call sites) the local is
+                                // not a reliable discriminator, so the positional
+                                // cursor below decides.
+                                let all_single_arg = matching.iter().all(|&g| {
+                                    tree.inline_binding(g).map(|b| b.arg_locals.len()) == Some(1)
+                                });
+                                let is_ptr_arith = crate::api_classify::is_pointer_add(Some(cur))
+                                    || crate::api_classify::is_pointer_sub(Some(cur));
+                                if (all_single_arg || is_ptr_arith)
+                                    && let Some(arg) = prev_arg
+                                {
+                                    let by_arg: Vec<usize> = matching
                                         .iter()
                                         .copied()
-                                        .filter(|&g| eff_parent(g) == current_parent)
+                                        .filter(|&g| {
+                                            tree.inline_binding(g)
+                                                .is_some_and(|b| b.arg_locals.contains(&arg))
+                                        })
                                         .collect();
-                                    if matching.is_empty() {
-                                        matching = globals.to_vec();
-                                    }
-                                    // Disambiguate by the caller's argument local: the
-                                    // destination of the most recent relevant `Assign`.
-                                    // Applies to single-arg callees (a borrow temp for
-                                    // `as_ptr`/`as_mut_ptr`) and to pointer-arithmetic
-                                    // callees (the freshly materialized `count` of
-                                    // `ptr::add`/`ptr::sub`).  For other multi-arg
-                                    // callees (e.g. `ptr::write`, whose `value` aggregate
-                                    // temp may be reused across call sites) the local is
-                                    // not a reliable discriminator, so the positional
-                                    // cursor below decides.
-                                    let all_single_arg = matching.iter().all(|&g| {
-                                        tree.inline_binding(g).map(|b| b.arg_locals.len())
-                                            == Some(1)
-                                    });
-                                    let is_ptr_arith =
-                                        crate::api_classify::is_pointer_add(Some(cur))
-                                            || crate::api_classify::is_pointer_sub(Some(
-                                                cur,
-                                            ));
-                                    if (all_single_arg || is_ptr_arith) && let Some(arg) = prev_arg {
-                                        let by_arg: Vec<usize> = matching
-                                            .iter()
-                                            .copied()
-                                            .filter(|&g| {
-                                                tree.inline_binding(g)
-                                                    .is_some_and(|b| b.arg_locals.contains(&arg))
-                                            })
-                                            .collect();
-                                        if !by_arg.is_empty() {
-                                            matching = by_arg;
-                                        }
-                                    }
-                                    let pool: &[usize] = matching.as_slice();
-                                    let idx = if pool.len() == 1 {
-                                        0
-                                    } else {
-                                        let cursor =
-                                            entry_cursor.entry((cur, current_parent)).or_insert(0);
-                                        let idx = *cursor;
-                                        *cursor = (*cursor + 1).min(pool.len() - 1);
-                                        idx
-                                    };
-                                    cur_entry = pool.get(idx).copied();
-                                }
-
-                                // The frame `cur` connects to, and the inlined
-                                // callees skipped between it and `cur`.
-                                let eff = cur_entry.map(eff_parent).unwrap_or(caller);
-                                let mut skipped: Vec<(DefId, usize)> = Vec::new();
-                                {
-                                    let mut p = cur_entry.and_then(|g| tree.inline_parent(g));
-                                    while let Some(pd) = p {
-                                        if pd == eff {
-                                            break;
-                                        }
-                                        if let Some(pe) = local_to_global
-                                            .get(&(pd, 0))
-                                            .and_then(|gs| gs.first().copied())
-                                        {
-                                            skipped.push((pd, pe));
-                                            p = tree.inline_parent(pe);
-                                        } else {
-                                            break;
-                                        }
+                                    if !by_arg.is_empty() {
+                                        matching = by_arg;
                                     }
                                 }
+                                let pool: &[usize] = matching.as_slice();
+                                let idx = if pool.len() == 1 {
+                                    0
+                                } else {
+                                    let cursor =
+                                        entry_cursor.entry((cur, current_parent)).or_insert(0);
+                                    let idx = *cursor;
+                                    *cursor = (*cursor + 1).min(pool.len() - 1);
+                                    idx
+                                };
+                                cur_entry = pool.get(idx).copied();
+                            }
 
-                                // Pop down to the connection frame (`eff`; if it is
-                                // the root caller, pop everything).
-                                while let Some(&(top_def, _, _)) = active.last() {
-                                    if top_def == eff {
+                            // The frame `cur` connects to, and the inlined
+                            // callees skipped between it and `cur`.
+                            let eff = cur_entry.map(eff_parent).unwrap_or(caller);
+                            let mut skipped: Vec<(DefId, usize)> = Vec::new();
+                            {
+                                let mut p = cur_entry.and_then(|g| tree.inline_parent(g));
+                                while let Some(pd) = p {
+                                    if pd == eff {
                                         break;
                                     }
-                                    let (_, dest, _) = active.pop().unwrap();
-                                    out.push(RelevantItem::CalleeExit { dest });
-                                }
-                                // Enter the skipped frames (farthest first), then
-                                // `cur` itself.
-                                for (pd, pe) in skipped.iter().rev() {
-                                    if let Some(binding) = tree.inline_binding(*pe) {
-                                        out.push(RelevantItem::CalleeEntry {
-                                            callee: *pd,
-                                            args: binding.arg_locals.clone(),
-                                            consts: binding.arg_consts.clone(),
-                                            field_offsets: binding.arg_field_offsets.clone(),
-                                        });
-                                        active.push((*pd, binding.dest_local, *pe));
+                                    if let Some(pe) = local_to_global
+                                        .get(&(pd, 0))
+                                        .and_then(|gs| gs.first().copied())
+                                    {
+                                        skipped.push((pd, pe));
+                                        p = tree.inline_parent(pe);
+                                    } else {
+                                        break;
                                     }
                                 }
-                                if let Some(&global) = cur_entry.as_ref()
-                                    && let Some(binding) = tree.inline_binding(global)
-                                {
+                            }
+
+                            // Pop down to the connection frame (`eff`; if it is
+                            // the root caller, pop everything).
+                            while let Some(&(top_def, _, _)) = active.last() {
+                                if top_def == eff {
+                                    break;
+                                }
+                                let (_, dest, _) = active.pop().unwrap();
+                                out.push(RelevantItem::CalleeExit { dest });
+                            }
+                            // Enter the skipped frames (farthest first), then
+                            // `cur` itself.
+                            for (pd, pe) in skipped.iter().rev() {
+                                if let Some(binding) = tree.inline_binding(*pe) {
                                     out.push(RelevantItem::CalleeEntry {
-                                        callee: cur,
+                                        callee: *pd,
                                         args: binding.arg_locals.clone(),
                                         consts: binding.arg_consts.clone(),
                                         field_offsets: binding.arg_field_offsets.clone(),
                                     });
-                                    active.push((cur, binding.dest_local, global));
+                                    active.push((*pd, binding.dest_local, *pe));
                                 }
+                            }
+                            if let Some(&global) = cur_entry.as_ref()
+                                && let Some(binding) = tree.inline_binding(global)
+                            {
+                                out.push(RelevantItem::CalleeEntry {
+                                    callee: cur,
+                                    args: binding.arg_locals.clone(),
+                                    consts: binding.arg_consts.clone(),
+                                    field_offsets: binding.arg_field_offsets.clone(),
+                                });
+                                active.push((cur, binding.dest_local, global));
                             }
                         }
                     }
+                }
                 prev_def_id = Some(cur);
                 // Track the caller's most recent value-producing `Assign`
                 // destination for argument disambiguation.  A non-value statement
@@ -610,28 +612,24 @@ impl<'tcx> VerifyEngine<'tcx> {
                     origin: None,
                 })
             }
-            Property::And(and) => {
-                Property::And(AndProperty {
-                    conjuncts: and
-                        .conjuncts
-                        .iter()
-                        .map(|p| Self::bind_property_to_checkpoint(p, checkpoint))
-                        .collect(),
-                    contract_kind: and.contract_kind,
-                    origin: None,
-                })
-            }
-            Property::Or(or) => {
-                Property::Or(OrProperty {
-                    disjuncts: or
-                        .disjuncts
-                        .iter()
-                        .map(|p| Self::bind_property_to_checkpoint(p, checkpoint))
-                        .collect(),
-                    contract_kind: or.contract_kind,
-                    origin: None,
-                })
-            }
+            Property::And(and) => Property::And(AndProperty {
+                conjuncts: and
+                    .conjuncts
+                    .iter()
+                    .map(|p| Self::bind_property_to_checkpoint(p, checkpoint))
+                    .collect(),
+                contract_kind: and.contract_kind,
+                origin: None,
+            }),
+            Property::Or(or) => Property::Or(OrProperty {
+                disjuncts: or
+                    .disjuncts
+                    .iter()
+                    .map(|p| Self::bind_property_to_checkpoint(p, checkpoint))
+                    .collect(),
+                contract_kind: or.contract_kind,
+                origin: None,
+            }),
         }
     }
 
@@ -671,9 +669,18 @@ impl<'tcx> VerifyEngine<'tcx> {
             super::contract::ContractExpr::Place(place) => {
                 super::contract::ContractExpr::Place(Self::rebind_place(place, checkpoint))
             }
-            super::contract::ContractExpr::Len(inner) => super::contract::ContractExpr::Len(
-                Box::new(Self::rebind_contract_expr(inner, checkpoint)),
-            ),
+            super::contract::ContractExpr::Len(inner, method) => {
+                super::contract::ContractExpr::Len(
+                    Box::new(Self::rebind_contract_expr(inner, checkpoint)),
+                    *method,
+                )
+            }
+            super::contract::ContractExpr::IsEmpty(inner, method) => {
+                super::contract::ContractExpr::IsEmpty(
+                    Box::new(Self::rebind_contract_expr(inner, checkpoint)),
+                    *method,
+                )
+            }
             super::contract::ContractExpr::SizeOf(_)
             | super::contract::ContractExpr::AlignOf(_)
             | super::contract::ContractExpr::Const(_)

@@ -7,11 +7,11 @@
 
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::vm::state::{OffsetKind, VmState};
-use z3::ast::Int;
 use crate::verify::{
     contract::{ContractExpr, PlaceBase, Property, PropertyArg, PropertyKind},
     report::{CheckResult, UnknownReason},
 };
+use z3::ast::Int;
 
 mod alias;
 mod auto_trait;
@@ -254,10 +254,12 @@ impl PropertyChecker {
                     _ => None,
                 });
                 if atom.kind == PropertyKind::Init
-                    && (self.target_value(vm_state, checkpoint, property)
+                    && (self
+                        .target_value(vm_state, checkpoint, property)
                         .and_then(|value| value.provenance_alloc_id())
                         .is_some_and(|id| vm_state.possible_uninit_allocs.contains(&id))
-                        || target_arg.and_then(|index| checkpoint.args.get(index))
+                        || target_arg
+                            .and_then(|index| checkpoint.args.get(index))
                             .and_then(|arg| arg.place())
                             .and_then(|place| vm_state.current_frame.local_alloc.get(&place.local))
                             .is_some_and(|id| vm_state.possible_uninit_allocs.contains(id)))
@@ -268,17 +270,26 @@ impl PropertyChecker {
                 // reads) depends on a truncated inline cannot be decided:
                 // report `Unknown` instead of failing on the placeholder term.
                 if self.atom_depends_on_inline_terms(
-                    vm_state, checkpoint, property, &vm_state.inline.inline_truncated_terms
+                    vm_state,
+                    checkpoint,
+                    property,
+                    &vm_state.inline.inline_truncated_terms,
                 ) {
                     return CheckResult::Unknown(UnknownReason::InlineDepthExceeded);
                 }
                 if self.atom_depends_on_inline_terms(
-                    vm_state, checkpoint, property, &vm_state.inline.inline_branch_terms
+                    vm_state,
+                    checkpoint,
+                    property,
+                    &vm_state.inline.inline_branch_terms,
                 ) {
                     return CheckResult::Unknown(UnknownReason::Unimplemented);
                 }
                 if self.atom_depends_on_inline_terms(
-                    vm_state, checkpoint, property, &vm_state.inline.opaque_intrinsic_terms
+                    vm_state,
+                    checkpoint,
+                    property,
+                    &vm_state.inline.opaque_intrinsic_terms,
                 ) {
                     return CheckResult::Unknown(UnknownReason::Unimplemented);
                 }

@@ -12,12 +12,11 @@ use crate::{
 };
 
 use super::state::{
-    AllocId, ElementTy, ValueSource, OffsetKind, Provenance, ValueFacts, VmState,
-    VmValue,
+    AllocId, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue,
 };
 
-use crate::helpers::mir_utils;
 use crate::api_classify;
+use crate::helpers::mir_utils;
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Assert a contract fact as VM state invariants.
@@ -55,9 +54,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // A general `Or` without such a guard disjunct is left to the
                 // checker (only one disjunct holds, so no fact is sound to
                 // assert unconditionally).
-                let is_guard = |d: &Property<'tcx>| {
-                    matches!(d, Property::Atom(a) if a.kind == PropertyKind::Null || a.kind == PropertyKind::Size)
-                };
+                let is_guard = |d: &Property<'tcx>| matches!(d, Property::Atom(a) if a.kind == PropertyKind::Null || a.kind == PropertyKind::Size);
                 if !or.disjuncts.iter().any(is_guard) {
                     return;
                 }
@@ -71,11 +68,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
-    fn collect_alias_hazard_allocs(
-        &self,
-        property: &Property<'tcx>,
-        out: &mut FxHashSet<AllocId>,
-    ) {
+    fn collect_alias_hazard_allocs(&self, property: &Property<'tcx>, out: &mut FxHashSet<AllocId>) {
         match property {
             Property::Atom(atom) => {
                 if atom.kind != PropertyKind::Alias {
@@ -184,27 +177,28 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             PropertyKind::Typed => {
                 if let Some(val) = self.contract_target_value(property)
                     && let Some(alloc_id) = val.provenance_alloc_id()
-                        && let Some(expected_ty) = Self::ty_arg(property, 1) {
-                            // A `Typed(container.iter(), T)` *for_each* invariant
-                            // declares that the container's pointer elements all
-                            // point at valid `T`s. Record that target type so a
-                            // single pointer loaded from the container can later
-                            // discharge `Typed(ptr, T)` soundly (the fact comes
-                            // from the invariant, not from the pointer type).
-                            if property.for_each().is_some() {
-                                self.alloc_mut(alloc_id).facts.for_each.target_ty = Some(expected_ty);
-                            }
-                            // Only record the type invariant when the allocation
-                            // has no element type yet.  `Init ⇒ Typed` (and other
-                            // typed preconditions) may re-assert `Typed` with a
-                            // *re-numbered* instantiation of the same `T` (e.g.
-                            // `T/#1` vs the `T/#0` used to size the allocation),
-                            // which must not clobber the original element type —
-                            // doing so makes `len()` fall back to the byte size.
-                            if self.alloc(alloc_id).element_ty.is_generic() {
-                                self.alloc_mut(alloc_id).element_ty = ElementTy::Typed(expected_ty);
-                            }
-                        }
+                    && let Some(expected_ty) = Self::ty_arg(property, 1)
+                {
+                    // A `Typed(container.iter(), T)` *for_each* invariant
+                    // declares that the container's pointer elements all
+                    // point at valid `T`s. Record that target type so a
+                    // single pointer loaded from the container can later
+                    // discharge `Typed(ptr, T)` soundly (the fact comes
+                    // from the invariant, not from the pointer type).
+                    if property.for_each().is_some() {
+                        self.alloc_mut(alloc_id).facts.for_each.target_ty = Some(expected_ty);
+                    }
+                    // Only record the type invariant when the allocation
+                    // has no element type yet.  `Init ⇒ Typed` (and other
+                    // typed preconditions) may re-assert `Typed` with a
+                    // *re-numbered* instantiation of the same `T` (e.g.
+                    // `T/#1` vs the `T/#0` used to size the allocation),
+                    // which must not clobber the original element type —
+                    // doing so makes `len()` fall back to the byte size.
+                    if self.alloc(alloc_id).element_ty.is_generic() {
+                        self.alloc_mut(alloc_id).element_ty = ElementTy::Typed(expected_ty);
+                    }
+                }
             }
             PropertyKind::SplitTransmute => {
                 // Anchor the license on the slice's data allocation: the
@@ -231,9 +225,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                                 rustc_middle::ty::TyKind::Ref(_, inner, _) => *inner == src,
                                 _ => false,
                             };
-                            if is_match
-                                && let Some(prov) = &val.provenance
-                            {
+                            if is_match && let Some(prov) = &val.provenance {
                                 self.content_mut(prov.alloc_id).facts.split_transmute_to =
                                     Some(dst_elem);
                             }
@@ -270,14 +262,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     // (`byte[n] == 0`).  A `Const` length (`from_ptr`'s `1`
                     // placeholder) is ignored — the true length is
                     // `strlen(ptr) + 1`.
-                    if let Some(n) = property
-                        .args()
-                        .get(1)
-                        .and_then(|a| match a {
-                            PropertyArg::Expr(ContractExpr::Const(_)) => None,
-                            a => self.resolve_contract_count(a),
-                        })
-                    {
+                    if let Some(n) = property.args().get(1).and_then(|a| match a {
+                        PropertyArg::Expr(ContractExpr::Const(_)) => None,
+                        a => self.resolve_contract_count(a),
+                    }) {
                         self.constraints.assertions.push(self.alloc(id).size.ge(&n));
                         let zero = Int::from_u64(self.z3_ctx, 0);
                         self.byte_write(id, &n, &zero);
@@ -308,13 +296,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     for pred in predicates {
                         if let Some(condition) = self.eval_predicate_as_bool(pred) {
                             self.constraints.assertions.push(condition);
-                            // For !self.is_empty() → self.len() != 0 on
-                            // Iter/IterMut: also assert len >= 1 to help
-                            // Z3 with integer division reasoning.
-                            if let Some(len_term) = self.try_simple_iter_len_from_pred(pred) {
-                                let one = Int::from_u64(self.z3_ctx, 1);
-                                self.constraints.assertions.push(len_term.ge(&one));
-                            }
                         }
                     }
                 }
@@ -463,7 +444,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // (`Option<NonNull>`, `Box`) or a pointer-to-ADT (`NonNull<LeafNode>`,
                 // whose fields were decomposed by param init) is handled via the
                 // legacy whole-local path to avoid losing those relationships.
-                let is_direct_simple_ptr = self.field_value(local, &field_path)
+                let is_direct_simple_ptr = self
+                    .field_value(local, &field_path)
                     .map(|val| {
                         (matches!(val.ty.kind(), rustc_middle::ty::TyKind::RawPtr(..))
                             || matches!(val.ty.kind(), rustc_middle::ty::TyKind::Adt(adt, _)
@@ -486,8 +468,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // wrapped field / pointer-to-ADT materializes the *field* target
                 // (unbounded via `huge`) so a downstream `Allocated` sees the
                 // freshly-sized allocation.
-                let mut v =
-                    self.materialize_external_alloc(elem_ty, count_term, val.ty, is_direct_simple_ptr);
+                let mut v = self.materialize_external_alloc(
+                    elem_ty,
+                    count_term,
+                    val.ty,
+                    is_direct_simple_ptr,
+                );
                 // The size materialization must not clobber a *stronger*
                 // alignment fact already on the field (e.g. `Align(ptr, usize)`
                 // set `align_n = 8`, but `Allocated(ptr, u8, n)` re-materializes
@@ -569,7 +555,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// the corresponding function parameter in the VM state.
     fn resolve_contract_count(&self, arg: &PropertyArg<'tcx>) -> Option<Int<'z3>> {
         match arg {
-            PropertyArg::Expr(ContractExpr::Const(n)) => Some(Int::from_u64(self.z3_ctx, *n as u64)),
+            PropertyArg::Expr(ContractExpr::Const(n)) => {
+                Some(Int::from_u64(self.z3_ctx, *n as u64))
+            }
             // Delegate field-projected places and arithmetic (e.g. `cap * elem_size`)
             // to the general simple evaluator.
             PropertyArg::Expr(expr) => self.eval_contract_expr_simple(expr),
@@ -664,30 +652,41 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             // reads `(*leaf).len` through `MemoryContent::values`).
                             let base_val = self.local_value(local)?;
                             let alloc_id = base_val.provenance_alloc_id()?;
-                            let view_ty = mir_utils::pointee_ty(base_val.ty)
-                                .unwrap_or(base_val.ty);
-                            self.units[alloc_id.0].content.values
+                            let view_ty = mir_utils::pointee_ty(base_val.ty).unwrap_or(base_val.ty);
+                            self.units[alloc_id.0]
+                                .content
+                                .values
                                 .get(&(view_ty, path.clone()))
                                 .map(|v| v.z3_term.clone())
                         })
                 }
             }
-            ContractExpr::Len(inner) => {
-                if let Some(val) = self.eval_contract_expr_simple_value(inner)
-                    && let Some(term) = self.try_simple_iter_len(&val) {
-                        return Some(term);
-                    }
+            ContractExpr::Len(inner, method) => {
+                if method.is_some_and(|id| !api_classify::is_len(Some(id))) {
+                    return None;
+                }
+                let val = self.eval_contract_expr_simple_value(inner)?;
+                let receiver_ty = mir_utils::pointee_ty(val.ty).unwrap_or(val.ty);
+                if let rustc_middle::ty::TyKind::Adt(adt, _) = receiver_ty.kind()
+                    && adt.did().as_local().is_some()
+                {
+                    return None;
+                }
+                if let Some(term) = self.try_simple_iter_len(&val) {
+                    return Some(term);
+                }
                 // A struct (e.g. `NodeRef`) whose `len()` reads `(*x.field).len`
                 // through a `NonNull` field.
                 if let ContractExpr::Place(cp) = &**inner
-                    && let Some(path) = cp.plain_field_path() {
-                        let local = cp.base.to_local();
-                        if let Some(ty) = self.field_type_at(local, &path)
-                            && let Some(term) = self.try_struct_nn_len_field(local, &path, ty) {
-                                return Some(term);
-                            }
+                    && let Some(path) = cp.plain_field_path()
+                {
+                    let local = cp.base.to_local();
+                    if let Some(ty) = self.field_type_at(local, &path)
+                        && let Some(term) = self.try_struct_nn_len_field(local, &path, ty)
+                    {
+                        return Some(term);
                     }
-                let val = self.eval_contract_expr_simple_value(inner)?;
+                }
                 self.len_from_value(&val)
             }
             ContractExpr::Binary { op, lhs, rhs } => {
@@ -735,7 +734,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         use rustc_middle::ty::TyKind;
         match val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
+                TyKind::Adt(adt_def, _) => {
+                    adt_def.did().as_local().is_none()
+                        && api_classify::is_std_iter_or_itermut(adt_def.did())
+                }
                 _ => false,
             },
             _ => false,
@@ -755,7 +757,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         lhs: &VmValue<'z3, 'tcx>,
         rhs: &VmValue<'z3, 'tcx>,
     ) -> Option<z3::ast::Bool<'z3>> {
-        if !matches!(op, rustc_middle::mir::BinOp::Eq | rustc_middle::mir::BinOp::Ne) {
+        if !matches!(
+            op,
+            rustc_middle::mir::BinOp::Eq | rustc_middle::mir::BinOp::Ne
+        ) {
             return None;
         }
         let lp = lhs.provenance.as_ref()?;
@@ -803,27 +808,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         self.iter_len_from_ptrs(ptr, end)
     }
 
-    /// For a predicate of the form `self.len() != 0` (i.e. `!self.is_empty()`),
-    /// if the self is an Iter/IterMut reference, return the field-based len term
-    /// so that a `len >= 1` constraint can be added.
-    fn try_simple_iter_len_from_pred(
-        &self,
-        pred: &crate::verify::contract::NumericPredicate<'tcx>,
-    ) -> Option<Int<'z3>> {
-        use crate::verify::contract::{ContractExpr, RelOp};
-        if !matches!(pred.op, RelOp::Ne) {
-            return None;
-        }
-        if !matches!(&pred.rhs, ContractExpr::Const(0)) {
-            return None;
-        }
-        let ContractExpr::Len(inner) = &pred.lhs else {
-            return None;
-        };
-        let val = self.eval_contract_expr_simple_value(inner)?;
-        self.try_simple_iter_len(&val)
-    }
-
     /// If `local` is a reference to Iter/IterMut and field 0 (ptr)
     /// is updated, increment the cumulative ptr offset so that
     /// `interpreter_iter_len` can express `len = initial_len - offset`
@@ -847,26 +831,30 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return;
         };
         let one = Int::from_u64(self.z3_ctx, 1);
-        let (new_offset, base_len) = match self.constraints.term_caches.iter_ptr_offset.get(&iter_key) {
-            Some((_, prev, base)) => (Int::add(self.z3_ctx, &[prev, &one]), base.clone()),
-            None => {
-                let base = self
-                    .field_value(iter_local, &[1])
-                    .and_then(|end| end.provenance.as_ref())
-                    .and_then(|ep| match &ep.offset_kind {
-                        Some(OffsetKind::Element(e)) => Some(e.clone()),
-                        _ => None,
-                    });
-                (one.clone(), base)
-            }
-        };
+        let (new_offset, base_len) =
+            match self.constraints.term_caches.iter_ptr_offset.get(&iter_key) {
+                Some((_, prev, base)) => (Int::add(self.z3_ctx, &[prev, &one]), base.clone()),
+                None => {
+                    let base = self
+                        .field_value(iter_local, &[1])
+                        .and_then(|end| end.provenance.as_ref())
+                        .and_then(|ep| match &ep.offset_kind {
+                            Some(OffsetKind::Element(e)) => Some(e.clone()),
+                            _ => None,
+                        });
+                    (one.clone(), base)
+                }
+            };
         // Mirror `try_iter_next`: the tracked offset must never exceed the
         // iterator's length (the inlined `post_inc_start` body itself only
         // mutates `ptr` and does not assert `offset <= len`).
         if let Some(e) = &base_len {
             self.constraints.assertions.push(new_offset.le(e));
         }
-        self.constraints.term_caches.iter_ptr_offset.insert(iter_key, (buffer, new_offset, base_len));
+        self.constraints
+            .term_caches
+            .iter_ptr_offset
+            .insert(iter_key, (buffer, new_offset, base_len));
     }
 
     /// Set non_null invariant on the target value.
@@ -945,9 +933,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             let index_local = index_place.base.to_local();
             if let rustc_middle::ty::TyKind::Adt(adt_def, _) =
                 self.body().local_decls[index_local].ty.kind()
-                && mir_utils::is_range_type(self.tcx, adt_def.did()) {
-                    return;
-                }
+                && mir_utils::is_range_type(self.tcx, adt_def.did())
+            {
+                return;
+            }
         }
         let slice_local = match slice.as_ref() {
             ContractExpr::Place(cp) => cp.base.try_to_local(),
@@ -977,7 +966,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// `T`'s `#[rapx::invariant]`s on the new reference local, rebinding the
     /// invariant's `self` place to that reference. This is what lets a struct's
     /// invariants flow through pointer dereferences into the caller's state.
-    pub(crate) fn assert_pointee_struct_invariants(&mut self, dest_ty: Ty<'tcx>, dest_local: Local) {
+    pub(crate) fn assert_pointee_struct_invariants(
+        &mut self,
+        dest_ty: Ty<'tcx>,
+        dest_local: Local,
+    ) {
         let pointee = match dest_ty.kind() {
             rustc_middle::ty::TyKind::Ref(_, inner, _) => *inner,
             _ => return,
@@ -1005,7 +998,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// while this one covers `NonNull<T>` / `Box<T>` pointer *fields* whose
     /// pointee is decomposed by `init_ptr_field` (e.g. `NodeRef.node:
     /// NonNull<LeafNode>` must satisfy `LeafNode`'s `len <= CAPACITY`).
-    pub(crate) fn assert_alloc_pointee_invariants(&mut self, alloc_id: AllocId, pointee_ty: Ty<'tcx>) {
+    pub(crate) fn assert_alloc_pointee_invariants(
+        &mut self,
+        alloc_id: AllocId,
+        pointee_ty: Ty<'tcx>,
+    ) {
         let rustc_middle::ty::TyKind::Adt(adt_def, _) = pointee_ty.kind() else {
             return;
         };
@@ -1060,7 +1057,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             ContractExpr::AlignOf(ty) => Some(self.align_sym_read(*ty)),
             ContractExpr::Place(cp) => {
                 let path = cp.plain_field_path()?;
-                self.units[alloc_id.0].content.values
+                self.units[alloc_id.0]
+                    .content
+                    .values
                     .get(&(view_ty, path))
                     .map(|v| v.z3_term.clone())
             }
@@ -1069,7 +1068,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 let r = self.eval_pointee_expr(alloc_id, view_ty, rhs)?;
                 self.eval_numeric_binary(&l, &r, *op)
             }
-            ContractExpr::Len(inner) => {
+            ContractExpr::Len(inner, _) => {
                 let val = self.eval_pointee_expr_value(alloc_id, view_ty, inner)?;
                 self.slice_len_from_value(&val)
             }
@@ -1089,7 +1088,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return None;
         };
         let path = cp.plain_field_path()?;
-        self.units[alloc_id.0].content.values
+        self.units[alloc_id.0]
+            .content
+            .values
             .get(&(view_ty, path))
             .cloned()
     }
@@ -1110,11 +1111,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // non-linear `% align_T` is not decidable, so `align_n` alone is
                 // used for that case.)
                 if align_u64.is_some() {
-                    self.constraints.assertions.push(
-                        val.z3_term
-                            .rem(&align)
-                            ._eq(&Int::from_u64(self.z3_ctx, 0)),
-                    );
+                    self.constraints
+                        .assertions
+                        .push(val.z3_term.rem(&align)._eq(&Int::from_u64(self.z3_ctx, 0)));
                 }
             }
         }
@@ -1172,7 +1171,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }) else {
             return;
         };
-        let Some(alloc_id) = self.contract_target_value(property).and_then(|v| v.provenance_alloc_id())
+        let Some(alloc_id) = self
+            .contract_target_value(property)
+            .and_then(|v| v.provenance_alloc_id())
         else {
             return;
         };
@@ -1196,7 +1197,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .get(2)
             .and_then(|a| self.resolve_contract_count(a))
             .unwrap_or_else(|| Int::from_u64(self.z3_ctx, 1));
-        let Some(alloc_id) = self.contract_target_value(property).and_then(|v| v.provenance_alloc_id())
+        let Some(alloc_id) = self
+            .contract_target_value(property)
+            .and_then(|v| v.provenance_alloc_id())
         else {
             return;
         };
@@ -1210,13 +1213,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if property.for_each().is_none() {
             return;
         }
-        let Some(alloc_id) = self.contract_target_value(property).and_then(|v| v.provenance_alloc_id())
+        let Some(alloc_id) = self
+            .contract_target_value(property)
+            .and_then(|v| v.provenance_alloc_id())
         else {
             return;
         };
         self.alloc_mut(alloc_id).facts.for_each.owning = true;
     }
-
 }
 
 /// Rebind every `self` place in a struct invariant to the given MIR local, so
@@ -1256,7 +1260,9 @@ fn rebind_expr_place<'tcx>(expr: &mut ContractExpr<'tcx>, local: Local) {
         ContractExpr::Place(cp) => {
             cp.base = PlaceBase::Local(local.as_usize());
         }
-        ContractExpr::Len(inner) => rebind_expr_place(inner, local),
+        ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => {
+            rebind_expr_place(inner, local)
+        }
         ContractExpr::IndexAccess { slice, index } => {
             rebind_expr_place(slice, local);
             rebind_expr_place(index, local);

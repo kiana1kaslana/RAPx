@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use crate::compat::SkipNormWip;
 
 use crate::compat::FxHashMap;
-use crate::other_api;
+use crate::api_ids::other_api;
 
 use super::def_use::PlaceKey;
 

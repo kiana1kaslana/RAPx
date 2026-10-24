@@ -113,7 +113,7 @@ fn parse_named_place<'tcx>(expr: &Expr) -> Option<ContractPlace<'tcx>> {
     // not an `Expr::Path`), so `parse_named_place`'s `Expr::Path` arm below
     // never sees it.  Resolve it to the return-value place here so it works
     // inside nested numeric expressions (e.g. the slice invariant's
-    // `Allocated($self, $elem, len($self))` for the return type, whose `$self`
+    // `Allocated($self, $elem, $self.len())` for the return type, whose `$self`
     // is substituted with the `return` placeholder).
     if let Expr::Return(expr_return) = expr
         && expr_return.expr.is_none()

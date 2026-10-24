@@ -661,6 +661,9 @@ pub(crate) struct VmState<'z3, 'tcx> {
     /// moves the current frame here, exiting restores it.
     pub(crate) caller_frames: Vec<FrameState>,
 
+    pub(crate) active_method_calls: Vec<Option<super::method_cache::MethodSnapshot<'z3, 'tcx>>>,
+    pub(crate) method_returns: Vec<super::method_cache::MethodReturn<'z3, 'tcx>>,
+
     /// The object space: one [`MemoryUnit`] per allocation, indexed by
     /// `AllocId`.  Each unit carries its shape ([`Allocation`]) and its contents
     /// (per-byte state + per-allocation typed values).
@@ -707,6 +710,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 local_alloc: FxHashMap::default(),
             },
             caller_frames: Vec::default(),
+            active_method_calls: Vec::default(),
+            method_returns: Vec::default(),
             units: Vec::default(),
             inline: InlineCtx::default(),
             unsupported_mir: false,

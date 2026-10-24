@@ -6,9 +6,9 @@
 use rustc_middle::mir::Operand;
 use rustc_middle::ty::TyCtxt;
 
-use crate::helpers::def_use::{operand_uses, PlaceBaseKey, PlaceKey, RelevantPlaces};
-use crate::verify::checkpoint::Checkpoint;
+use crate::helpers::def_use::{PlaceBaseKey, PlaceKey, RelevantPlaces, operand_uses};
 use crate::helpers::mir_utils::callee_param_index_for_local;
+use crate::verify::checkpoint::Checkpoint;
 
 use super::contract::{
     ContractExpr, ContractPlace, ContractProjection, NumericPredicate, PlaceBase, Property,
@@ -126,7 +126,7 @@ impl RelevantPlaces {
                 self.collect_contract_expr(rhs);
             }
             ContractExpr::Unary { expr, .. } => self.collect_contract_expr(expr),
-            ContractExpr::Len(expr) => {
+            ContractExpr::Len(expr, _) | ContractExpr::IsEmpty(expr, _) => {
                 self.collect_contract_expr(expr);
                 if let ContractExpr::Place(place) = expr.as_ref() {
                     self.need_len.insert(PlaceKey::from_contract_place(place));
@@ -203,9 +203,10 @@ pub(crate) fn bind_callsite_roots(
             .collect();
         for (root, index) in need_len_roots {
             if let Some(operand) = checkpoint.args.get(index)
-                && let Some(place) = bind_operand_place(operand, &root.fields) {
-                    relevance.need_len.insert(place);
-                }
+                && let Some(place) = bind_operand_place(operand, &root.fields)
+            {
+                relevance.need_len.insert(place);
+            }
         }
     }
 }

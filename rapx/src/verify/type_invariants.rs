@@ -55,15 +55,7 @@ pub(crate) fn build_type_invariants_from_params<'tcx>(
 
     if !output.is_unit() && !output.is_primitive() {
         let (type_path, elem_ty) = type_path_key(tcx, output);
-        collect_type_invariants(
-            tcx,
-            def_id,
-            db,
-            &type_path,
-            "return",
-            elem_ty,
-            &mut results,
-        );
+        collect_type_invariants(tcx, def_id, db, &type_path, "return", elem_ty, &mut results);
     }
 
     results
@@ -89,13 +81,14 @@ fn collect_type_invariants<'tcx>(
     for prefix in ["alloc::", "std::"] {
         let prefixed = format!("{prefix}{type_path}");
         if prefixed != type_path
-            && let Some(entries) = db.get(&prefixed) {
-                for prop_entry in entries {
-                    results.extend(instantiate_type_invariant(
-                        tcx, def_id, prop_entry, param_name, elem_ty,
-                    ));
-                }
+            && let Some(entries) = db.get(&prefixed)
+        {
+            for prop_entry in entries {
+                results.extend(instantiate_type_invariant(
+                    tcx, def_id, prop_entry, param_name, elem_ty,
+                ));
             }
+        }
     }
 }
 
@@ -243,7 +236,7 @@ fn replace_pred_ty<'tcx>(pred: &mut NumericPredicate<'tcx>, ty: Ty<'tcx>) {
 fn replace_expr_ty<'tcx>(expr: &mut ContractExpr<'tcx>, ty: Ty<'tcx>) {
     match expr {
         ContractExpr::SizeOf(t) | ContractExpr::AlignOf(t) => *t = ty,
-        ContractExpr::Len(inner) => replace_expr_ty(inner, ty),
+        ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => replace_expr_ty(inner, ty),
         ContractExpr::IndexAccess { slice, index } => {
             replace_expr_ty(slice, ty);
             replace_expr_ty(index, ty);

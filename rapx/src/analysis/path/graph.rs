@@ -1,6 +1,6 @@
 use super::PathTree;
 use crate::compat::{FxHashMap, FxHashSet};
-use crate::other_api;
+use crate::api_ids::other_api;
 use crate::helpers::mir_utils;
 use crate::graphs::{
     cfg::{CfgBlock, ControlFlowGraph},
@@ -798,7 +798,7 @@ impl<'tcx> PathGraph<'tcx> {
                 let cross_crate_trait_method = cross_crate
                     && is_trait_method
                     && tcx.is_mir_available(base_callee);
-                if crate::intrinsic_api::is_intrinsic(tcx, callee)
+                if crate::api_ids::intrinsic_api::is_intrinsic(tcx, callee)
                     || !tcx.is_mir_available(callee)
                     || expanded.contains(&callee)
                     || has_fn_sim

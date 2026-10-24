@@ -3,7 +3,7 @@
 //! The numeric-expression layer is parsed by the pest grammar (`pest.rs`);
 //! everything that still needs rustc's type context or `syn` structure lives
 //! here: places (via `place.rs`), const generics, builtin integer bounds, the
-//! `x.len()` sugar, tag argument types/targets, and `ValidNum` predicates.
+//! length calls, tag argument types/targets, and `ValidNum` predicates.
 
 use crate::helpers::mir_utils;
 use quote::ToTokens;
@@ -24,22 +24,11 @@ pub(crate) fn parse_contract_expr<'tcx>(
     expr: &Expr,
     sp: &str,
 ) -> ContractExpr<'tcx> {
-    // `x.len()` sugar -> len(x).  A plain `.len` *field* access is deliberately
-    // NOT turned into `len(x)`: a struct such as `LinkedList` carries `len` as an
-    // ordinary `usize` field, and routing it through `len()` would wrongly
-    // reconstruct the length from the backing allocation's size (which, for an
-    // external allocation, is not the field's value).  `.len` therefore stays a
-    // field projection (`self.len` → field 2) resolved by `parse_contract_place`.
     if let Expr::MethodCall(expr_method) = expr
         && expr_method.method == "len"
         && expr_method.args.is_empty()
     {
-        return ContractExpr::Len(Box::new(parse_contract_expr(
-            tcx,
-            def_id,
-            &expr_method.receiver,
-            sp,
-        )));
+        return parse_len_call(tcx, def_id, &expr_method.receiver, sp);
     }
 
     // A place (fields, projections) or a const generic.
@@ -55,8 +44,7 @@ pub(crate) fn parse_contract_expr<'tcx>(
     // A `const` item (e.g. `CAPACITY` in `ValidNum(len <= CAPACITY)`).
     if let Expr::Path(expr_path) = expr
         && let Some(ident) = expr_path.path.get_ident()
-        && let Some(value) =
-            mir_utils::resolve_const_item_value(tcx, &ident.to_string())
+        && let Some(value) = mir_utils::resolve_const_item_value(tcx, &ident.to_string())
     {
         return ContractExpr::Const(value);
     }
@@ -67,6 +55,69 @@ pub(crate) fn parse_contract_expr<'tcx>(
         tcx.def_path_str(def_id)
     );
     ContractExpr::Unknown
+}
+
+pub(crate) fn parse_len_call<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    receiver: &Expr,
+    sp: &str,
+) -> ContractExpr<'tcx> {
+    let method = resolve_self_method(tcx, def_id, receiver, "len");
+    ContractExpr::Len(
+        Box::new(parse_contract_expr(tcx, def_id, receiver, sp)),
+        method,
+    )
+}
+
+pub(crate) fn parse_is_empty_call<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    receiver_text: &str,
+    sp: &str,
+) -> ContractExpr<'tcx> {
+    let receiver = syn::parse_str::<Expr>(receiver_text).ok();
+    let method = receiver
+        .as_ref()
+        .and_then(|receiver| resolve_self_method(tcx, def_id, receiver, "is_empty"));
+    let inner = match receiver_text {
+        "return" => ContractExpr::Place(ContractPlace {
+            base: PlaceBase::Return,
+            projections: Vec::new(),
+        }),
+        s if s.starts_with("Arg_") => s[4..]
+            .parse::<usize>()
+            .map(|index| ContractExpr::Place(ContractPlace::arg(index)))
+            .unwrap_or(ContractExpr::Unknown),
+        _ => receiver
+            .as_ref()
+            .map(|receiver| parse_contract_expr(tcx, def_id, receiver, sp))
+            .unwrap_or(ContractExpr::Unknown),
+    };
+    ContractExpr::IsEmpty(
+        Box::new(inner),
+        method,
+    )
+}
+
+fn resolve_self_method(
+    tcx: TyCtxt<'_>,
+    def_id: DefId,
+    receiver: &Expr,
+    name: &str,
+) -> Option<DefId> {
+    if matches!(receiver, Expr::Path(path) if path.path.is_ident("self")) {
+        tcx.opt_associated_item(def_id)
+            .and_then(|assoc| assoc.impl_container(tcx))
+            .and_then(|impl_id| {
+                tcx.associated_items(impl_id)
+                    .in_definition_order()
+                    .find(|item| item.name().as_str() == name)
+                    .map(|item| item.def_id)
+            })
+    } else {
+        None
+    }
 }
 
 pub(crate) fn resolve_type_name<'tcx>(
@@ -259,15 +310,16 @@ pub(crate) fn parse_target_arg<'tcx>(
     // 'a parsed as ident `a`), store as Ident rather than Expr (which would
     // become Unknown).
     if let Expr::Path(expr_path) = expr
-        && let Some(ident) = expr_path.path.get_ident() {
-            let s = ident.to_string();
-            if s != "return"
-                && !s.starts_with("Arg_")
-                && place::parse_expr_into_local_and_ty(tcx, def_id, expr).is_none()
-            {
-                return PropertyArg::Ident(s);
-            }
+        && let Some(ident) = expr_path.path.get_ident()
+    {
+        let s = ident.to_string();
+        if s != "return"
+            && !s.starts_with("Arg_")
+            && place::parse_expr_into_local_and_ty(tcx, def_id, expr).is_none()
+        {
+            return PropertyArg::Ident(s);
         }
+    }
     place::parse_contract_place(tcx, def_id, expr)
         .map(|p| PropertyArg::Expr(ContractExpr::Place(p)))
         .unwrap_or_else(|| PropertyArg::Expr(parse_contract_expr(tcx, def_id, expr, "target")))

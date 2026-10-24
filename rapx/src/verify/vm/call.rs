@@ -47,6 +47,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .map(|a| a.node.place().map(|p| p.local))
             .collect();
         let callee = mir_utils::dep_callee_resolved_def_id(self.tcx, caller_def_id, func);
+        let method_call = callee.and_then(|method| {
+            arg_values.first().and_then(|receiver| self.begin_method_call(method, receiver, caller_arg_locals.first().copied().flatten()))
+        });
 
         if api_classify::is_eq_call(callee) {
             self.propagate_const_bytes_to_tracked(args);
@@ -87,6 +90,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         } else if let Some(c) = callee && self.tcx.is_mir_available(c) {
             self.exec_inline_call(c, &arg_values, &caller_arg_locals, destination);
         }
+        let result = self.local_value(destination).cloned();
+        self.finish_method_call(method_call, result.as_ref());
     }
 
     /// Recursively execute a callee's MIR body inline.

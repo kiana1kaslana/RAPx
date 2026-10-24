@@ -10,7 +10,6 @@
 //! needs the rustc type context.  The arithmetic / call / if / constant layers
 //! are converted directly from the pest tree.
 
-use crate::helpers::mir_utils;
 use pest::Parser;
 use pest::iterators::Pair;
 use pest_derive::Parser;
@@ -18,10 +17,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
 
 use super::compound::{CompoundArg, CompoundBody};
-use super::place::resolve_place_from_ident;
-use super::types::{
-    ContractExpr, ContractPlace, NumericBinOp, NumericPredicate, NumericUnaryOp, PlaceBase, RelOp,
-};
+use super::types::{ContractExpr, NumericBinOp, NumericPredicate, NumericUnaryOp, RelOp};
 use crate::helpers::name::match_ty_with_ident;
 
 /// Parser derived from `grammar.pest`.
@@ -53,14 +49,14 @@ pub(crate) fn parse_expr_pest<'tcx>(
     def_id: DefId,
     text: &str,
 ) -> ContractExpr<'tcx> {
-    let Ok(mut pairs) = ContractParser::parse(Rule::expr, text) else {
+    let Ok(mut pairs) = ContractParser::parse(Rule::expr_input, text) else {
         rap_warn!(
             "contract expression not supported by grammar: {text} (in {})",
             tcx.def_path_str(def_id)
         );
         return ContractExpr::Unknown;
     };
-    conv_expr(tcx, def_id, pairs.next().expect("expr pair"))
+    conv_expr(tcx, def_id, only_child(pairs.next().expect("expr input")))
 }
 
 /// Parse a predicate (comparison / `!x.is_empty()` / bare expr) into a
@@ -70,14 +66,14 @@ pub(crate) fn parse_predicate_pest<'tcx>(
     def_id: DefId,
     text: &str,
 ) -> Option<NumericPredicate<'tcx>> {
-    let Ok(mut pairs) = ContractParser::parse(Rule::expr, text) else {
+    let Ok(mut pairs) = ContractParser::parse(Rule::expr_input, text) else {
         rap_warn!(
             "contract predicate not supported by grammar: {text} (in {})",
             tcx.def_path_str(def_id)
         );
         return None;
     };
-    conv_predicate(tcx, def_id, pairs.next().expect("expr pair"))
+    conv_predicate(tcx, def_id, only_child(pairs.next().expect("expr input")))
 }
 
 fn conv_expr<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, pair: Pair<Rule>) -> ContractExpr<'tcx> {
@@ -128,10 +124,9 @@ fn conv_predicate<'tcx>(
         Rule::not_is_empty => {
             let mut inner = pair.into_inner();
             let base_text = inner.next()?.as_str().to_string();
-            let place = conv_base(tcx, def_id, &base_text);
             Some(NumericPredicate::new(
-                ContractExpr::Len(Box::new(place)),
-                RelOp::Ne,
+                super::resolve::parse_is_empty_call(tcx, def_id, &base_text, "pest"),
+                RelOp::Eq,
                 ContractExpr::Const(0),
             ))
         }
@@ -320,10 +315,13 @@ fn conv_call<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, pair: Pair<Rule>) -> Contra
             }
         }
         "len" => {
-            let Some(arg) = args.first() else {
+            let [arg] = args.as_slice() else {
                 return ContractExpr::Unknown;
             };
-            ContractExpr::Len(Box::new(conv_arg_expr(tcx, def_id, arg.clone())))
+            let Ok(receiver) = syn::parse_str::<syn::Expr>(arg.as_str()) else {
+                return ContractExpr::Unknown;
+            };
+            super::resolve::parse_len_call(tcx, def_id, &receiver, "pest")
         }
         "min" | "max" => {
             if args.len() != 2 {
@@ -395,8 +393,7 @@ fn conv_const_path<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, pair: Pair<Rule>) -> 
     }
 }
 
-/// Bridge a place through the existing syn-based parser (handles field
-/// projections, `unwrap_some`, `iter`, and `x.len` sugar uniformly).
+/// Bridge a place through the syn-based parser for field and method projections.
 fn conv_place_bridge<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
@@ -404,39 +401,13 @@ fn conv_place_bridge<'tcx>(
 ) -> ContractExpr<'tcx> {
     let text = pair.as_str();
     let Ok(expr) = syn::parse_str::<syn::Expr>(text) else {
-        rap_warn!("contract place not parseable: {text} (in {})", tcx.def_path_str(def_id));
+        rap_warn!(
+            "contract place not parseable: {text} (in {})",
+            tcx.def_path_str(def_id)
+        );
         return ContractExpr::Unknown;
     };
     super::resolve::parse_contract_expr(tcx, def_id, &expr, "pest")
-}
-
-/// Convert a `not_is_empty` base (`self` / `return` / `Arg_N` / ident) into a
-/// place expression.
-fn conv_base<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, base_text: &str) -> ContractExpr<'tcx> {
-    match base_text {
-        "return" => ContractExpr::Place(ContractPlace {
-            base: PlaceBase::Return,
-            projections: Vec::new(),
-        }),
-        s if s.starts_with("Arg_") => {
-            let idx = s[4..].parse::<usize>().unwrap_or(0);
-            ContractExpr::Place(ContractPlace::arg(idx))
-        }
-        _ => {
-            let Some((base, fields, _)) = resolve_place_from_ident(tcx, def_id, base_text, &[])
-            else {
-                // Fall back to a `const` item (e.g. `CAPACITY` in
-                // `ValidNum(len <= CAPACITY)`).
-                if let Some(value) =
-                    mir_utils::resolve_const_item_value(tcx, base_text)
-                {
-                    return ContractExpr::Const(value);
-                }
-                return ContractExpr::Unknown;
-            };
-            ContractExpr::Place(ContractPlace::local(base, fields))
-        }
-    }
 }
 
 // ── Compound-body conversion (`pred!` / `def_body`) ─────────────────────────
@@ -517,4 +488,27 @@ fn conv_compound_call(pair: Pair<Rule>, params: &[String]) -> CompoundBody {
         None => Vec::new(),
     };
     CompoundBody::Call { tag, args }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContractParser, Rule, only_child};
+    use pest::Parser;
+
+    #[test]
+    fn length_spellings_are_supported() {
+        assert!(ContractParser::parse(Rule::expr_input, "b.len()").is_ok());
+        assert!(ContractParser::parse(Rule::expr_input, "len(b)").is_ok());
+        assert!(ContractParser::parse(Rule::expr_input, "len(b) + 1").is_ok());
+    }
+
+    #[test]
+    fn spaced_is_empty_is_a_predicate() {
+        let input = ContractParser::parse(Rule::expr_input, "! self . is_empty ()")
+            .unwrap()
+            .next()
+            .unwrap();
+        let expr = only_child(input);
+        assert_eq!(only_child(expr).as_rule(), Rule::not_is_empty);
+    }
 }

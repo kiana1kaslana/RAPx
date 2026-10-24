@@ -3276,7 +3276,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "mid <= len(self)"
+        "mid <= self.len()"
       ]
     },
     {
@@ -3292,7 +3292,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "mid <= len(self)"
+        "mid <= self.len()"
       ]
     },
     {
@@ -3816,7 +3816,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "len(self) % N == 0"
+        "self.len() % N == 0"
       ]
     }
   ],
@@ -3830,7 +3830,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "len(self) % N == 0"
+        "self.len() % N == 0"
       ]
     }
   ],
@@ -3838,7 +3838,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "0 <= mid && mid <= len(self)"
+        "0 <= mid && mid <= self.len()"
       ]
     }
   ],
@@ -3846,7 +3846,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "0 <= mid && mid <= len(self)"
+        "0 <= mid && mid <= self.len()"
       ]
     }
   ],
@@ -4174,7 +4174,7 @@
       "args": [
         "self",
         "u8",
-        "len(self)"
+        "self.len()"
       ]
     },
     {
@@ -4192,7 +4192,7 @@
       "args": [
         "self",
         "u8",
-        "len(self)"
+        "self.len()"
       ]
     },
     {
@@ -4210,7 +4210,7 @@
       "args": [
         "self",
         "u8",
-        "len(self)"
+        "self.len()"
       ]
     },
     {
@@ -4228,7 +4228,7 @@
       "args": [
         "self",
         "u8",
-        "len(self)"
+        "self.len()"
       ]
     },
     {
@@ -4246,7 +4246,7 @@
       "args": [
         "self",
         "u8",
-        "len(self)"
+        "self.len()"
       ]
     }
   ],
@@ -4256,7 +4256,7 @@
       "args": [
         "v",
         "u8",
-        "len(v)"
+        "v.len()"
       ]
     }
   ],
@@ -4266,7 +4266,7 @@
       "args": [
         "v",
         "u8",
-        "len(v)"
+        "v.len()"
       ]
     }
   ],
@@ -4410,7 +4410,7 @@
       "args": [
         "self",
         "u8",
-        "len(self)"
+        "self.len()"
       ]
     },
     {
@@ -4428,7 +4428,7 @@
       "args": [
         "self",
         "u8",
-        "len(self)"
+        "self.len()"
       ]
     },
     {
@@ -5319,7 +5319,7 @@
       "args": [
         "v",
         "u8",
-        "len(v)"
+        "v.len()"
       ]
     }
   ],
@@ -5382,7 +5382,7 @@
       "args": [
         "bytes",
         "u8",
-        "len(bytes)"
+        "bytes.len()"
       ]
     }
   ],
@@ -5615,7 +5615,7 @@
       "args": [
         "s",
         "u8",
-        "len(s)"
+        "s.len()"
       ]
     }
   ],
@@ -6127,7 +6127,7 @@
       "args": [
         "s",
         "u8",
-        "len(s)"
+        "s.len()"
       ]
     }
   ],

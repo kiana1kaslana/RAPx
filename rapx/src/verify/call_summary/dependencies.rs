@@ -162,7 +162,7 @@ fn write_args_rec(
     if !tcx.is_mir_available(callee) {
         return None;
     }
-    if crate::intrinsic_api::is_intrinsic(tcx, callee) || helpers::is_drop_in_place(callee) {
+    if crate::api_ids::intrinsic_api::is_intrinsic(tcx, callee) || helpers::is_drop_in_place(callee) {
         return None;
     }
     let key = (callee, depth);

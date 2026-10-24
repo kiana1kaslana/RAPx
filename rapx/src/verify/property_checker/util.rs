@@ -4,8 +4,8 @@
 //! `smt_check` "negate and prove" primitive, and size/byte-width utilities used
 //! by every checker family.
 
+use crate::api_ids::other_api;
 use crate::helpers::mir_utils;
-use crate::other_api;
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::contract::{
     ContractExpr, ContractPlace, ContractProjection, NumericBinOp, PlaceBase, Property,
@@ -153,15 +153,16 @@ impl PropertyChecker {
                         return Some(val.clone());
                     }
                     if let Some(base_val) = vm_state.local_value(base_local)
-                        && base_val.is_pointer() {
-                            return Some(VmValue {
-                                z3_term: base_val.z3_term.clone(),
-                                ty: base_val.ty,
-                                provenance: base_val.provenance.clone(),
-                                facts: base_val.facts.clone(),
-                                source: base_val.source.field_offset_only(),
-                            });
-                        }
+                        && base_val.is_pointer()
+                    {
+                        return Some(VmValue {
+                            z3_term: base_val.z3_term.clone(),
+                            ty: base_val.ty,
+                            provenance: base_val.provenance.clone(),
+                            facts: base_val.facts.clone(),
+                            source: base_val.source.field_offset_only(),
+                        });
+                    }
                     return None;
                 }
             }
@@ -179,28 +180,29 @@ impl PropertyChecker {
                         let (ref place, ref rval) = **assign;
                         if let rustc_middle::mir::Rvalue::Aggregate(_, operands) = rval
                             && place.local == base_local
-                                && let Some(operand) =
-                                    operands.get(rustc_abi::FieldIdx::from_usize(field_path[0]))
-                                {
-                                    let val = vm_state.value_of_operand(operand);
-                                    if field_path.len() == 1 {
-                                        return Some(val);
-                                    }
-                                }
+                            && let Some(operand) =
+                                operands.get(rustc_abi::FieldIdx::from_usize(field_path[0]))
+                        {
+                            let val = vm_state.value_of_operand(operand);
+                            if field_path.len() == 1 {
+                                return Some(val);
+                            }
+                        }
                     }
                 }
             }
         }
         if let Some(base_val) = vm_state.local_value(base_local)
-            && let Some(ref prov) = base_val.provenance {
-                return Some(VmValue {
-                    z3_term: base_val.z3_term.clone(),
-                    ty: base_val.ty,
-                    provenance: Some(prov.clone()),
-                    facts: base_val.facts.clone(),
-                    source: base_val.source.field_offset_only(),
-                });
-            }
+            && let Some(ref prov) = base_val.provenance
+        {
+            return Some(VmValue {
+                z3_term: base_val.z3_term.clone(),
+                ty: base_val.ty,
+                provenance: Some(prov.clone()),
+                facts: base_val.facts.clone(),
+                source: base_val.source.field_offset_only(),
+            });
+        }
         None
     }
 
@@ -217,14 +219,14 @@ impl PropertyChecker {
         if matches!(
             value.ty.kind(),
             rustc_middle::ty::TyKind::Ref(..) | rustc_middle::ty::TyKind::RawPtr(..)
-        )
-            && let Some(owner) = vm_state.find_local_by_address(&value.z3_term)
-                && let Some(heap_field) = vm_state.owner_ptr_field(owner)
-                    && heap_field.is_pointer() {
-                        value.z3_term = heap_field.z3_term.clone();
-                        value.provenance = heap_field.provenance.clone();
-                        value.facts = heap_field.facts.clone();
-                    }
+        ) && let Some(owner) = vm_state.find_local_by_address(&value.z3_term)
+            && let Some(heap_field) = vm_state.owner_ptr_field(owner)
+            && heap_field.is_pointer()
+        {
+            value.z3_term = heap_field.z3_term.clone();
+            value.provenance = heap_field.provenance.clone();
+            value.facts = heap_field.facts.clone();
+        }
         value
     }
 
@@ -308,9 +310,10 @@ impl PropertyChecker {
                     }
                 }
                 if let Some(term_zero) = v.z3_term.simplify().as_u64()
-                    && term_zero == 0 {
-                        return true;
-                    }
+                    && term_zero == 0
+                {
+                    return true;
+                }
                 false
             }
             None => true,
@@ -584,8 +587,7 @@ impl PropertyChecker {
                 .try_to_target_usize(vm_state.tcx)
                 .map(|value| value as u128)
                 .or_else(|| {
-                    mir_utils::const_int_from_debug(&format!("{actual_const:?}"))
-                        .map(|v| v as u128)
+                    mir_utils::const_int_from_debug(&format!("{actual_const:?}")).map(|v| v as u128)
                 }),
             _ => None,
         }
@@ -648,13 +650,14 @@ impl PropertyChecker {
                     );
                     if size == 0
                         && let Some(ck) = checkpoint
-                            && let Some(_callee) = ck.callee
-                                && !self.is_caller_type_param(vm_state, *ty) {
-                                    let resolved = self.instantiate_callsite_ty(vm_state, ck, *ty);
-                                    if resolved != *ty {
-                                        size = vm_state.size_of_ty(resolved);
-                                    }
-                                }
+                        && let Some(_callee) = ck.callee
+                        && !self.is_caller_type_param(vm_state, *ty)
+                    {
+                        let resolved = self.instantiate_callsite_ty(vm_state, ck, *ty);
+                        if resolved != *ty {
+                            size = vm_state.size_of_ty(resolved);
+                        }
+                    }
                 }
                 if size > 0 {
                     Some(Int::from_u64(vm_state.z3_ctx, size))
@@ -716,35 +719,59 @@ impl PropertyChecker {
                     }
                 }
             }
-            ContractExpr::Len(inner) => {
+            ContractExpr::Len(inner, method) => {
+                if let Some(method) = method
+                    && let Some(receiver) =
+                        self.eval_contract_expr_to_value(vm_state, checkpoint, inner)
+                    && let Some(result) = vm_state.cached_method_result(*method, &receiver)
+                {
+                    return Some(result);
+                }
+                if method.is_some_and(|id| !crate::api_classify::is_len(Some(id))) {
+                    return None;
+                }
                 if let Some(ck) = checkpoint
-                    && let Some(term) = self.try_iter_len_from_fields(vm_state, ck, inner) {
-                        return Some(term);
-                    }
+                    && let Some(term) = self.try_iter_len_from_fields(vm_state, ck, inner)
+                {
+                    return Some(term);
+                }
                 let val = self.eval_contract_expr_to_value(vm_state, checkpoint, inner)?;
+                let receiver_ty = mir_utils::pointee_ty(val.ty).unwrap_or(val.ty);
+                if let rustc_middle::ty::TyKind::Adt(adt, _) = receiver_ty.kind()
+                    && adt.did().as_local().is_some()
+                {
+                    return None;
+                }
                 // A struct (e.g. `NodeRef`) whose `len()` reads `(*x.field).len`
                 // through a `NonNull` field.
                 if let crate::verify::contract::ContractExpr::Place(cp) = &**inner
-                    && let Some(field_path) = cp.plain_field_path() {
-                        let base_local =
-                            match cp.base {
-                                PlaceBase::Return => Some(Local::from_usize(0)),
-                                PlaceBase::Local(n) => Some(Local::from_usize(n)),
-                                PlaceBase::Arg(n) => checkpoint
-                                    .and_then(|ck| ck.args.get(n))
-                                    .and_then(|op| match op {
-                                        Operand::Copy(p) | Operand::Move(p) => Some(p.local),
-                                        _ => None,
-                                    }),
-                            };
-                        if let Some(local) = base_local
-                            && let Some(len) =
-                                vm_state.try_struct_nn_len_field(local, &field_path, val.ty)
-                            {
-                                return Some(len);
-                            }
+                    && let Some(field_path) = cp.plain_field_path()
+                {
+                    let base_local = match cp.base {
+                        PlaceBase::Return => Some(Local::from_usize(0)),
+                        PlaceBase::Local(n) => Some(Local::from_usize(n)),
+                        PlaceBase::Arg(n) => {
+                            checkpoint
+                                .and_then(|ck| ck.args.get(n))
+                                .and_then(|op| match op {
+                                    Operand::Copy(p) | Operand::Move(p) => Some(p.local),
+                                    _ => None,
+                                })
+                        }
+                    };
+                    if let Some(local) = base_local
+                        && let Some(len) =
+                            vm_state.try_struct_nn_len_field(local, &field_path, val.ty)
+                    {
+                        return Some(len);
                     }
+                }
                 vm_state.len_from_value(&val)
+            }
+            ContractExpr::IsEmpty(inner, method) => {
+                let method = (*method)?;
+                let receiver = self.eval_contract_expr_to_value(vm_state, checkpoint, inner)?;
+                vm_state.cached_method_result(method, &receiver)
             }
             ContractExpr::ConstParam { index, name: _ } => self
                 .instantiate_callsite_const(vm_state, checkpoint?, *index)
@@ -862,10 +889,11 @@ impl PropertyChecker {
             PlaceBase::Local(n) => {
                 if field_path.is_empty()
                     && let Some(ck) = checkpoint
-                        && let Some(op) = local_param_operand(vm_state, ck, n)
-                            && let Some(v) = self.eval_contract_operand(vm_state, op) {
-                                return Some(v);
-                            }
+                    && let Some(op) = local_param_operand(vm_state, ck, n)
+                    && let Some(v) = self.eval_contract_operand(vm_state, op)
+                {
+                    return Some(v);
+                }
                 Some(Local::from_usize(n))
             }
         };
@@ -892,21 +920,22 @@ impl PropertyChecker {
                 if let Ok(val) = c
                     .const_
                     .eval(vm_state.tcx, typing_env, rustc_span::DUMMY_SP)
-                    && let Some(scalar) = val.try_to_scalar_int() {
-                        let v = scalar.to_bits(scalar.size()) as u64;
-                        if v == 0
-                            && (const_text.contains("AlignOf")
-                                || const_text.contains("SizeOf")
-                                || const_text.contains("min_align_of")
-                                || const_text.contains("min_size_of"))
-                        {
-                            // Generic AlignOf/SizeOf may evaluate to 0 but
-                            // are always >= 1 for non-ZST types. Fall through
-                            // to the debug text path below.
-                        } else {
-                            return Some(Int::from_u64(vm_state.z3_ctx, v));
-                        }
+                    && let Some(scalar) = val.try_to_scalar_int()
+                {
+                    let v = scalar.to_bits(scalar.size()) as u64;
+                    if v == 0
+                        && (const_text.contains("AlignOf")
+                            || const_text.contains("SizeOf")
+                            || const_text.contains("min_align_of")
+                            || const_text.contains("min_size_of"))
+                    {
+                        // Generic AlignOf/SizeOf may evaluate to 0 but
+                        // are always >= 1 for non-ZST types. Fall through
+                        // to the debug text path below.
+                    } else {
+                        return Some(Int::from_u64(vm_state.z3_ctx, v));
                     }
+                }
                 mir_utils::const_int_from_debug(&const_text)
                     .map(|v| Int::from_u64(vm_state.z3_ctx, v))
             }
@@ -937,7 +966,8 @@ impl PropertyChecker {
             for stmt in &block.statements {
                 if let StatementKind::Assign(assign) = &stmt.kind {
                     let (dest, rvalue) = &**assign;
-                    if dest.local == local && dest.projection.is_empty()
+                    if dest.local == local
+                        && dest.projection.is_empty()
                         && let Rvalue::Use(src_op, ..) = rvalue
                     {
                         return self.trace_value(vm_state, src_op);

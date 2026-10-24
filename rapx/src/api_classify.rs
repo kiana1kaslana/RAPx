@@ -9,11 +9,13 @@
 //!
 //! Every classifier takes a `DefId` — `fn(Option<DefId>) -> bool` for callee
 //! matching, or `fn(DefId) -> bool` for ADT *type* matching — and answers via
-//! exact identities from [`crate::intrinsic_api`] and [`crate::other_api`]
+//! exact identities from [`crate::api_ids::intrinsic_api`],
+//! [`crate::api_ids::nomir_api`], and [`crate::api_ids::other_api`]
 //! rather than substring-matching a `def_path_str`.
 
-use crate::intrinsic_api;
-use crate::other_api;
+use crate::api_ids::intrinsic_api;
+use crate::api_ids::nomir_api;
+use crate::api_ids::other_api;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::Ty;
 use rustc_middle::ty::TyCtxt;
@@ -35,13 +37,13 @@ pub fn is_ownership_reconstruction(callee: Option<DefId>) -> bool {
         callee,
         &[
             other_api::box_from_raw(),
-            other_api::cstring_from_raw(),
+            nomir_api::cstring_from_raw(),
             other_api::arc_from_raw(),
             other_api::rc_from_raw(),
             other_api::box_from_raw_in(),
             other_api::arc_from_raw_in(),
             other_api::rc_from_raw_in(),
-            other_api::cstring_from_vec_with_nul_unchecked(),
+            nomir_api::cstring_from_vec_with_nul_unchecked(),
         ],
     )
 }
@@ -405,9 +407,8 @@ pub fn is_mem_copy_or_write(callee: Option<DefId>) -> bool {
 // ── Queries and unwrap ────────────────────────────────────────────
 
 /// Whether `callee` is a `len` query method. Matched by `DefId` via
-/// [`crate::other_api::len_fns`], which resolves every `::len` `fn_def` in the std
-/// crates *and* the local crate — so the std-challenge suites' re-implemented
-/// `len` methods are modelled too, without substring-matching a `def_path_str`.
+/// [`crate::api_ids::other_api::len_fns`], which resolves every `::len` `fn_def` in the std
+/// crates without matching same-named methods in the analyzed crate.
 pub fn is_len(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::len_fns())
 }
@@ -416,8 +417,7 @@ pub fn is_len(callee: Option<DefId>) -> bool {
 
 /// Whether `callee` is a `from_raw_parts` constructor (`slice`/`str`/`ptr`/
 /// `String`/`Vec`/`NonNull`). Matched by `DefId` via
-/// [`crate::other_api::from_raw_parts_fns`] (resolved from `fn_defs()`, including
-/// local re-implementations), instead of substring-matching `def_path_str`.
+/// [`crate::api_ids::other_api::from_raw_parts_fns`] in the standard-library crates.
 pub fn is_from_raw_parts(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::from_raw_parts_fns())
 }
@@ -448,7 +448,7 @@ pub fn is_cstr_unchecked_constructor(callee: Option<DefId>) -> bool {
         callee,
         &[
             other_api::cstr_from_bytes_with_nul_unchecked(),
-            other_api::cstring_from_vec_with_nul_unchecked(),
+            nomir_api::cstring_from_vec_with_nul_unchecked(),
         ],
     )
 }
@@ -482,13 +482,8 @@ pub fn is_vec_from_box(callee: Option<DefId>) -> bool {
 pub fn is_exchange_malloc(callee: Option<DefId>) -> bool {
     callee.is_some_and(|c| other_api::exchange_malloc() == Some(c))
 }
-/// `slice::to_vec` (`<[T]>::to_vec` via `to_vec_in::ConvertVec::to_vec`) —
-/// allocates a fresh buffer and copies the slice's elements.
-pub fn is_slice_to_vec(callee: Option<DefId>) -> bool {
-    other_api::matches_any(callee, &[other_api::slice_to_vec()])
-}
 /// `Vec::with_capacity` — matched by `DefId` via
-/// [`crate::other_api::with_capacity_fns`].
+/// [`crate::api_ids::other_api::with_capacity_fns`].
 pub fn is_vec_with_capacity(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::with_capacity_fns())
 }
@@ -512,7 +507,7 @@ pub fn is_into_boxed_slice(callee: Option<DefId>) -> bool {
 pub fn is_ownership_transfer(callee: Option<DefId>) -> bool {
     let Some(callee) = callee else { return false };
     is_ownership_reconstruction(Some(callee))
-        && !other_api::contains(&[other_api::cstring_from_vec_with_nul_unchecked()], callee)
+        && !other_api::contains(&[nomir_api::cstring_from_vec_with_nul_unchecked()], callee)
 }
 
 pub fn is_vec_ownership_transfer(callee: Option<DefId>) -> bool {
@@ -629,7 +624,7 @@ pub fn is_benign_origin_use(callee: Option<DefId>) -> bool {
 // ── ADT type-name classifiers ─────────────────────────────────────
 // *Shape* recognizers used by the VM to model repr(transparent) wrappers and
 // fixed field layouts (`Vec` = ptr/cap/len, `slice::Iter` = ptr/end, …).
-// Matched by `DefId` (resolved in [`crate::other_api`]).
+// Matched by `DefId` (resolved in [`crate::api_ids::other_api`]).
 
 pub fn is_std_vec(def_id: DefId) -> bool {
     other_api::vec_types().contains(&def_id)
@@ -672,7 +667,7 @@ pub fn is_std_ordering(def_id: DefId) -> bool {
 // ── Arithmetic / collection-operation classifiers ─────────────────
 // Matched by `DefId` via [`other_api::OP_FNS`] (resolved from `fn_defs()`).
 // These were previously name-based in the call-summary registry; see
-// [`crate::other_api`] for the exact method-name patterns each group collects.
+// [`crate::api_ids::other_api`] for the exact method-name patterns each group collects.
 
 pub fn is_integer_wrapping_sub_method(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::integer_wrapping_sub_fns())
@@ -688,11 +683,8 @@ pub fn is_split_at(callee: Option<DefId>) -> bool {
 }
 
 // ── Open-ended operation classifiers ──────────────────────────────
-// These match the std-challenge suites' local `_ext` re-implementations and
-// generic trait-method patterns. They cannot be tied to a *closed* hard-coded
-// set, so they are resolved by name-scanning `fn_defs()` in [`crate::other_api`]
-// (which also collects the local crate's re-implementations) and matched by
-// `DefId` like the other classifiers.
+// These match standard-library methods through the name-scanned `fn_defs()`
+// groups in [`crate::api_ids::other_api`].
 
 pub fn is_align_to_local(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::align_to_local_fns())

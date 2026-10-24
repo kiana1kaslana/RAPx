@@ -62,6 +62,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// switch to the callee body, and bind the caller's argument locals to the
     /// callee's parameters.
     fn handle_callee_entry(&mut self, callee: DefId, arg_locals: &[usize], arg_consts: &[(usize, u64)], arg_field_offsets: &[usize]) {
+        let method_call = arg_locals.first().and_then(|arg| {
+            self.local_value(Local::from_usize(*arg))
+                .and_then(|receiver| self.begin_method_call(callee, receiver, Some(Local::from_usize(*arg))))
+        });
+        self.active_method_calls.push(method_call);
         let arg_referents: Vec<Option<Local>> = arg_locals
             .iter()
             .map(|arg| {
@@ -173,6 +178,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
      /// Exit an inlined callee: capture the callee's return value, restore the
      /// caller context, and write the return value to the caller's destination.
     fn handle_callee_exit(&mut self, dest: usize) {
+        let method_call = self.active_method_calls.pop().flatten();
         let ret = self.local_value(Local::from_usize(0)).cloned();
         let ret_fields: Vec<(Vec<usize>, VmValue<'z3, 'tcx>)> = self
             .field_paths(Local::from_usize(0))
@@ -194,7 +200,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .pop()
             .unwrap_or_default();
         self.replay_deferred_writes(writes);
-        if let Some(mut v) = ret {
+        if let Some(mut v) = ret.clone() {
             let dest_ty = self.body().local_decls[Local::from_usize(dest)].ty;
             v.ty = dest_ty;
             // Infer facts: a non-null provenance with offset 0 means the
@@ -218,6 +224,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         for (fields, fv) in ret_fields {
             self.set_field_value(Local::from_usize(dest), fields, fv);
         }
+        self.finish_method_call(method_call, ret.as_ref());
     }
 
     /// The slice/array element count for an allocation: the materialized

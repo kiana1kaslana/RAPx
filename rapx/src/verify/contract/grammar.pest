@@ -38,10 +38,11 @@ arg = { expr }
 
 // ── Expression layer ────────────────────────────────────────────────────────
 
+expr_input  = { SOI ~ expr ~ EOI }
 expr        = { if_expr | not_is_empty | cmp }
 if_expr     = { "if" ~ cond ~ "{" ~ expr ~ "}" ~ "else" ~ "{" ~ expr ~ "}" }
 cond        = { not_is_empty | cmp }
-not_is_empty = { "!" ~ base ~ ".is_empty" ~ "()" }
+not_is_empty = { "!" ~ base ~ "." ~ "is_empty" ~ "(" ~ ")" }
 cmp         = { bit_or ~ (relop ~ bit_or)? }
 bit_or      = { bit_xor ~ (bor ~ bit_xor)* }
 bit_xor     = { bit_and ~ (bxor ~ bit_and)* }

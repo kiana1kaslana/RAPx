@@ -3,13 +3,12 @@
 #[macro_use]
 pub mod utils;
 pub mod analysis;
+pub(crate) mod api_ids;
 pub(crate) mod api_classify;
 pub mod check;
 pub mod cli;
 pub(crate) mod compat;
 pub(crate) mod graphs;
-pub(crate) mod intrinsic_api;
-pub(crate) mod other_api;
 pub(crate) mod limit;
 pub mod help;
 pub(crate) mod helpers;
@@ -146,8 +145,7 @@ impl Callbacks for RapCallback {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         rap_trace!("Execute after_analysis() of compiler callbacks");
         rustc_public::rustc_internal::run(tcx, || {
-            other_api::init(tcx);
-            intrinsic_api::init(tcx);
+            api_ids::init(tcx);
             if self.is_building_test_crate() {
                 start_analyzer(tcx, self);
             } else {

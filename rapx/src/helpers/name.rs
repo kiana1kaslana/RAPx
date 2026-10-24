@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::sync::OnceLock;
 use syn::Expr;
 
-use crate::other_api;
+use crate::api_ids::other_api;
 
 /// The internal `crate::module::…` path of a `DefId` (e.g. `alloc::rcs::rc::Rc`),
 /// normalised from its `def_path_str` debug form.  Used for display/debug and as

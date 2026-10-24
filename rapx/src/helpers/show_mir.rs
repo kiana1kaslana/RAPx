@@ -1,5 +1,5 @@
 use crate::compat::FxHashSet;
-use crate::other_api::is_drop_fn;
+use crate::api_ids::other_api::is_drop_fn;
 use crate::helpers::draw_dot::render_dot_string;
 use crate::helpers::name::get_cleaned_def_path_name;
 use colorful::{Color, Colorful};

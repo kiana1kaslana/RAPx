@@ -1,4 +1,4 @@
-//! Known `core`/`std`/`alloc` API identities.
+//! Known `core`/`std`/`alloc` API identities, regardless of MIR availability.
 //!
 //! The path table resolves well-known items to [`DefId`]s. Classifiers in
 //! [`crate::api_classify`] combine those identities into operations.
@@ -375,10 +375,8 @@ pub fn negative_type_defs(name: &str) -> &'static [DefId] {
 /// Resolved `DefId`s of std *methods* that are matched by *generic name* rather
 /// than a fixed `known_items!` path (e.g. `len`, `capacity`, `::abs`,
 /// `::checked_add`, `::split_at`, `Iterator::position`, …). Each group collects
-/// every `fn_def` — from the std crates *and* the local crate (the
-/// std-challenge suites re-implement `Vec`/slice-like types and their methods) —
-/// whose name matches the group's pattern. Callers match a call-site `DefId`
-/// against these sets via [`contains`].
+/// matching `fn_def`s from `core`, `std`, and `alloc`. Callers match a call-site
+/// `DefId` against these sets via [`contains`].
 static METHODS: OnceLock<Methods> = OnceLock::new();
 
 struct Methods {
@@ -450,7 +448,7 @@ fn init_methods(tcx: TyCtxt) -> Methods {
 
     for krate in std::iter::once(rustc_public::local_crate())
         .chain(rustc_public::external_crates())
-        .filter(|k| k.is_local || ["core", "std", "alloc"].iter().any(|n| *n == k.name))
+        .filter(|k| ["core", "std", "alloc"].iter().any(|n| *n == k.name))
     {
         for fn_def in krate.fn_defs() {
             let name = fn_def.name();
@@ -658,19 +656,17 @@ macro_rules! method_fns {
 
 method_fns! {
     /// `len` query methods (`slice::len`, `str::len`, `Vec::len`, `String::len`,
-    /// pointer-slice `len`, and any local re-implementation).
+    /// and pointer-slice `len`).
     len_fns => len_fns,
-    /// `from_raw_parts` constructors (`slice`/`str`/`ptr`/`NonNull`/`Vec`/`String`
-    /// and local re-implementations).
+    /// `from_raw_parts` constructors (`slice`/`str`/`ptr`/`NonNull`/`Vec`/`String`).
     from_raw_parts_fns => from_raw_parts_fns,
-    /// `from_raw_parts_mut` constructors (`slice`/`ptr`/`NonNull` and local
-    /// re-implementations).
+    /// `from_raw_parts_mut` constructors (`slice`/`ptr`/`NonNull`).
     from_raw_parts_mut_fns => from_raw_parts_mut_fns,
     /// `*const T::with_metadata_of` / `*mut T::with_metadata_of` (used by
     /// `byte_add`/`byte_offset`).
     with_metadata_of_fns => with_metadata_of_fns,
     integer_wrapping_sub_fns => integer_wrapping_sub_fns,
-    /// `Vec::with_capacity` (and local re-implementations).
+    /// `Vec::with_capacity`.
     with_capacity_fns => with_capacity_fns,
     /// `Box::new` / `new_in` / `new_uninit` / `new_uninit_in` (and `try_` variants).
     box_alloc_ctors => box_alloc_ctors,
@@ -842,16 +838,6 @@ macro_rules! known_items {
 // For no_std crates, function paths start from core instead of std.
 // cc https://github.com/Artisan-Lab/RAPx/issues/190
 known_items! {
-    call_mut: &[
-        "std::ops::FnMut::call_mut",
-        "core::ops::FnMut::call_mut",
-        "std::ops::function::FnMut::call_mut",
-        "core::ops::function::FnMut::call_mut"
-    ],
-    clone: &[
-        "std::clone::Clone::clone",
-        "core::clone::Clone::clone"
-    ],
     copy_from: &[
         "std::ptr::mut_ptr::<impl *mut T>::copy_from",
         "core::ptr::mut_ptr::<impl *mut T>::copy_from"
@@ -1172,12 +1158,6 @@ known_items! {
         "std::ffi::c_str::CStr::from_bytes_with_nul_unchecked",
         "core::ffi::c_str::CStr::from_bytes_with_nul_unchecked"
     ],
-    cstring_from_vec_with_nul_unchecked: &[
-        "std::ffi::CString::from_vec_with_nul_unchecked",
-        "alloc::ffi::CString::from_vec_with_nul_unchecked",
-        "std::ffi::c_str::CString::from_vec_with_nul_unchecked",
-        "alloc::ffi::c_str::CString::from_vec_with_nul_unchecked"
-    ],
     vec_push: &[
         "std::vec::Vec::<T, A>::push",
         "alloc::vec::Vec::<T, A>::push"
@@ -1221,12 +1201,6 @@ known_items! {
     box_from_raw: &[
         "std::boxed::Box::<T>::from_raw",
         "alloc::boxed::Box::<T>::from_raw"
-    ],
-    cstring_from_raw: &[
-        "std::ffi::CString::from_raw",
-        "alloc::ffi::CString::from_raw",
-        "std::ffi::c_str::CString::from_raw",
-        "alloc::ffi::c_str::CString::from_raw"
     ],
     arc_from_raw: &[
         "std::sync::Arc::<T>::from_raw",
@@ -1297,10 +1271,6 @@ known_items! {
     slice_into_vec: &[
         "std::slice::<impl [T]>::into_vec",
         "alloc::slice::<impl [T]>::into_vec"
-    ],
-    slice_to_vec: &[
-        "std::slice::<impl [T]>::to_vec_in::ConvertVec::to_vec",
-        "alloc::slice::<impl [T]>::to_vec_in::ConvertVec::to_vec"
     ],
     #[cfg(rapx_ge_99)]
     box_assume_init_into_vec_unsafe: &[

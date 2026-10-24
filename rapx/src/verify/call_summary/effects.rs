@@ -15,9 +15,10 @@ use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 use super::{
     BoundedArithmeticOp, CallDependencySummary, CallEffect, CallEffectSummary, OverflowOp,
 };
-use crate::intrinsic_api;
+use crate::api_ids::{intrinsic_api, nomir_api};
+use crate::api_ids::other_api;
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
-use crate::{api_classify, other_api};
+use crate::api_classify;
 
 // ── Context for effect builders ────────────────────────────────────────
 
@@ -96,18 +97,15 @@ static REGISTRY: &[Entry] = &[
     ED!(intrinsic_api::is_raw_eq, eff_raw_eq),
     ED!(intrinsic_api::is_exact_div, eff_exact_div),
     ED!(api_classify::is_intrinsic_pure_opaque, eff_opaque_return),
-    // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
+    // ── Allocation and capacity effects ─────────────────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
     ED!(api_classify::is_box_alloc_ctor, eff_box_alloc),
     ED!(api_classify::is_exchange_malloc, eff_exchange_malloc),
     ED!(api_classify::is_vec_from_box, eff_vec_from_box),
     // `slice::to_vec` copies the slice; model like `into_vec` so
     // `String::from(&str)`'s Vec buffer gets provenance.
-    ED!(api_classify::is_slice_to_vec, eff_vec_from_box),
-    ED!(
-        api_classify::is_vec_with_capacity,
-        eff_new_allocation_from_cap
-    ),
+    ED!(nomir_api::is_slice_to_vec, eff_vec_from_box),
+    ED!(api_classify::is_vec_with_capacity, eff_new_allocation_from_cap),
     ED!(api_classify::is_into_boxed_slice, eff_box_from_vec),
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────

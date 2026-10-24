@@ -132,12 +132,14 @@ pub(crate) fn display_expr_user_friendly<'tcx>(
         ContractExpr::Place(p) => p.display_user_friendly(tcx, struct_def_id, fn_def_id),
         ContractExpr::SizeOf(ty) => format!("size_of({ty})"),
         ContractExpr::AlignOf(ty) => format!("align_of({ty})"),
-        ContractExpr::Len(e) => {
-            format!(
-                "len({})",
-                display_expr_user_friendly(e, tcx, struct_def_id, fn_def_id)
-            )
-        }
+        ContractExpr::Len(e, _) => format!(
+            "{}.len()",
+            display_expr_user_friendly(e, tcx, struct_def_id, fn_def_id)
+        ),
+        ContractExpr::IsEmpty(e, _) => format!(
+            "{}.is_empty()",
+            display_expr_user_friendly(e, tcx, struct_def_id, fn_def_id)
+        ),
         ContractExpr::IndexAccess { slice, index } => {
             format!(
                 "{}[{}]",
@@ -241,11 +243,11 @@ impl<'tcx> Property<'tcx> {
         if matches!(self.kind(), Some(PropertyKind::InBound))
             && let Some(PropertyArg::Expr(ContractExpr::IndexAccess { slice, index })) =
                 self.args().first()
-            {
-                let slice_str = display_expr_user_friendly(slice, tcx, struct_def_id, fn_def_id);
-                let index_str = display_expr_user_friendly(index, tcx, struct_def_id, fn_def_id);
-                return format!("{}({}, {})", kind_str, slice_str, index_str);
-            }
+        {
+            let slice_str = display_expr_user_friendly(slice, tcx, struct_def_id, fn_def_id);
+            let index_str = display_expr_user_friendly(index, tcx, struct_def_id, fn_def_id);
+            return format!("{}({}, {})", kind_str, slice_str, index_str);
+        }
 
         if matches!(self.kind(), Some(PropertyKind::ValidNum))
             && let Some(PropertyArg::Predicates(preds)) = self.args().first()

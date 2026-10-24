@@ -11,10 +11,16 @@ use crate::analysis::safety_flow::root::{
 };
 use crate::cli::VerifyMode;
 use crate::compat::FxHashMap;
-use crate::verify::checkpoint::{collect_raw_ptr_deref_info, collect_static_mut_access_info};
 use crate::helpers::name::short_fn_name;
+use crate::verify::checkpoint::{collect_raw_ptr_deref_info, collect_static_mut_access_info};
+#[cfg(rapx_attr_requires_ext)]
+use rustc_ast::attr::AttributeExt;
+#[cfg(rapx_has_attr_ir)]
+use rustc_attr_ir::Attribute;
 #[cfg(rapx_has_attr_ir)]
 use rustc_attr_ir::LangItem;
+#[cfg(not(rapx_has_attr_ir))]
+use rustc_hir::Attribute;
 #[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
 use rustc_hir::LangItem;
 #[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
@@ -24,12 +30,6 @@ use rustc_hir::{
     def_id::{DefId, LocalDefId},
     intravisit::{FnKind, Visitor},
 };
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::Attribute;
-#[cfg(rapx_attr_requires_ext)]
-use rustc_ast::attr::AttributeExt;
-#[cfg(not(rapx_has_attr_ir))]
-use rustc_hir::Attribute;
 use rustc_middle::{hir::nested_filter, ty::Instance, ty::TyCtxt};
 use rustc_span::Span;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -43,11 +43,11 @@ use super::{
     type_invariants::build_type_invariants_from_params,
 };
 use crate::helpers::fn_info::get_adt_def_id_by_adt_method;
-use crate::verify::checkpoint::{Checkpoint, collect_unsafe_callsites};
 use crate::helpers::mir_utils::{
     collect_return_block_indices, has_rapx_verify_attr, is_std_crate_def_id, is_trait_unsafe,
     resolve_impl_self_ty_def_id,
 };
+use crate::verify::checkpoint::{Checkpoint, collect_unsafe_callsites};
 
 /// A list of parsed `requires` contracts.
 pub(crate) type FnContracts<'tcx> = Vec<Property<'tcx>>;
@@ -258,9 +258,10 @@ fn call_arg_to_outer_param(
 ) -> Option<usize> {
     let local = match op {
         rustc_middle::mir::Operand::Copy(p) | rustc_middle::mir::Operand::Move(p)
-            if p.projection.is_empty() => {
-                p.local
-            }
+            if p.projection.is_empty() =>
+        {
+            p.local
+        }
         _ => return None,
     };
     let mut queue = VecDeque::from([local]);
@@ -281,8 +282,7 @@ fn call_arg_to_outer_param(
                 }
                 let source = match rvalue {
                     rustc_middle::mir::Rvalue::Use(
-                        rustc_middle::mir::Operand::Copy(p)
-                        | rustc_middle::mir::Operand::Move(p),
+                        rustc_middle::mir::Operand::Copy(p) | rustc_middle::mir::Operand::Move(p),
                         ..,
                     ) => p.local,
                     _ => continue,
@@ -321,9 +321,10 @@ fn rebind_property_to_args<'tcx>(
                 }
             }
             if let Some(place) = &mut atom.for_each
-                && !rebind_place(place, args, body) {
-                    ok = false;
-                }
+                && !rebind_place(place, args, body)
+            {
+                ok = false;
+            }
             ok
         }
         Property::And(and) => {
@@ -392,7 +393,9 @@ fn rebind_expr<'tcx>(
 ) -> bool {
     match expr {
         ContractExpr::Place(place) => rebind_place(place, args, body),
-        ContractExpr::Len(inner) => rebind_expr(inner, args, callee_args, body),
+        ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => {
+            rebind_expr(inner, args, callee_args, body)
+        }
         ContractExpr::SizeOf(ty) => {
             rebind_ty(ty, callee_args);
             true
@@ -434,9 +437,12 @@ fn rebind_ty<'tcx>(
     callee_args: &rustc_middle::ty::GenericArgs<'tcx>,
 ) {
     if let rustc_middle::ty::TyKind::Param(param) = ty.kind()
-        && let Some(actual) = callee_args.get(param.index as usize).and_then(|a| a.as_type()) {
-            *ty = actual;
-        }
+        && let Some(actual) = callee_args
+            .get(param.index as usize)
+            .and_then(|a| a.as_type())
+    {
+        *ty = actual;
+    }
 }
 
 fn rebind_place<'tcx>(
@@ -496,49 +502,47 @@ fn resolve_chain_contracts<'tcx>(
             continue;
         };
         if let rustc_middle::mir::TerminatorKind::Call { func, args, .. } = &terminator.kind
-            && let rustc_middle::mir::Operand::Constant(c) = func {
-                let rustc_middle::ty::TyKind::FnDef(sub_def_id, callee_args) =
-                    c.const_.ty().kind()
-                else {
-                    continue;
-                };
-                let sub_def_id = *sub_def_id;
+            && let rustc_middle::mir::Operand::Constant(c) = func
+        {
+            let rustc_middle::ty::TyKind::FnDef(sub_def_id, callee_args) = c.const_.ty().kind()
+            else {
+                continue;
+            };
+            let sub_def_id = *sub_def_id;
 
-                let fn_sig = tcx.fn_sig(sub_def_id).skip_binder();
-                if fn_sig.safety() != rustc_hir::Safety::Unsafe {
-                    continue;
-                }
-
-                let mut reqs = get_contract_from_annotation(tcx, sub_def_id);
-
-                // Try trait method requires.
-                if reqs.is_empty() {
-                    reqs = get_trait_method_requires(tcx, sub_def_id);
-                }
-
-                if reqs.is_empty() && is_std_crate_def_id(tcx, sub_def_id) {
-                    reqs = super::contract::json::query_json_contracts(tcx, sub_def_id);
-                }
-
-                if reqs.is_empty() {
-                    reqs = resolve_chain_contracts(tcx, sub_def_id, visited);
-                }
-
-                // Rebind the leaf callee's argument references onto this
-                // callee's parameters (e.g. `ptr::write`'s `self` -> this
-                // callee's pointer argument), dropping contracts whose arguments
-                // are internal temporaries that can't be restated on this
-                // callee's parameters. Also resolve the leaf's type parameters
-                // to the concrete type arguments passed at the call site.
-                let arg_operands: Vec<_> = args.iter().map(|a| a.node.clone()).collect();
-                #[cfg(rapx_ge_99)]
-                let callee_args = callee_args.skip_binder();
-                reqs.retain_mut(|req| {
-                    rebind_property_to_args(req, &arg_operands, callee_args, body)
-                });
-
-                contracts.extend(reqs);
+            let fn_sig = tcx.fn_sig(sub_def_id).skip_binder();
+            if fn_sig.safety() != rustc_hir::Safety::Unsafe {
+                continue;
             }
+
+            let mut reqs = get_contract_from_annotation(tcx, sub_def_id);
+
+            // Try trait method requires.
+            if reqs.is_empty() {
+                reqs = get_trait_method_requires(tcx, sub_def_id);
+            }
+
+            if reqs.is_empty() && is_std_crate_def_id(tcx, sub_def_id) {
+                reqs = super::contract::json::query_json_contracts(tcx, sub_def_id);
+            }
+
+            if reqs.is_empty() {
+                reqs = resolve_chain_contracts(tcx, sub_def_id, visited);
+            }
+
+            // Rebind the leaf callee's argument references onto this
+            // callee's parameters (e.g. `ptr::write`'s `self` -> this
+            // callee's pointer argument), dropping contracts whose arguments
+            // are internal temporaries that can't be restated on this
+            // callee's parameters. Also resolve the leaf's type parameters
+            // to the concrete type arguments passed at the call site.
+            let arg_operands: Vec<_> = args.iter().map(|a| a.node.clone()).collect();
+            #[cfg(rapx_ge_99)]
+            let callee_args = callee_args.skip_binder();
+            reqs.retain_mut(|req| rebind_property_to_args(req, &arg_operands, callee_args, body));
+
+            contracts.extend(reqs);
+        }
     }
 
     contracts
@@ -644,10 +648,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                 }
 
                 if requires.is_empty() && is_std {
-                    requires = super::contract::json::query_json_contracts(
-                        self.tcx,
-                        callee_def_id,
-                    );
+                    requires = super::contract::json::query_json_contracts(self.tcx, callee_def_id);
                 }
 
                 if requires.is_empty() && follow_chain {
@@ -655,11 +656,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                     // e.g. A -> B -> C -> D where B,C are unsafe unannotated,
                     // D has contracts; follow the chain to D and use its contracts.
                     let mut visited = HashSet::new();
-                    requires = resolve_chain_contracts(
-                        self.tcx,
-                        callee_def_id,
-                        &mut visited,
-                    );
+                    requires = resolve_chain_contracts(self.tcx, callee_def_id, &mut visited);
                     if requires.is_empty() {
                         // Only warn for genuinely `unsafe` callees: a safe
                         // function has no caller-side safety contract, so an
@@ -669,7 +666,8 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                         // intrinsics (`extern "rust-intrinsic"`) have no MIR
                         // and their safety is enforced by the type system, so
                         // they never carry a JSON contract either.
-                        let is_intrinsic = crate::intrinsic_api::is_intrinsic(self.tcx, callee_def_id);
+                        let is_intrinsic =
+                            crate::api_ids::intrinsic_api::is_intrinsic(self.tcx, callee_def_id);
                         let has_json_entry = is_std
                             && super::contract::json::get_std_contracts_from_json(
                                 self.tcx,
@@ -689,9 +687,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                                 self.tcx,
                                 callee_def_id,
                             );
-                            rap_warn!(
-                                "no safety contracts found for callee \"{path}\""
-                            );
+                            rap_warn!("no safety contracts found for callee \"{path}\"");
                         }
                     } else {
                         let path = crate::helpers::name::get_cleaned_def_path_name(
@@ -721,12 +717,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                         .as_local()
                         .is_some_and(|id| has_rapx_verify_attr(self.tcx, id));
                     if !has_json_entry && !is_verify_target {
-                        requires.push(Property::new(
-                            self.tcx,
-                            callee_def_id,
-                            "Unknown",
-                            &[],
-                        ));
+                        requires.push(Property::new(self.tcx, callee_def_id, "Unknown", &[]));
                     }
                 }
 
@@ -915,9 +906,10 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                     return true;
                 }
                 if let Ok(pkg_name) = std::env::var("CARGO_PKG_NAME")
-                    && pkg_name == *filter {
-                        return true;
-                    }
+                    && pkg_name == *filter
+                {
+                    return true;
+                }
                 false
             }
         }
@@ -939,30 +931,34 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
         // e.g. filter "slice" matches def_path "core::slice::raw::from_raw_parts"
         // after stripping "core::".
         if let Some(inner) = filter.strip_prefix(&crate_prefix)
-            && (def_path == inner || def_path.starts_with(&format!("{}::", inner))) {
-                return true;
-            }
+            && (def_path == inner || def_path.starts_with(&format!("{}::", inner)))
+        {
+            return true;
+        }
 
         // Try matching def_path after stripping the crate prefix.
         // e.g. filter "core::slice" matches def_path "slice::raw::from_raw_parts"
         // after stripping "core::" from the filter.
         if let Some(inner) = def_path.strip_prefix(&crate_prefix)
-            && (inner == *filter || inner.starts_with(&format!("{}::", filter))) {
-                return true;
-            }
+            && (inner == *filter || inner.starts_with(&format!("{}::", filter)))
+        {
+            return true;
+        }
 
         false
     }
 
     pub(crate) fn check_module_filter_result(&self) {
         if let Some(ref filter) = self.crate_filter
-            && !self.crate_filter_matched {
-                rap_warn!("[rapx::verify] --crate \"{filter}\" matched no targets");
-            }
+            && !self.crate_filter_matched
+        {
+            rap_warn!("[rapx::verify] --crate \"{filter}\" matched no targets");
+        }
         if let Some(ref filter) = self.module_filter
-            && !self.module_filter_matched {
-                rap_warn!("[rapx::verify] --module \"{filter}\" matched no functions in the crate");
-            }
+            && !self.module_filter_matched
+        {
+            rap_warn!("[rapx::verify] --module \"{filter}\" matched no functions in the crate");
+        }
     }
 }
 
@@ -1088,11 +1084,11 @@ impl<'tcx> Visitor<'tcx> for VerifyTargetCollector<'tcx> {
 
         if !matches!(self.mode, VerifyMode::Targeted)
             && !hir_contains_unsafe(self.tcx, body_id)
-                && !function_has_struct_invariant(self.tcx, def_id)
-                && !function_has_trait_ensurance(self.tcx, def_id)
-            {
-                return;
-            }
+            && !function_has_struct_invariant(self.tcx, def_id)
+            && !function_has_trait_ensurance(self.tcx, def_id)
+        {
+            return;
+        }
 
         if !self.crate_name_matches(def_id) {
             return;
@@ -1426,8 +1422,8 @@ impl<'tcx> PrepareTargets<'tcx> {
             return path_map;
         }
 
-        let tree = PathExtractor::new_with_instance(self.tcx, target.def_id, 0, target.instance)
-            .run();
+        let tree =
+            PathExtractor::new_with_instance(self.tcx, target.def_id, 0, target.instance).run();
 
         for checkpoint in &target.checkpoints {
             if let Some(callee_def_id) = checkpoint.callee {
@@ -1552,9 +1548,11 @@ fn build_type_atom<'tcx>(
     match entry.tag.as_str() {
         "ContainNoType" => {
             let mut args = vec![PropertyArg::Ty(self_ty)];
-            args.extend(entry.args[1..].iter().map(|s| {
-                PropertyArg::Ident(s.strip_prefix("ty:").unwrap_or(s).to_string())
-            }));
+            args.extend(
+                entry.args[1..]
+                    .iter()
+                    .map(|s| PropertyArg::Ident(s.strip_prefix("ty:").unwrap_or(s).to_string())),
+            );
             Some(Property::new_atom(PropertyKind::ContainNoType, args))
         }
         "NoRawPtr" => Some(Property::new_atom(

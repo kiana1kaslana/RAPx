@@ -4,7 +4,7 @@
 //! Before this module, each limit lived as a module-local `const`/`static` next
 //! to its consumer, so thresholds were duplicated (the `16`-block inline cap
 //! appeared in both the path graph and the runtime inliner) and hard to audit.
-//! Keeping them all here mirrors [`crate::other_api`]: one flat, well-documented
+//! Keeping them all here mirrors [`crate::api_ids::other_api`]: one flat, well-documented
 //! location where a knob can be found and tuned without grepping the crate.
 //!
 //! Everything is `pub(crate)`; names that would otherwise collide across
