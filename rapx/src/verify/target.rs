@@ -26,6 +26,8 @@ use rustc_hir::{
 };
 #[cfg(rapx_has_attr_ir)]
 use rustc_attr_ir::Attribute;
+#[cfg(rapx_attr_requires_ext)]
+use rustc_ast::attr::AttributeExt;
 #[cfg(not(rapx_has_attr_ir))]
 use rustc_hir::Attribute;
 use rustc_middle::{hir::nested_filter, ty::Instance, ty::TyCtxt};

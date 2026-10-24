@@ -1,5 +1,7 @@
 #[cfg(rapx_has_attr_ir)]
 use rustc_attr_ir::LangItem;
+#[cfg(rapx_attr_requires_ext)]
+use rustc_ast::attr::AttributeExt;
 #[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
 use rustc_hir::LangItem;
 #[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]

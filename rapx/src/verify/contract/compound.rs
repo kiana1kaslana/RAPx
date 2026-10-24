@@ -28,6 +28,8 @@ use std::sync::{OnceLock, RwLock};
 use rustc_hir::def_id::{CrateNum, LOCAL_CRATE};
 #[cfg(rapx_has_attr_ir)]
 use rustc_attr_ir::Attribute;
+#[cfg(rapx_attr_requires_ext)]
+use rustc_ast::attr::AttributeExt;
 #[cfg(not(rapx_has_attr_ir))]
 use rustc_hir::Attribute;
 use syn::Expr;
