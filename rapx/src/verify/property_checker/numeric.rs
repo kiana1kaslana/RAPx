@@ -171,15 +171,7 @@ impl PropertyChecker {
         self.inject_vm_div_axioms(vm_state, solver, &pred.rhs);
         self.inject_int_range_axioms(vm_state, solver, checkpoint, &pred.lhs);
         self.inject_int_range_axioms(vm_state, solver, checkpoint, &pred.rhs);
-        // For Ne(pred != 0): assert path conditions so that layout
-        // constants (e.g. align_of >= 1) constrain the solver,
-        // while regular parameters remain unconstrained.
         if matches!(pred.op, RelOp::Ne) && rhs.as_u64() == Some(0) {
-            // Concrete 0 from compiler-evaluated AlignOf/SizeOf for
-            // generic types — semantically always >= 1 for non-ZST.
-            if lhs.as_u64() == Some(0) {
-                return Some(CheckResult::ProvedByRule);
-            }
             vm_state.assert_all(solver);
         }
         solver.assert(&condition.not());

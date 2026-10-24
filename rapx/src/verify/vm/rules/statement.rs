@@ -7,6 +7,12 @@ use super::super::state::{Provenance, VmState, VmValue};
 use crate::helpers::mir_utils;
 use super::eval_rvalue;
 
+pub(crate) fn exec_assume<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, operand: &Operand<'tcx>) {
+    let value = state.value_of_operand(operand);
+    let zero = Int::from_u64(state.z3_ctx, 0);
+    state.constraints.assertions.push(value.z3_term._eq(&zero).not());
+}
+
 pub(crate) fn exec_assign<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     place: &Place<'tcx>,
@@ -14,7 +20,10 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
 ) {
     let source_place = match rvalue {
         Rvalue::Use(Operand::Copy(source) | Operand::Move(source), ..)
+        | Rvalue::WrapUnsafeBinder(Operand::Copy(source) | Operand::Move(source), _)
         | Rvalue::CopyForDeref(source) => Some(source),
+        #[cfg(rapx_rvalue_has_reborrow)]
+        Rvalue::Reborrow(_, _, source) => Some(source),
         _ => None,
     };
     let uninit_source = source_place
@@ -46,7 +55,7 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
         // destination's owning field (copied below) rather than the moved-out
         // source's (which is invalidated after the propagation).
         let moved_from = match rvalue {
-            Rvalue::Use(operand, ..) => match operand {
+            Rvalue::Use(operand, ..) | Rvalue::WrapUnsafeBinder(operand, _) => match operand {
                 Operand::Move(p) if p.projection.is_empty() => Some(p.local),
                 _ => None,
             },
@@ -91,7 +100,14 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             let only_field_deref = sp
                 .projection
                 .iter()
-                .all(|p| matches!(p.kind(), ProjectionElem::Field(..) | ProjectionElem::Deref));
+                .all(|p| {
+                    matches!(
+                        p.kind(),
+                        ProjectionElem::Field(..)
+                            | ProjectionElem::Deref
+                            | ProjectionElem::UnwrapUnsafeBinder(..)
+                    )
+                });
             if only_field_deref {
                 let keys: Vec<Vec<usize>> = state.field_paths(sp.local);
                 for k in keys {

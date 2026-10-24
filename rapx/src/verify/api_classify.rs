@@ -279,6 +279,26 @@ pub fn is_intrinsic_arith_offset(callee: Option<DefId>) -> bool {
     any_opt(callee, &[def_id::intrinsics_arith_offset()])
 }
 
+pub fn is_intrinsic_pure_opaque(callee: Option<DefId>) -> bool {
+    any_opt(
+        callee,
+        &[
+            def_id::intrinsics_float_to_int_unchecked(),
+            def_id::intrinsics_vtable_size(),
+            def_id::intrinsics_vtable_align(),
+            def_id::intrinsics_size_of_val(),
+        ],
+    )
+}
+
+pub fn is_intrinsic_raw_eq(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_raw_eq()])
+}
+
+pub fn is_intrinsic_exact_div(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_exact_div()])
+}
+
 // ── Layout constants ──────────────────────────────────────────────
 
 /// Whether `callee` is the compile-time layout constant `size_of::<T>()` or
@@ -336,6 +356,14 @@ pub fn is_ptr_copy(callee: Option<DefId>) -> bool {
             def_id::intrinsics_copy_nonoverlapping(),
         ],
     )
+}
+
+pub fn is_intrinsic_typed_swap_nonoverlapping(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_typed_swap_nonoverlapping()])
+}
+
+pub fn is_intrinsic_write_bytes(callee: Option<DefId>) -> bool {
+    any_opt(callee, &[def_id::intrinsics_write_bytes()])
 }
 
 /// Whether `callee` reads through a raw pointer or copies memory

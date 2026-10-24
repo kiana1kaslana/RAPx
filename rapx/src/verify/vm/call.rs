@@ -66,29 +66,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return;
         }
 
-        // `intrinsics::arith_offset` is the wrapping element-strided offset that
-        // stays a `Call` in MIR (it is not lowered to `BinOp::Offset`).  Model it
-        // with the same stride/provenance precision as `Offset`, deriving the
-        // stride from the base operand's (monomorphized) pointee type.
-        if api_classify::is_intrinsic_arith_offset(callee) {
-            if let (Some(base), Some(count)) = (args.first(), args.get(1)) {
-                let base_val = self.value_of_operand(&base.node);
-                let count_val = self.value_of_operand(&count.node);
-                let pointee = mir_utils::pointee_ty(base_val.ty);
-                let stride = pointee.and_then(|p| {
-                    let (_, s) = mir_utils::type_layout(
-                        self.tcx,
-                        self.current_frame.current_def_id,
-                        p,
-                    )?;
-                    if s == 0 && mir_utils::ty_has_type_param(p) {
-                        None
-                    } else {
-                        Some(s)
-                    }
-                });
-                self.apply_pointer_add(destination, &base_val, &count_val, stride, false);
-            }
+        if call_summary::effects::is_unmodeled_intrinsic(self.tcx, callee) {
+            self.unsupported_mir = true;
             return;
         }
 

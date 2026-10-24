@@ -699,6 +699,17 @@ pub(crate) fn eval_fresh_value<'z3, 'tcx>(
     VmValue::new(term, dest_ty)
 }
 
+pub(crate) fn eval_wrap_unsafe_binder<'z3, 'tcx>(
+    state: &mut VmState<'z3, 'tcx>,
+    dest_place: &Place<'tcx>,
+    operand: &Operand<'tcx>,
+) -> VmValue<'z3, 'tcx> {
+    let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
+    let mut value = state.value_of_operand(operand);
+    value.ty = dest_ty;
+    value
+}
+
 #[cfg(not(rapx_ge_95))]
 pub(crate) fn eval_nullary_op<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -722,19 +733,31 @@ pub(crate) fn eval_nullary_op<'z3, 'tcx>(
 pub(crate) fn eval_reborrow<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
+    source_place: &Place<'tcx>,
 ) -> VmValue<'z3, 'tcx> {
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
-    let term = state.fresh_int("reborrow");
-    VmValue {
-        z3_term: term,
-        ty: dest_ty,
-        provenance: None,
-        facts: ValueFacts {
-            non_null: true,
-            ..Default::default()
-        },
-        source: ValueSource::None,
+    let source_ty = source_place.ty(state.body(), state.tcx).ty;
+    let same_adt = matches!(
+        (source_ty.kind(), dest_ty.kind()),
+        (rustc_middle::ty::TyKind::Adt(source, _), rustc_middle::ty::TyKind::Adt(dest, _))
+            if source.did() == dest.did()
+    );
+    #[cfg(rapx_has_phantom_deref)]
+    let has_phantom_deref = source_place
+            .projection
+            .iter()
+            .any(|projection| matches!(projection.kind(), rustc_middle::mir::ProjectionElem::PhantomDeref));
+    #[cfg(not(rapx_has_phantom_deref))]
+    let has_phantom_deref = false;
+    if !same_adt || has_phantom_deref {
+        state.unsupported_mir = true;
+        return eval_fresh_value(state, dest_place, "reborrow");
     }
+    let mut value = state
+        .value_of_place(source_place)
+        .unwrap_or_else(|| eval_fresh_value(state, dest_place, "reborrow"));
+    value.ty = dest_ty;
+    value
 }
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {

@@ -798,7 +798,8 @@ impl<'tcx> PathGraph<'tcx> {
                 let cross_crate_trait_method = cross_crate
                     && is_trait_method
                     && tcx.is_mir_available(base_callee);
-                if !tcx.is_mir_available(callee)
+                if tcx.intrinsic(callee).is_some()
+                    || !tcx.is_mir_available(callee)
                     || expanded.contains(&callee)
                     || has_fn_sim
                     || is_ub_check
@@ -953,6 +954,12 @@ impl<'tcx> PathGraph<'tcx> {
                     }
                     TerminatorKind::Return => {
                         cb.add_next(target);
+                    }
+                    TerminatorKind::TailCall { .. } => {
+                        cb.add_next(target);
+                        if let Some(u) = caller_unwind {
+                            cb.add_next(u);
+                        }
                     }
                     TerminatorKind::UnwindResume => {
                         // A callee that unwinds re-enters the caller at its
@@ -1191,7 +1198,9 @@ impl<'tcx> PathGraph<'tcx> {
             }
         }
 
-        if self.terminator(cur).is_some_and(|t| matches!(t.kind, TerminatorKind::Return)) {
+        if self.terminator(cur).is_some_and(|t| {
+            matches!(t.kind, TerminatorKind::Return | TerminatorKind::TailCall { .. })
+        }) {
             let entry = cur - self.cfg.block(cur).local_index;
             if let (Some(binding), Some(parent)) = (
                 self.inline_bindings.get(&entry),
@@ -1305,7 +1314,10 @@ impl<'tcx> PathGraph<'tcx> {
 
         // Carry a callee's return-payload bounds to the caller's destination.
         if let Some(terminator) = self.terminator(cur)
-            && matches!(terminator.kind, TerminatorKind::Return)
+            && matches!(
+                terminator.kind,
+                TerminatorKind::Return | TerminatorKind::TailCall { .. }
+            )
         {
             let callee = self.cfg.block(cur).def_id;
             for (&entry, binding) in &self.inline_bindings {

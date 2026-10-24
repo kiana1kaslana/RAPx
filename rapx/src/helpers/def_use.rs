@@ -206,9 +206,8 @@ impl RelevantPlaces {
 
 /// Collect definitions and uses for one MIR terminator.
 ///
-/// Call terminators are handled separately by the slicer's `call_visit` module
-/// (which consults interprocedural summaries), so the `Call` arm is
-/// deliberately absent here.
+/// Ordinary calls are handled by the slicer's call visitor. Tail calls also
+/// expose their return place and operand uses here for generic consumers.
 pub fn terminator_use_def<'tcx>(terminator: &Terminator<'tcx>) -> DefUse {
     let mut use_def = DefUse::new();
     match &terminator.kind {
@@ -220,6 +219,13 @@ pub fn terminator_use_def<'tcx>(terminator: &Terminator<'tcx>) -> DefUse {
         }
         TerminatorKind::Drop { place, .. } => {
             use_def.uses.extend(place_uses(place));
+        }
+        TerminatorKind::TailCall { func, args, .. } => {
+            use_def.defs.insert_local(Local::from_usize(0));
+            use_def.uses.extend(operand_uses(func));
+            for arg in args.iter() {
+                use_def.uses.extend(operand_uses(&arg.node));
+            }
         }
         _ => {}
     }
@@ -278,6 +284,7 @@ pub fn rvalue_operands<'tcx>(rvalue: &'tcx Rvalue<'tcx>) -> Vec<&'tcx Operand<'t
         Rvalue::Use(op, ..)
         | Rvalue::Repeat(op, _)
         | Rvalue::Cast(_, op, _)
+        | Rvalue::WrapUnsafeBinder(op, _)
         | Rvalue::UnaryOp(_, op) => {
             operands.push(op);
         }

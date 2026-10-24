@@ -277,6 +277,16 @@ impl<'tcx> VerifyEngine<'tcx> {
                         };
                     }
                 }
+                TerminatorKind::TailCall { args, .. } => {
+                    if args.iter().any(|a| match &a.node {
+                        Operand::Copy(p) | Operand::Move(p) => p.local == local,
+                        Operand::Constant(_) => false,
+                        #[cfg(rapx_ge_95)]
+                        Operand::RuntimeChecks(_) => false,
+                    }) {
+                        return LocalAccess::Read;
+                    }
+                }
                 TerminatorKind::SwitchInt { discr, .. }
                 | TerminatorKind::Assert { cond: discr, .. } => match discr {
                     Operand::Copy(p) | Operand::Move(p) => {

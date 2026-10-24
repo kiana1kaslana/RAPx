@@ -69,6 +69,13 @@ impl DataflowGraph {
         ) -> Local {
             let dst = graph.nodes.push(DataflowNode::new());
             match place_elem {
+                PlaceElem::UnwrapUnsafeBinder(_) => {
+                    graph.add_node_edge(src, dst, EdgeOp::Nop, block, stmt_idx);
+                }
+                #[cfg(rapx_has_phantom_deref)]
+                PlaceElem::PhantomDeref => {
+                    graph.add_node_edge(src, dst, EdgeOp::Nop, block, stmt_idx);
+                }
                 PlaceElem::Deref => {
                     graph.add_node_edge(src, dst, EdgeOp::Deref, block, stmt_idx);
                 }
@@ -124,6 +131,7 @@ impl DataflowGraph {
             if seq == self.nodes[dst].ops.len() {
                 self.nodes[dst].ops.push(NodeOp::Nop);
             }
+            #[allow(unreachable_patterns)]
             match rvalue {
                 Rvalue::Use(op, ..) => {
                     self.add_operand(op, dst, block, stmt_idx);
@@ -191,6 +199,16 @@ impl DataflowGraph {
                     self.nodes[dst].ops[seq] = NodeOp::NullaryOp;
                 }
                 Rvalue::ThreadLocalRef(_) => {}
+                Rvalue::WrapUnsafeBinder(operand, _) => {
+                    self.add_operand(operand, dst, block, stmt_idx);
+                    self.nodes[dst].ops[seq] = NodeOp::Use;
+                }
+                #[cfg(rapx_rvalue_has_reborrow)]
+                Rvalue::Reborrow(_, _, place) => {
+                    let src = self.parse_place(place, block, stmt_idx);
+                    self.add_node_edge(src, dst, EdgeOp::Copy, block, stmt_idx);
+                    self.nodes[dst].ops[seq] = NodeOp::Use;
+                }
                 Rvalue::Discriminant(place) => {
                     let src = self.parse_place(place, block, stmt_idx);
                     self.add_node_edge(src, dst, EdgeOp::Nop, block, stmt_idx);
@@ -223,43 +241,44 @@ impl DataflowGraph {
         block: usize,
         stmt_idx: usize,
     ) {
-        if let TerminatorKind::Call {
-            func,
-            args,
-            destination,
-            ..
-        } = &terminator.kind
-        {
-            let dst = destination.local;
-            let seq = self.nodes[dst].seq;
-            if seq == self.nodes[dst].ops.len() {
-                self.nodes[dst].ops.push(NodeOp::Nop);
+        let (func, args, dst) = match &terminator.kind {
+            TerminatorKind::Call { func, args, destination, .. } => {
+                (func, args, destination.local)
             }
-            match func {
-                Operand::Constant(boxed_cnst) => {
-                    if let Const::Val(_, ty) = boxed_cnst.const_
-                        && let TyKind::FnDef(def_id, _) = ty.kind() {
-                            for op in args.iter() {
-                                self.add_operand(&op.node, dst, block, stmt_idx);
-                            }
-                            self.nodes[dst].ops[seq] = NodeOp::Call(*def_id);
-                        }
-                }
-                Operand::Move(_) => {
-                    self.add_operand(func, dst, block, stmt_idx);
+            TerminatorKind::TailCall { func, args, .. } => {
+                (func, args, Local::from_usize(0))
+            }
+            _ => return,
+        };
+        let seq = self.nodes[dst].seq;
+        if seq == self.nodes[dst].ops.len() {
+            self.nodes[dst].ops.push(NodeOp::Nop);
+        }
+        match func {
+            Operand::Constant(boxed_cnst) => {
+                if let Const::Val(_, ty) = boxed_cnst.const_
+                    && let TyKind::FnDef(def_id, _) = ty.kind()
+                {
                     for op in args.iter() {
                         self.add_operand(&op.node, dst, block, stmt_idx);
                     }
-                    self.nodes[dst].ops[seq] = NodeOp::CallOperand;
-                }
-                _ => {
-                    rap_debug!("{:?}", func);
-                    todo!();
+                    self.nodes[dst].ops[seq] = NodeOp::Call(*def_id);
                 }
             }
-            self.nodes[dst].span = terminator.source_info.span;
-            self.nodes[dst].seq = seq + 1;
+            Operand::Copy(_) | Operand::Move(_) => {
+                self.add_operand(func, dst, block, stmt_idx);
+                for op in args.iter() {
+                    self.add_operand(&op.node, dst, block, stmt_idx);
+                }
+                self.nodes[dst].ops[seq] = NodeOp::CallOperand;
+            }
+            _ => {
+                rap_debug!("{:?}", func);
+                todo!();
+            }
         }
+        self.nodes[dst].span = terminator.source_info.span;
+        self.nodes[dst].seq = seq + 1;
     }
 
     pub fn query_node_by_span(&self, span: Span, strict: bool) -> Option<(Local, &DataflowNode)> {

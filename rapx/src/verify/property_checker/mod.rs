@@ -7,7 +7,7 @@
 
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::vm::state::{OffsetKind, VmState};
-use z3::ast::{Ast, Dynamic, Int};
+use z3::ast::Int;
 use crate::verify::{
     contract::{ContractExpr, PlaceBase, Property, PropertyArg, PropertyKind},
     report::{CheckResult, UnknownReason},
@@ -277,6 +277,11 @@ impl PropertyChecker {
                 ) {
                     return CheckResult::Unknown(UnknownReason::Unimplemented);
                 }
+                if self.atom_depends_on_inline_terms(
+                    vm_state, checkpoint, property, &vm_state.inline.opaque_intrinsic_terms
+                ) {
+                    return CheckResult::Unknown(UnknownReason::Unimplemented);
+                }
                 if vm_state.incomplete_inline_branch
                     && (checkpoint.callee.is_some() || !checkpoint.args.is_empty())
                 {
@@ -330,31 +335,16 @@ impl PropertyChecker {
         terms: &rustc_hash::FxHashSet<Int<'z3>>,
         value: &crate::verify::vm::state::VmValue<'z3, 'tcx>,
     ) -> bool {
-        if Self::term_involves(terms, &value.z3_term) {
+        if VmState::term_involves(terms, &value.z3_term) {
             return true;
         }
         value.provenance.as_ref().is_some_and(|p| {
-            Self::term_involves(terms, &p.offset)
+            VmState::term_involves(terms, &p.offset)
                 || matches!(
                     &p.offset_kind,
-                    Some(OffsetKind::Element(e)) if Self::term_involves(terms, e)
+                    Some(OffsetKind::Element(e)) if VmState::term_involves(terms, e)
                 )
         })
-    }
-
-    fn term_involves<'z3>(terms: &rustc_hash::FxHashSet<Int<'z3>>, term: &Int<'z3>) -> bool {
-        let mut pending = vec![Dynamic::from_ast(term)];
-        let mut seen = rustc_hash::FxHashSet::default();
-        while let Some(ast) = pending.pop() {
-            if !seen.insert(ast.clone()) {
-                continue;
-            }
-            if ast.as_int().is_some_and(|value| terms.contains(&value)) {
-                return true;
-            }
-            pending.extend(ast.children());
-        }
-        false
     }
 
     fn check_or<'z3, 'tcx>(

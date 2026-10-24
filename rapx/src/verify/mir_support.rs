@@ -1,18 +1,18 @@
 //! MIR forms without a dedicated slicer or VM transfer rule.
 
-use rustc_middle::mir::{NonDivergingIntrinsic, StatementKind, TerminatorKind};
+use rustc_middle::mir::{StatementKind, TerminatorKind};
 
 pub(crate) fn ignored_statement(kind: &StatementKind<'_>) -> bool {
-    matches!(kind, StatementKind::Intrinsic(intrinsic) if matches!(&**intrinsic, NonDivergingIntrinsic::Assume(..)))
-        || matches!(
-            kind,
-            StatementKind::FakeRead(..)
+    matches!(
+        kind,
+        StatementKind::FakeRead(..)
                 | StatementKind::AscribeUserType(..)
                 | StatementKind::Coverage(..)
                 | StatementKind::PlaceMention(..)
                 | StatementKind::ConstEvalCounter
                 | StatementKind::Nop
-        )
+                | StatementKind::BackwardIncompatibleDropHint { .. }
+    )
 }
 
 pub(crate) fn ignored_terminator(kind: &TerminatorKind<'_>) -> bool {

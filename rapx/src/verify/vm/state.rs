@@ -12,7 +12,7 @@ use rustc_middle::{
 };
 use z3::{
     Context,
-    ast::{Array, Ast, Bool, Int},
+    ast::{Array, Ast, Bool, Dynamic, Int},
 };
 
 use crate::compat::{FxHashMap, FxHashSet};
@@ -417,6 +417,7 @@ pub(crate) struct InlineCtx<'z3, 'tcx> {
     /// element offset), so only the directly-dependent properties are affected.
     pub inline_truncated_terms: FxHashSet<Int<'z3>>,
     pub inline_branch_terms: FxHashSet<Int<'z3>>,
+    pub opaque_intrinsic_terms: FxHashSet<Int<'z3>>,
     /// During `exec_inline_call`, maps each callee argument index to the
     /// *caller* local its value points at (resolved from the reference's
     /// address term before the caller's address map is saved away).  Used by
@@ -738,6 +739,21 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let alloc_id = *self.current_frame.local_alloc.get(&local)?;
         let view_ty = self.body().local_decls[local].ty;
         self.load_value(alloc_id, view_ty, &[])
+    }
+
+    pub(crate) fn term_involves(terms: &FxHashSet<Int<'z3>>, term: &Int<'z3>) -> bool {
+        let mut pending = vec![Dynamic::from_ast(term)];
+        let mut seen = FxHashSet::default();
+        while let Some(ast) = pending.pop() {
+            if !seen.insert(ast.clone()) {
+                continue;
+            }
+            if ast.as_int().is_some_and(|value| terms.contains(&value)) {
+                return true;
+            }
+            pending.extend(ast.children());
+        }
+        false
     }
 
     /// Bind a whole value to a MIR local (store it at `path == []` in the
@@ -1319,7 +1335,29 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         && path.as_slice() == [offset as usize / size as usize])
                         .then_some(value.clone())
                 });
-            return Some(value.unwrap_or_else(|| self.unknown_value_for_place(place)));
+            if let Some(value) = value {
+                return Some(value);
+            }
+        }
+        if place.projection.len() == 1
+            && matches!(place.projection[0], ProjectionElem::Deref)
+            && matches!(
+                place_ty.kind(),
+                rustc_middle::ty::TyKind::Int(_)
+                    | rustc_middle::ty::TyKind::Uint(_)
+                    | rustc_middle::ty::TyKind::Bool
+                    | rustc_middle::ty::TyKind::Char
+                    | rustc_middle::ty::TyKind::Float(_)
+            )
+        {
+            let pointer = self.local_value(place.local)?;
+            if let Some(provenance) = &pointer.provenance
+                && provenance.offset.simplify().as_u64() == Some(0)
+                && let Some(value) = self.load_value(provenance.alloc_id, place_ty, &[])
+            {
+                return Some(value.clone());
+            }
+            return Some(self.unknown_value_for_place(place));
         }
 
         // Collect field indices from projections

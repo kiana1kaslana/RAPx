@@ -127,7 +127,9 @@ pub fn has_atomic_call(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     }
     let body = tcx.optimized_mir(def_id);
     body.basic_blocks.iter().any(|bb| {
-        if let TerminatorKind::Call { func, .. } = &bb.terminator().kind {
+        if let TerminatorKind::Call { func, .. } | TerminatorKind::TailCall { func, .. } =
+            &bb.terminator().kind
+        {
             let Some(callee) = dep_callee_def_id(func) else {
                 return false;
             };
@@ -153,21 +155,53 @@ pub fn collect_unsafe_callsites<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Vec<C
 
     let body = tcx.optimized_mir(def_id);
     for (bb, data) in body.basic_blocks.iter_enumerated() {
-        let TerminatorKind::Call {
-            func,
-            args,
-            destination: call_dest,
-            ..
-        } = &data.terminator().kind
-        else {
-            continue;
+        for (statement_index, statement) in data.statements.iter().enumerate() {
+            if matches!(&statement.kind, StatementKind::Intrinsic(..)) {
+                checkpoints.push(Checkpoint {
+                    caller: def_id,
+                    callee: None,
+                    block: bb,
+                    args: Vec::new(),
+                    kind: CheckpointKind::UnsafeCall,
+                    destination: None,
+                    is_mut_ref: false,
+                    statement_index,
+                });
+            }
+        }
+
+        let (func, args, destination) = match &data.terminator().kind {
+            TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                ..
+            } => (func, args, Some(destination.local)),
+            TerminatorKind::TailCall { func, args, .. } => (func, args, None),
+            _ => continue,
         };
 
-        let Operand::Constant(func_constant) = func else {
-            continue;
+        let func_ty = match func {
+            Operand::Constant(func_constant) => func_constant.const_.ty(),
+            Operand::Copy(place) | Operand::Move(place) => place.ty(body, tcx).ty,
+            #[cfg(rapx_ge_95)]
+            Operand::RuntimeChecks(_) => continue,
         };
-
-        let ty::FnDef(callee_def_id, callee_args) = func_constant.const_.ty().kind() else {
+        let ty::FnDef(callee_def_id, callee_args) = func_ty.kind() else {
+            if let ty::FnPtr(_, header) = func_ty.kind()
+                && header.safety() == Safety::Unsafe
+            {
+                checkpoints.push(Checkpoint {
+                    caller: def_id,
+                    callee: None,
+                    block: bb,
+                    args: args.iter().map(|arg| arg.node.clone()).collect(),
+                    kind: CheckpointKind::UnsafeCall,
+                    destination,
+                    is_mut_ref: false,
+                    statement_index: 0,
+                });
+            }
             continue;
         };
         #[cfg(rapx_ge_99)]
@@ -194,7 +228,7 @@ pub fn collect_unsafe_callsites<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Vec<C
             block: bb,
             args: args.iter().map(|arg| arg.node.clone()).collect(),
             kind: CheckpointKind::UnsafeCall,
-            destination: Some(call_dest.local),
+            destination,
             is_mut_ref: false,
             statement_index: 0,
         });
@@ -450,7 +484,9 @@ pub fn collect_static_mut_access_info<'tcx>(
         }
 
         if let Some(terminator) = &data.terminator
-            && let TerminatorKind::Call { args, .. } = &terminator.kind {
+            && let TerminatorKind::Call { args, .. } | TerminatorKind::TailCall { args, .. } =
+                &terminator.kind
+        {
                 for arg in args {
                     if let op @ Operand::Constant(c) = &arg.node
                         && let Some(static_id) = c.check_static_ptr(tcx)

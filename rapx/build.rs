@@ -13,6 +13,7 @@ fn main() {
     emit_check_cfg("rapx_has_fielddef_extras");
     emit_check_cfg("rapx_has_skip_norm_wip");
     emit_check_cfg("rapx_rvalue_has_reborrow");
+    emit_check_cfg("rapx_has_phantom_deref");
     emit_check_cfg("rapx_scalar_to_pointer_interp_result");
     emit_check_cfg("rapx_has_fnptr_asptr");
     emit_check_cfg("rapx_has_attr_ir");
@@ -63,6 +64,10 @@ fn main() {
     emit_cfg(
         "rapx_rvalue_has_reborrow",
         rustc_src_contains_path("compiler/rustc_middle/src/mir/syntax.rs", "Reborrow("),
+    );
+    emit_cfg(
+        "rapx_has_phantom_deref",
+        rustc_src_contains_path("compiler/rustc_middle/src/mir/syntax.rs", "PhantomDeref,"),
     );
     emit_cfg(
         "rapx_scalar_to_pointer_interp_result",

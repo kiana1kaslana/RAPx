@@ -664,6 +664,50 @@ fn unsupported_mir_01() {
     let output = run_with_args("verify_units/unsupported_mir_1", CMD_VERIFY_TARGETED);
     assert_function_result(&output, "unknown_inline_asm_write", "UNKNOWN");
     assert_function_result(&output, "unknown_intrinsic_copy", "UNKNOWN");
+    assert_function_result(&output, "unknown_direct_intrinsic_copy", "UNKNOWN");
+    assert_function_result(&output, "unknown_direct_assume", "UNKNOWN");
+}
+
+#[test]
+fn intrinsic_effects_01() {
+    let output = run_with_args("verify_units/intrinsic_effects_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "unsound_after_write_bytes", "UNSOUND");
+    let write_block = extract_block_after(&output, "function: unsound_after_write_bytes");
+    assert_contain(&write_block, "bb1 -> need_nonzero");
+    assert_contain(&write_block, "ValidNum | Failed");
+    assert_function_result(&output, "sound_after_write_bytes", "SOUND");
+    assert_function_result(&output, "sound_after_zero_count_write_bytes", "SOUND");
+    assert_function_result(&output, "unknown_after_symbolic_write_bytes", "UNKNOWN");
+    assert_function_result(&output, "sound_raw_eq_same_pointer", "SOUND");
+    assert_function_result(&output, "sound_raw_eq_equal_values", "SOUND");
+    assert_function_result(&output, "sound_after_exact_div", "SOUND");
+    assert_function_result(&output, "unknown_after_float_to_int", "UNKNOWN");
+    assert_function_result(&output, "unsound_after_typed_swap", "UNSOUND");
+    assert_function_result(&output, "sound_after_typed_swap", "SOUND");
+}
+
+#[test]
+fn tail_call_unsafe_checkpoint() {
+    let output = run_with_args("verify_units/terminator_unsupported_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_tail_call", "SOUND");
+    assert_function_result(&output, "unsound_tail_call", "UNSOUND");
+    assert_function_result(&output, "unsound_tail_call_input", "UNSOUND");
+    assert_function_result(&output, "sound_tail_call_guarded", "SOUND");
+    assert_function_result(&output, "unsound_after_tail_helper", "UNSOUND");
+    assert_function_result(&output, "sound_after_tail_helper", "SOUND");
+    assert_function_result(&output, "unsound_after_tail_write", "UNSOUND");
+    assert_function_result(&output, "unknown_tail_fnptr", "UNKNOWN");
+    assert_function_result(&output, "unknown_indirect_call", "UNKNOWN");
+}
+
+#[test]
+fn rvalue_rare_sound_01() {
+    let output = run_with_args("verify_units/rvalue_rare_sound_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_thread_local_ref", "SOUND");
+    assert_function_result(&output, "sound_wrap_unsafe_binder", "SOUND");
+    assert_function_result(&output, "unsound_wrap_unsafe_binder", "UNSOUND");
+    assert_function_result(&output, "unsound_scalar_deref_zero", "UNSOUND");
+    assert_not_contain(&output, "verifier crashed");
 }
 
 #[test]

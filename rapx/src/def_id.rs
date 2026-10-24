@@ -944,6 +944,38 @@ intrinsics! {
         "std::intrinsics::copy_nonoverlapping",
         "core::intrinsics::copy_nonoverlapping"
     ],
+    intrinsics_typed_swap_nonoverlapping: &[
+        "std::intrinsics::typed_swap_nonoverlapping",
+        "core::intrinsics::typed_swap_nonoverlapping"
+    ],
+    intrinsics_write_bytes: &[
+        "std::intrinsics::write_bytes",
+        "core::intrinsics::write_bytes"
+    ],
+    intrinsics_float_to_int_unchecked: &[
+        "std::intrinsics::float_to_int_unchecked",
+        "core::intrinsics::float_to_int_unchecked"
+    ],
+    intrinsics_exact_div: &[
+        "std::intrinsics::exact_div",
+        "core::intrinsics::exact_div"
+    ],
+    intrinsics_raw_eq: &[
+        "std::intrinsics::raw_eq",
+        "core::intrinsics::raw_eq"
+    ],
+    intrinsics_vtable_size: &[
+        "std::intrinsics::vtable_size",
+        "core::intrinsics::vtable_size"
+    ],
+    intrinsics_vtable_align: &[
+        "std::intrinsics::vtable_align",
+        "core::intrinsics::vtable_align"
+    ],
+    intrinsics_size_of_val: &[
+        "std::intrinsics::size_of_val",
+        "core::intrinsics::size_of_val"
+    ],
     intrinsics_size_of: &[
         "std::intrinsics::size_of",
         "core::intrinsics::size_of"

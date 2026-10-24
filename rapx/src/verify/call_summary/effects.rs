@@ -12,7 +12,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 
-use super::{BoundedArithmeticOp, CallEffect, CallEffectSummary, OverflowOp};
+use super::{BoundedArithmeticOp, CallDependencySummary, CallEffect, CallEffectSummary, OverflowOp};
 use crate::def_id;
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
 use crate::verify::api_classify;
@@ -59,6 +59,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_intrinsic_select_unpredictable, eff_select_unpredictable),
     ED!(api_classify::is_intrinsic_branch_hint, eff_alias_arg0),
     ED!(api_classify::is_intrinsic_ptr_offset_from, eff_ptr_offset_from),
+    ED!(api_classify::is_intrinsic_arith_offset, eff_arith_offset),
     ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
     ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
     ED!(api_classify::is_intrinsic_integer_max, eff_return_max),
@@ -68,7 +69,12 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
     ED!(api_classify::is_intrinsic_wrapping_sub, eff_wrapping_sub),
     ED!(api_classify::is_ptr_copy, eff_copy_memory),
+    ED!(api_classify::is_intrinsic_typed_swap_nonoverlapping, eff_swap_memory),
+    ED!(api_classify::is_intrinsic_write_bytes, eff_fill_bytes),
     ED!(api_classify::is_intrinsic_nonzero_preserving, eff_return_nonzero_iff),
+    ED!(api_classify::is_intrinsic_raw_eq, eff_raw_eq),
+    ED!(api_classify::is_intrinsic_exact_div, eff_exact_div),
+    ED!(api_classify::is_intrinsic_pure_opaque, eff_opaque_return),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
     ED!(api_classify::is_box_alloc_ctor, eff_box_alloc),
@@ -125,6 +131,34 @@ pub(crate) fn is_symbolically_modeled(callee: Option<DefId>) -> bool {
     REGISTRY.iter().any(|e| (e.matches)(callee))
 }
 
+pub(crate) fn is_unmodeled_intrinsic(tcx: TyCtxt<'_>, callee: Option<DefId>) -> bool {
+    callee.is_some_and(|id| tcx.intrinsic(id).is_some()) && !is_symbolically_modeled(callee)
+}
+
+pub(crate) fn intrinsic_dependency_summary<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    caller: DefId,
+    callee: Option<DefId>,
+    func: &Operand<'tcx>,
+    destination: Local,
+    arg_count: usize,
+) -> Option<CallDependencySummary> {
+    let id = callee?;
+    if tcx.intrinsic(id).is_none() && !api_classify::is_ptr_copy(callee) {
+        return None;
+    }
+    let write_args = lookup_effect(tcx, caller, callee, func, destination)
+        .unwrap_or_default()
+        .iter()
+        .flat_map(CallEffect::written_args)
+        .filter(|arg| *arg < arg_count)
+        .collect();
+    Some(CallDependencySummary {
+        return_depends_on_args: (0..arg_count).collect(),
+        write_args,
+    })
+}
+
 pub(crate) fn lookup_effect<'tcx>(
     tcx: TyCtxt<'tcx>,
     caller: DefId,
@@ -155,6 +189,24 @@ fn eff_none(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 fn eff_return_arg_value(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnArgValue { arg: 0 }]
+}
+
+fn eff_opaque_return(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnOpaque]
+}
+
+fn eff_raw_eq(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnRawEq {
+        left_arg: 0,
+        right_arg: 1,
+    }]
+}
+
+fn eff_exact_div(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnExactDiv {
+        lhs_arg: 0,
+        rhs_arg: 1,
+    }]
 }
 
 fn eff_select_unpredictable(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
@@ -200,6 +252,13 @@ fn eff_ptr_offset_from(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     }]
 }
 
+fn eff_arith_offset(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnWrappingPointerOffset {
+        base_arg: 0,
+        offset_arg: 1,
+    }]
+}
+
 fn eff_write_mem(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::WriteMemory { pointer_arg: 0 }]
 }
@@ -208,6 +267,21 @@ fn eff_copy_memory(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::CopyMemory {
         source_arg: 0,
         destination_arg: 1,
+        count_arg: 2,
+    }]
+}
+
+fn eff_swap_memory(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::SwapMemory {
+        left_arg: 0,
+        right_arg: 1,
+    }]
+}
+
+fn eff_fill_bytes(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::FillBytes {
+        pointer_arg: 0,
+        byte_arg: 1,
         count_arg: 2,
     }]
 }

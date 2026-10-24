@@ -1,7 +1,10 @@
 //! Direct MIR dispatch for backward slicing rules.
 
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::{BasicBlock, Body, Statement, StatementKind, Terminator, TerminatorKind};
+use rustc_middle::mir::{
+    BasicBlock, Body, Local, NonDivergingIntrinsic, Operand, Place, Statement, StatementKind,
+    Terminator, TerminatorKind,
+};
 
 use crate::analysis::dataflow::types::DataflowGraph;
 use crate::helpers::def_use::RelevantPlaces;
@@ -78,6 +81,19 @@ pub(super) fn apply_statement(ctx: &mut StatementContext<'_, '_>) {
             }
             "StorageLive"
         }
+        StatementKind::Intrinsic(intrinsic)
+            if let NonDivergingIntrinsic::Assume(operand) = &**intrinsic =>
+        {
+            ctx.items.push(RelevantItem::Statement {
+                def_id: ctx.def_id,
+                block: ctx.block,
+                statement_index: ctx.statement_index,
+            });
+            if let Operand::Copy(place) | Operand::Move(place) = operand {
+                ctx.relevant.insert_mir_place(place);
+            }
+            "Assume"
+        }
         kind if mir_support::ignored_statement(kind) => "Ignored",
         _ => {
             ctx.items.push(RelevantItem::Statement {
@@ -114,6 +130,24 @@ pub(super) fn apply_terminator(ctx: &mut TerminatorContext<'_, '_>) {
                 ctx.keep_owner,
             );
             "Call"
+        }
+        TerminatorKind::TailCall { func, args, .. } => {
+            let destination = Place::from(Local::from_usize(0));
+            ctx.slicer.visit_call_terminator(
+                ctx.def_id,
+                ctx.block,
+                ctx.terminator,
+                func,
+                args,
+                &destination,
+                ctx.flow,
+                ctx.body,
+                ctx.relevant,
+                ctx.items,
+                ctx.keep_invalidations,
+                ctx.keep_owner,
+            );
+            "TailCall"
         }
         TerminatorKind::SwitchInt { .. } => {
             visit_non_call(ctx);

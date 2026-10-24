@@ -43,6 +43,9 @@ pub(crate) enum CallEffect {
     /// (`MaybeUninit::assume_init`, `ManuallyDrop::into_inner`): same term and
     /// facts, retyped to the destination — no pointer `non_null` forcing.
     ReturnArgValue { arg: usize },
+    ReturnOpaque,
+    ReturnRawEq { left_arg: usize, right_arg: usize },
+    ReturnExactDiv { lhs_arg: usize, rhs_arg: usize },
     /// `select_unpredictable(cond, x, y)` returns either `x` or `y`: the result
     /// is one of the two candidate values (`args[1]`/`args[2]`), non-deterministic
     /// since the boolean selector (`args[0]`) is unpredictable.
@@ -59,6 +62,7 @@ pub(crate) enum CallEffect {
         /// opposed to plain `add` arithmetic whose result may be one-past-end.
         dereferenceable: bool,
     },
+    ReturnWrappingPointerOffset { base_arg: usize, offset_arg: usize },
     ReturnPtrOffsetFrom { ptr_arg: usize, base_arg: usize },
     /// The return value is known to be non-zero.
     ReturnNonZero,
@@ -69,6 +73,8 @@ pub(crate) enum CallEffect {
     /// The call writes one initialized element through a pointer argument.
     WriteMemory { pointer_arg: usize },
     CopyMemory { source_arg: usize, destination_arg: usize, count_arg: usize },
+    SwapMemory { left_arg: usize, right_arg: usize },
+    FillBytes { pointer_arg: usize, byte_arg: usize, count_arg: usize },
     /// The return value is a pointer backed by a fresh allocation of
     /// `size_arg` elements × `elem_size` bytes. The base address is taken
     /// from `pointer_arg`. Used for `from_raw_parts(ptr, len)`.
@@ -208,6 +214,19 @@ pub(crate) enum CallEffect {
     ReturnLayoutSymbolic { is_size: bool },
 }
 
+impl CallEffect {
+    fn written_args(&self) -> Vec<usize> {
+        match self {
+            Self::WriteMemory { pointer_arg }
+            | Self::DropMemory { pointer_arg }
+            | Self::FillBytes { pointer_arg, .. } => vec![*pointer_arg],
+            Self::CopyMemory { destination_arg, .. } => vec![*destination_arg],
+            Self::SwapMemory { left_arg, right_arg } => vec![*left_arg, *right_arg],
+            _ => Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OverflowOp {
     Add,
@@ -225,7 +244,9 @@ pub(crate) enum BoundedArithmeticOp {
 /// Return dependency information for a MIR call terminator.
 pub(crate) fn dependency_summary<'tcx>(
     tcx: TyCtxt<'tcx>,
+    caller: rustc_hir::def_id::DefId,
     func: &Operand<'tcx>,
+    destination: rustc_middle::mir::Local,
     arg_count: usize,
 ) -> CallDependencySummary {
     let callee = mir_utils::dep_callee_def_id(func);
@@ -241,12 +262,12 @@ pub(crate) fn dependency_summary<'tcx>(
             summary.write_args.push(0);
             return summary;
         }
-        if crate::verify::api_classify::is_ptr_copy(Some(callee)) && arg_count > 1 {
-            let mut summary = CallDependencySummary::fallback(arg_count);
-            summary.write_args.push(1);
+        if let Some(summary) = effects::intrinsic_dependency_summary(
+            tcx, caller, Some(callee), func, destination, arg_count,
+        ) {
             return summary;
         }
-        if tcx.intrinsic(callee).is_some() || mir_utils::is_drop_in_place(callee) {
+        if mir_utils::is_drop_in_place(callee) {
             return CallDependencySummary::fallback(arg_count);
         }
 

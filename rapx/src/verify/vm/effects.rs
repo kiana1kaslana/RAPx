@@ -46,6 +46,54 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.set_local(dest, val);
                 }
             }
+            CallEffect::ReturnOpaque => {
+                let ty = self.body().local_decls[dest].ty;
+                let term = self.fresh_int("intrinsic_result");
+                self.inline.opaque_intrinsic_terms.insert(term.clone());
+                self.set_local(dest, VmValue::new(term, ty));
+            }
+            CallEffect::ReturnRawEq { left_arg, right_arg } => {
+                let ty = self.body().local_decls[dest].ty;
+                let Some((left, right)) = args.get(*left_arg).zip(args.get(*right_arg)) else {
+                    self.unsupported_mir = true;
+                    return;
+                };
+                if left.z3_term == right.z3_term && left.ty == right.ty {
+                    self.set_local(dest, VmValue::new(Int::from_u64(self.z3_ctx, 1), ty));
+                } else if let Some((left_local, right_local)) = self
+                    .find_local_by_address(&left.z3_term)
+                    .zip(self.find_local_by_address(&right.z3_term))
+                    .filter(|(left_local, right_local)| {
+                        let left_ty = self.body().local_decls[*left_local].ty;
+                        left_ty == self.body().local_decls[*right_local].ty
+                            && matches!(left_ty.kind(), TyKind::Int(_) | TyKind::Uint(_))
+                    })
+                    && let Some((left_value, right_value)) = self
+                        .local_value(left_local)
+                        .zip(self.local_value(right_local))
+                {
+                    let one = Int::from_u64(self.z3_ctx, 1);
+                    let zero = Int::from_u64(self.z3_ctx, 0);
+                    let term = left_value.z3_term._eq(&right_value.z3_term).ite(&one, &zero);
+                    self.set_local(dest, VmValue::new(term, ty));
+                } else {
+                    let term = self.fresh_int("raw_eq_result");
+                    self.inline.opaque_intrinsic_terms.insert(term.clone());
+                    self.set_local(dest, VmValue::new(term, ty));
+                }
+            }
+            CallEffect::ReturnExactDiv { lhs_arg, rhs_arg } => {
+                let ty = self.body().local_decls[dest].ty;
+                let Some((lhs, rhs)) = args.get(*lhs_arg).zip(args.get(*rhs_arg)) else {
+                    self.unsupported_mir = true;
+                    return;
+                };
+                if !matches!(ty.kind(), TyKind::Uint(_)) {
+                    self.unsupported_mir = true;
+                    return;
+                }
+                self.set_local(dest, VmValue::new(lhs.z3_term.div(&rhs.z3_term), ty));
+            }
             CallEffect::SelectUnpredictable => {
                 if args.len() >= 3 {
                     let term = self.fresh_int(&format!("selunpred_{}", dest.as_usize()));
@@ -407,6 +455,23 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.apply_pointer_add(dest, base, offset, *stride, *dereferenceable);
                 }
             }
+            CallEffect::ReturnWrappingPointerOffset { base_arg, offset_arg } => {
+                if let (Some(base), Some(offset)) = (args.get(*base_arg), args.get(*offset_arg)) {
+                    let stride = mir_utils::pointee_ty(base.ty).and_then(|pointee| {
+                        let (_, size) = mir_utils::type_layout(
+                            self.tcx,
+                            self.current_frame.current_def_id,
+                            pointee,
+                        )?;
+                        if size == 0 && mir_utils::ty_has_type_param(pointee) {
+                            None
+                        } else {
+                            Some(size)
+                        }
+                    });
+                    self.apply_pointer_add(dest, base, offset, stride, false);
+                }
+            }
             CallEffect::ReturnPtrOffsetFrom { ptr_arg, base_arg } => {
                 let dest_ty = self.body().local_decls[dest].ty;
                 let ptr = args.get(*ptr_arg).cloned();
@@ -754,6 +819,84 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         content.facts.utf8_trusted = false;
                     }
                     self.write_through_pointer(target, Vec::new(), copied);
+                }
+            }
+            CallEffect::SwapMemory { left_arg, right_arg } => {
+                let Some((left, right)) = args.get(*left_arg).zip(args.get(*right_arg)) else {
+                    self.unsupported_mir = true;
+                    return;
+                };
+                let Some((left_local, right_local)) = self
+                    .find_local_by_address(&left.z3_term)
+                    .zip(self.find_local_by_address(&right.z3_term))
+                else {
+                    self.unsupported_mir = true;
+                    return;
+                };
+                let left_ty = self.body().local_decls[left_local].ty;
+                if left_local == right_local
+                    || left_ty != self.body().local_decls[right_local].ty
+                    || !matches!(left_ty.kind(), TyKind::Int(_) | TyKind::Uint(_))
+                {
+                    self.unsupported_mir = true;
+                    return;
+                }
+                let Some((left_value, right_value)) = self
+                    .local_value(left_local)
+                    .cloned()
+                    .zip(self.local_value(right_local).cloned())
+                else {
+                    self.unsupported_mir = true;
+                    return;
+                };
+                self.set_local(left_local, right_value);
+                self.set_local(right_local, left_value);
+            }
+            CallEffect::FillBytes { pointer_arg, byte_arg, count_arg } => {
+                let (Some(pointer), Some(byte), Some(count)) = (
+                    args.get(*pointer_arg),
+                    args.get(*byte_arg),
+                    args.get(*count_arg),
+                )
+                else {
+                    self.unsupported_mir = true;
+                    return;
+                };
+                let concrete_count = count.z3_term.simplify().as_u64();
+                if concrete_count == Some(0) {
+                    return;
+                }
+                let (Some(local), Some(byte_value)) = (
+                    self.find_local_by_address(&pointer.z3_term),
+                    byte.z3_term.simplify().as_u64(),
+                ) else {
+                    self.unsupported_mir = true;
+                    return;
+                };
+                let ty = self.body().local_decls[local].ty;
+                if concrete_count != Some(1)
+                    || mir_utils::pointee_ty(pointer.ty) != Some(ty)
+                    || !matches!(ty.kind(), TyKind::Int(_) | TyKind::Uint(_))
+                    || byte_value > u8::MAX as u64
+                {
+                    self.unsupported_mir = true;
+                    return;
+                }
+                let value_bits = if byte_value == 0 {
+                    0
+                } else {
+                    let size = self.size_of_ty(ty);
+                    if !matches!(ty.kind(), TyKind::Uint(_)) || size == 0 || size > 8 {
+                        self.unsupported_mir = true;
+                        return;
+                    }
+                    (0..size).fold(0_u64, |bits, index| bits | (byte_value << (8 * index)))
+                };
+                let mut value = VmValue::new(Int::from_u64(self.z3_ctx, value_bits), ty);
+                value.facts.init = true;
+                self.set_local(local, value);
+                if let Some(alloc_id) = self.current_frame.local_alloc.get(&local).copied() {
+                    self.content_mut(alloc_id).facts.initialized = true;
                 }
             }
             CallEffect::WriteMemory { pointer_arg } => {

@@ -21,3 +21,13 @@ pub fn unknown_intrinsic_copy() {
     unsafe { std::intrinsics::copy_nonoverlapping(&source, &mut destination, 1); }
     unsafe { need_nonzero(destination); }
 }
+
+#[rapx::verify]
+pub unsafe fn unknown_direct_intrinsic_copy(pointer: *mut u32) {
+    unsafe { std::intrinsics::copy_nonoverlapping(pointer, pointer, 1) };
+}
+
+#[rapx::verify]
+pub unsafe fn unknown_direct_assume() {
+    unsafe { std::intrinsics::assume(false) };
+}

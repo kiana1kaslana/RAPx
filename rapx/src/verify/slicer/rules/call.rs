@@ -44,7 +44,17 @@ pub(crate) fn visit<'tcx>(
         }
     }
 
-    let summary = call_summary::dependency_summary(tcx, func, args.len());
+    let summary = call_summary::dependency_summary(tcx, def_id, func, destination.local, args.len());
+
+    if call_summary::effects::is_unmodeled_intrinsic(
+        tcx,
+        mir_utils::dep_callee_def_id(func),
+    ) {
+        items.push(RelevantItem::Terminator { def_id, block, switch_succ: None });
+        relevant.remove_all(&defs);
+        relevant.extend(call_args_uses_at(args, &summary.return_depends_on_args));
+        return;
+    }
 
     if defs.intersects(relevant) {
         items.push(RelevantItem::Terminator { def_id, block, switch_succ: None });

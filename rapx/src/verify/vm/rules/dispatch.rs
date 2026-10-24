@@ -1,7 +1,8 @@
 //! Direct MIR dispatch for symbolic execution rules.
 
 use rustc_middle::mir::{
-    BasicBlock, Place, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+    BasicBlock, Local, NonDivergingIntrinsic, Place, Rvalue, Statement, StatementKind,
+    Terminator, TerminatorKind,
 };
 
 use super::super::state::{VmState, VmValue};
@@ -22,6 +23,12 @@ pub(super) fn exec_statement<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, stmt: &S
         StatementKind::StorageDead(local) => {
             statement::exec_storage_dead(state, *local);
             "StorageDead"
+        }
+        StatementKind::Intrinsic(intrinsic)
+            if let NonDivergingIntrinsic::Assume(operand) = &**intrinsic =>
+        {
+            statement::exec_assume(state, operand);
+            "Assume"
         }
         kind if mir_support::ignored_statement(kind) => "Ignored",
         _ => {
@@ -47,6 +54,11 @@ pub(super) fn exec_terminator<'z3, 'tcx>(
             let caller_id = state.current_frame.current_def_id;
             state.exec_call(func, args, destination.local, caller_id);
             "Call"
+        }
+        TerminatorKind::TailCall { func, args, .. } => {
+            let caller_id = state.current_frame.current_def_id;
+            state.exec_call(func, args, Local::from_usize(0), caller_id);
+            "TailCall"
         }
         TerminatorKind::SwitchInt { discr, targets } => {
             terminator::exec_switch_int(state, discr, targets, successor);
@@ -108,12 +120,14 @@ pub(super) fn eval_rvalue<'z3, 'tcx>(
         ),
         #[cfg(not(rapx_ge_95))]
         Rvalue::NullaryOp(op) => ("NullaryOp", rvalue::eval_nullary_op(state, place, op)),
-        Rvalue::WrapUnsafeBinder(..) => (
+        Rvalue::WrapUnsafeBinder(operand, _) => (
             "WrapUnsafeBinder",
-            rvalue::eval_fresh_value(state, place, "wrap_unsafe_binder"),
+            rvalue::eval_wrap_unsafe_binder(state, place, operand),
         ),
         #[cfg(rapx_rvalue_has_reborrow)]
-        Rvalue::Reborrow(..) => ("Reborrow", rvalue::eval_reborrow(state, place)),
+        Rvalue::Reborrow(_, _, source) => {
+            ("Reborrow", rvalue::eval_reborrow(state, place, source))
+        }
         _ => {
             state.unsupported_mir = true;
             (

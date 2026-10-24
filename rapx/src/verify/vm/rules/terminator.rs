@@ -13,6 +13,9 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
     switch_succ: Option<BasicBlock>,
 ) {
     let discr_val = state.value_of_operand(discr);
+    if VmState::term_involves(&state.inline.opaque_intrinsic_terms, &discr_val.z3_term) {
+        state.unsupported_mir = true;
+    }
 
     // If the discriminator is a comparison result, record the direct boolean
     // condition alongside the ite-encoded `discr == value` fact, so the SMT
@@ -70,6 +73,9 @@ pub(crate) fn exec_assert<'z3, 'tcx>(
     expected: bool,
 ) {
     let cond_val = state.value_of_operand(cond);
+    if VmState::term_involves(&state.inline.opaque_intrinsic_terms, &cond_val.z3_term) {
+        state.unsupported_mir = true;
+    }
     // If the asserted operand is a comparison result, record the direct boolean
     // condition (`idx < len`) alongside the ite-encoded fact, so the SMT solver
     // can unfold it (mirrors `exec_switchint`).

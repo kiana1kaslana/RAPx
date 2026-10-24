@@ -72,16 +72,16 @@ fn trace_local_to_callee_arg(
             let Some(terminator) = &bb.terminator else {
                 continue;
             };
-            let TerminatorKind::Call {
-                func,
-                args,
-                destination,
-                ..
-            } = &terminator.kind
-            else {
-                continue;
+            let (func, args, destination) = match &terminator.kind {
+                TerminatorKind::Call { func, args, destination, .. } => {
+                    (func, args, destination.local)
+                }
+                TerminatorKind::TailCall { func, args, .. } => {
+                    (func, args, rustc_middle::mir::Local::from_usize(0))
+                }
+                _ => continue,
             };
-            if destination.local != current {
+            if destination != current {
                 continue;
             }
             // Trace through pointer-preserving calls: `as_ptr`/`as_mut_ptr`
@@ -209,7 +209,12 @@ fn path_ends_in_return(body: &rustc_middle::mir::Body<'_>, path: &[usize]) -> bo
         body.basic_blocks
             .get(BasicBlock::from_usize(*block))
             .and_then(|data| data.terminator.as_ref())
-            .is_some_and(|terminator| matches!(terminator.kind, TerminatorKind::Return))
+            .is_some_and(|terminator| {
+                matches!(
+                    terminator.kind,
+                    TerminatorKind::Return | TerminatorKind::TailCall { .. }
+                )
+            })
     })
 }
 
@@ -241,8 +246,10 @@ fn write_args_on_path<'tcx>(
         let Some(terminator) = data.terminator.as_ref() else {
             continue;
         };
-        let TerminatorKind::Call { func, args, .. } = &terminator.kind else {
-            continue;
+        let (func, args) = match &terminator.kind {
+            TerminatorKind::Call { func, args, .. }
+            | TerminatorKind::TailCall { func, args, .. } => (func, args),
+            _ => continue,
         };
 
         // `ptr::write`-style writes: trace the pointer arg to a callee arg.

@@ -44,7 +44,7 @@ use super::{
 
 use crate::helpers::mir_utils::{collect_return_block_indices, is_return_block};
 
-use crate::verify::checkpoint::{Checkpoint, CheckpointLocation};
+use crate::verify::checkpoint::{Checkpoint, CheckpointKind, CheckpointLocation};
 
 /// Orchestrates the three-stage verification pipeline (backward data-dependency
 /// analysis → forward state simulation → SMT checking) for a single function
@@ -104,6 +104,37 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
 
         for view in self.iter_callsite_checks() {
             let mut view_results: Vec<PropertyCheckResult<'tcx>> = Vec::new();
+
+            let unresolved_call = view.checkpoint.kind == CheckpointKind::UnsafeCall
+                && view.checkpoint.callee.is_none();
+            let unmodeled_intrinsic =
+                crate::verify::call_summary::effects::is_unmodeled_intrinsic(
+                    self.tcx,
+                    view.checkpoint.callee,
+                );
+            if unresolved_call || unmodeled_intrinsic {
+                view_results.push(PropertyCheckResult {
+                    checkpoint: view.checkpoint.location(),
+                    checkpoint_index: view.checkpoint_index,
+                    path_index: 0,
+                    property_index: 0,
+                    property: Property::new(self.tcx, self.target.def_id, "Unknown", &[]),
+                    result: CheckResult::Unknown(UnknownReason::Unimplemented),
+                    diagnostics: Some(if unmodeled_intrinsic {
+                        "intrinsic effect is not modeled".to_string()
+                    } else {
+                        "unsafe operation has no resolvable contract".to_string()
+                    }),
+                    path_description: String::new(),
+                    callee_name: view.checkpoint.callee_name(self.tcx),
+                });
+                if unresolved_call {
+                    for item in view_results {
+                        report.push(item);
+                    }
+                    continue;
+                }
+            }
 
             for (property_index, property) in view.properties.iter().enumerate() {
                 let bulk = self.check_property_paths(&view, property);
@@ -229,7 +260,9 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         let mut checkpoint_index = 0usize;
         self.checkpoints.iter().filter_map(move |checkpoint| {
             let properties = self.properties_for_callsite(checkpoint);
-            if properties.is_empty() {
+            if properties.is_empty()
+                && !(checkpoint.kind == CheckpointKind::UnsafeCall && checkpoint.callee.is_none())
+            {
                 return None;
             }
             let view = CheckpointCheckView {
