@@ -462,7 +462,6 @@ pub(crate) fn emit_property_rows<'tcx>(_tcx: TyCtxt<'tcx>, results: &[&PropertyC
     };
     for (path_desc, props) in &path_groups {
         rap_info!("        path {path_desc}:");
-        // Count identical (kind, origin, hazard, result) groups for dedup.
         let mut counts: Vec<CountEntry> = Vec::new();
         for r in props.iter() {
             let result = r.result.clone();

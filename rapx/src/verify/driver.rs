@@ -190,7 +190,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         match property {
             Property::Atom(atom)
                 if atom.kind == PropertyKind::Alias
-                    && crate::verify::api_classify::is_manually_drop_drop(
+                    && crate::other_api::is_manually_drop_drop(
                         view.checkpoint.callee,
                     ) =>
             {
@@ -625,7 +625,6 @@ impl<'tcx> VerifyRun<'tcx> {
             .collect();
         accumulated_requires.extend(con_contracts);
 
-        // Remove contracts that are invalidated by mutators
         if !mut_ids.is_empty() {
             let mut mutated_fields: Vec<usize> = Vec::new();
             for &mut_id in mut_ids {
@@ -739,7 +738,6 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
     /// level. Earlier rounds use fewer loop unrollings; later rounds incrementally
     /// add deeper paths.
     fn run(&mut self) {
-        // Register `pred!`-emitted `#[rapx::def_property("...")]` definitions.
         crate::verify::contract::compound::register_compound_properties(self.tcx);
 
         let collector = VerifyTargetCollector::collect_all(
@@ -767,7 +765,6 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
 
             let (planned_repeat, repeat_rounds) = self.repeat_rounds_for_target(target);
 
-            // Phase 1: unsafe checkpoint verification
             fn_crashed = self.run_repeat_rounds(
                 target,
                 &repeat_rounds,
@@ -775,7 +772,6 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
                 &mut all_results,
             );
 
-            // Phase 2: struct invariant verification
             if !target.struct_invariants.is_empty() && !self.skip_invariant {
                 let driver = VerifyDriver::new_with_repeat(self.tcx, target, planned_repeat);
                 match mir_utils::catch_panic(|| driver.verify_struct_invariants()) {
@@ -803,7 +799,6 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
                 }
             }
 
-            // Phase 3: built-in type invariant verification
             if !target.type_invariants.is_empty() && !self.skip_invariant {
                 let driver = VerifyDriver::new_with_repeat(self.tcx, target, planned_repeat);
                 match mir_utils::catch_panic(|| driver.verify_type_invariants()) {
@@ -947,7 +942,6 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
             self.emit_marker_trait_ensurance(&marker_targets);
         }
 
-        // --skip-invariant: generate constructor-mutator-method sequences
         if self.skip_invariant {
             self.run_invless_sequences(&collector.function_targets);
         }
@@ -1165,7 +1159,6 @@ impl<'tcx> VerifyRun<'tcx> {
             let methods = &struct_groups[&struct_def_id];
             let struct_name = self.tcx.def_path_str(struct_def_id);
 
-            // -- Struct invariants (once) --
             let inv_target = methods.iter().find(|t| !t.struct_invariants.is_empty());
             let have_invariants = inv_target.is_some();
 
@@ -1192,7 +1185,6 @@ impl<'tcx> VerifyRun<'tcx> {
                 rap_info!("");
             }
 
-            // -- Each method --
             let mut printed = false;
             for (mi, target) in methods.iter().enumerate() {
                 let is_last_method = mi + 1 == methods.len();
@@ -1208,12 +1200,10 @@ impl<'tcx> VerifyRun<'tcx> {
             }
         }
 
-        // -- Free functions --
         for target in &free_targets {
             self.print_target_contracts(target, "- ", "  ");
         }
 
-        // -- Traits (ensures / marker obligations) --
         let mut traits = trait_targets.iter().collect::<Vec<_>>();
         traits.sort_by_key(|t| self.tcx.def_path_str(t.def_id));
         for trait_target in traits {
@@ -1317,7 +1307,6 @@ impl<'tcx> VerifyRun<'tcx> {
         let target_path = fmt_fn_path_with_generics(self.tcx, target.def_id);
         let short_name = short_fn_name(self.tcx, target.def_id);
 
-        // Collect what to print first
         let has_caller = self.has_caller_contracts(target, is_unsafe_fn);
         let mut callee_ids: Vec<_> = target.callee_requires.keys().copied().collect();
         callee_ids.retain(|did| {

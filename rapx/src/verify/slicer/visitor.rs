@@ -180,7 +180,6 @@ impl<'tcx> BackwardSlicer<'tcx> {
         let block_data = &body.basic_blocks[block];
         let mut results = Vec::new();
 
-        // Build the checkpoint-layer items when this block IS the target.
         let (checkpoint_items, checkpoint_relevant) = if node.block == target_block {
             let mut relevant = RelevantPlaces::from_property(property);
             if let Some(cs) = bind_checkpoint {
@@ -192,7 +191,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 Some(CheckpointKind::RawPtrDeref)
                     | Some(CheckpointKind::StaticMutAccess)
                     | Some(CheckpointKind::UnsafeCall)
-            ) || crate::verify::api_classify::is_manually_drop_drop(
+            ) || crate::other_api::is_manually_drop_drop(
                 bind_checkpoint.and_then(|c| c.callee),
             );
             if !skip_terminator {
@@ -202,7 +201,6 @@ impl<'tcx> BackwardSlicer<'tcx> {
                     switch_succ: None,
                 });
             }
-            // Pass 1: normal processing.
             for (si, stmt) in block_data.statements.iter().enumerate().rev() {
                 visitor.visit_statement(
                     def_id,

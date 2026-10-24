@@ -34,10 +34,8 @@ pub(crate) fn build_type_invariants_from_params<'tcx>(
 
     let mut results = Vec::new();
 
-    // Use the existing signature parser for parameter names.
     let (param_names, _param_tys) = crate::helpers::name::parse_signature(tcx, def_id);
 
-    // Add invariants for each parameter
     for (index, &param_ty) in inputs.iter().enumerate() {
         if param_ty.is_primitive() {
             continue;
@@ -55,7 +53,6 @@ pub(crate) fn build_type_invariants_from_params<'tcx>(
         );
     }
 
-    // Also add invariants for the return type
     if !output.is_unit() && !output.is_primitive() {
         let (type_path, elem_ty) = type_path_key(tcx, output);
         collect_type_invariants(
@@ -89,7 +86,6 @@ fn collect_type_invariants<'tcx>(
             ));
         }
     }
-    // Also try with common alloc/std prefixes
     for prefix in ["alloc::", "std::"] {
         let prefixed = format!("{prefix}{type_path}");
         if prefixed != type_path
@@ -196,7 +192,6 @@ fn instantiate_entry<'tcx>(
     }
     if uses_elem {
         let Some(ty) = elem_ty else {
-            // `$elem` was used but no element type is available: drop it.
             return Vec::new();
         };
         replace_ty_args(&mut property, ty);

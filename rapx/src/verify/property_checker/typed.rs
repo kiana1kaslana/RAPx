@@ -52,7 +52,6 @@ impl PropertyChecker {
                 }
             }
         }
-        // A missing `Ty` is inferred from the target's pointee type.
         let expected = Self::ty_arg(property, 1).or(Some(value_elem_ty));
         if let Some(expected_ty) = expected {
             let expected_ty = self.instantiate_callsite_ty(vm_state, checkpoint, expected_ty);
@@ -96,11 +95,11 @@ impl PropertyChecker {
                     // MaybeUninit<T> accessed via raw pointer from as_mut_ptr:
                     // treat as T for write ops where caller will initialize it.
                     if let TyKind::Adt(adt_def, substs) = elem_ty.kind()
-                        && crate::verify::api_classify::is_maybe_uninit_type(adt_def.did())
+                        && crate::other_api::is_maybe_uninit_type(adt_def.did())
                             && matches!(value.ty.kind(), TyKind::RawPtr(..))
                             && let Some(inner) = substs.first().and_then(|s| s.as_type())
                                 && inner == expected_ty
-                                    && crate::verify::api_classify::is_mem_copy_or_write(
+                                    && crate::other_api::is_mem_copy_or_write(
                                         checkpoint.callee,
                                     ) {
                                         return CheckResult::ProvedByRule;
@@ -235,7 +234,7 @@ impl PropertyChecker {
     }
 
     pub(super) fn ty_is_maybe_uninit(ty: Ty<'_>) -> bool {
-        crate::verify::api_classify::is_maybe_uninit_ty(ty)
+        crate::other_api::is_maybe_uninit_ty(ty)
     }
 
     pub(super) fn check_size<'z3, 'tcx>(

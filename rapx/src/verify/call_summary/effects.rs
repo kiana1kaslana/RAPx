@@ -12,10 +12,12 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 
-use super::{BoundedArithmeticOp, CallDependencySummary, CallEffect, CallEffectSummary, OverflowOp};
-use crate::def_id;
+use super::{
+    BoundedArithmeticOp, CallDependencySummary, CallEffect, CallEffectSummary, OverflowOp,
+};
+use crate::intrinsic_api;
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
-use crate::verify::api_classify;
+use crate::other_api;
 
 // ── Context for effect builders ────────────────────────────────────────
 
@@ -46,81 +48,113 @@ macro_rules! ED {
 static REGISTRY: &[Entry] = &[
     // ── Hand-specialized VM shapes ──────────────────────────────────
     // Listed first so they win over the generic def-path matchers below.
-    ED!(api_classify::is_branch, eff_branch),
-    ED!(api_classify::is_index_method, eff_slice_range_index),
-    ED!(api_classify::is_iter_len, eff_iter_len),
-    ED!(api_classify::is_iter_is_empty, eff_iter_is_empty),
-    ED!(api_classify::is_nonnull_checked_new, eff_nonnull_new),
-    ED!(api_classify::is_iter_next, eff_iter_next),
-    ED!(api_classify::is_range_next, eff_range_next),
-    ED!(api_classify::is_eq_call, eff_none),
-    // ── Intrinsics — no MIR body ────────────────────────────────────
-    ED!(api_classify::is_layout_constant, eff_layout_const),
-    ED!(api_classify::is_intrinsic_select_unpredictable, eff_select_unpredictable),
-    ED!(api_classify::is_intrinsic_branch_hint, eff_alias_arg0),
-    ED!(api_classify::is_intrinsic_ptr_offset_from, eff_ptr_offset_from),
-    ED!(api_classify::is_intrinsic_arith_offset, eff_arith_offset),
-    ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
-    ED!(api_classify::is_intrinsic_integer_min, eff_cmp_min),
-    ED!(api_classify::is_intrinsic_integer_max, eff_return_max),
-    ED!(api_classify::is_intrinsic_saturating_add, eff_saturating_add),
-    ED!(api_classify::is_intrinsic_saturating_sub, eff_saturating_sub),
-    ED!(api_classify::is_intrinsic_unchecked_add, eff_return_add),
-    ED!(api_classify::is_intrinsic_unchecked_mul, eff_return_mul),
-    ED!(api_classify::is_intrinsic_wrapping_sub, eff_wrapping_sub),
-    ED!(api_classify::is_ptr_copy, eff_copy_memory),
-    ED!(api_classify::is_intrinsic_typed_swap_nonoverlapping, eff_swap_memory),
-    ED!(api_classify::is_intrinsic_write_bytes, eff_fill_bytes),
-    ED!(api_classify::is_intrinsic_nonzero_preserving, eff_return_nonzero_iff),
-    ED!(api_classify::is_intrinsic_raw_eq, eff_raw_eq),
-    ED!(api_classify::is_intrinsic_exact_div, eff_exact_div),
-    ED!(api_classify::is_intrinsic_pure_opaque, eff_opaque_return),
+    ED!(other_api::is_branch, eff_branch),
+    ED!(other_api::is_index_method, eff_slice_range_index),
+    ED!(other_api::is_iter_len, eff_iter_len),
+    ED!(other_api::is_iter_is_empty, eff_iter_is_empty),
+    ED!(other_api::is_nonnull_checked_new, eff_nonnull_new),
+    ED!(other_api::is_iter_next, eff_iter_next),
+    ED!(other_api::is_range_next, eff_range_next),
+    ED!(other_api::is_eq_call, eff_none),
+    // ── Layout and intrinsic effects ───────────────────────────────
+    ED!(other_api::is_layout_constant, eff_layout_const),
+    ED!(
+        intrinsic_api::is_select_unpredictable,
+        eff_select_unpredictable
+    ),
+    ED!(intrinsic_api::is_branch_hint, eff_alias_arg0),
+    ED!(
+        intrinsic_api::is_ptr_offset_from,
+        eff_ptr_offset_from
+    ),
+    ED!(intrinsic_api::is_arith_offset, eff_arith_offset),
+    ED!(intrinsic_api::is_black_box, eff_return_arg_value),
+    ED!(intrinsic_api::is_with_overflow, eff_with_overflow),
+    ED!(intrinsic_api::is_integer_min, eff_cmp_min),
+    ED!(intrinsic_api::is_integer_max, eff_return_max),
+    ED!(
+        intrinsic_api::is_saturating_add,
+        eff_saturating_add
+    ),
+    ED!(
+        intrinsic_api::is_saturating_sub,
+        eff_saturating_sub
+    ),
+    ED!(intrinsic_api::is_unchecked_add, eff_return_add),
+    ED!(intrinsic_api::is_unchecked_mul, eff_return_mul),
+    ED!(intrinsic_api::is_wrapping_sub, eff_wrapping_sub),
+    ED!(other_api::is_ptr_copy, eff_copy_memory),
+    ED!(
+        intrinsic_api::is_typed_swap_nonoverlapping,
+        eff_swap_memory
+    ),
+    ED!(intrinsic_api::is_write_bytes, eff_fill_bytes),
+    ED!(
+        intrinsic_api::is_nonzero_preserving,
+        eff_return_nonzero_iff
+    ),
+    ED!(intrinsic_api::is_raw_eq, eff_raw_eq),
+    ED!(intrinsic_api::is_exact_div, eff_exact_div),
+    ED!(intrinsic_api::is_pure_opaque, eff_opaque_return),
     // ── MIR unavailable — non-#[inline] cross-crate ─────────────────
-    ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
-    ED!(api_classify::is_box_alloc_ctor, eff_box_alloc),
-    ED!(api_classify::is_exchange_malloc, eff_exchange_malloc),
-    // Needed on older toolchains where `vec![…]` lowers to `into_vec`.
-    ED!(api_classify::is_vec_from_box, eff_vec_from_box),
+    ED!(other_api::is_vec_alloc_constructor, eff_new_allocation),
+    ED!(other_api::is_box_alloc_ctor, eff_box_alloc),
+    ED!(other_api::is_exchange_malloc, eff_exchange_malloc),
+    ED!(other_api::is_vec_from_box, eff_vec_from_box),
     // `slice::to_vec` copies the slice; model like `into_vec` so
     // `String::from(&str)`'s Vec buffer gets provenance.
-    ED!(api_classify::is_slice_to_vec, eff_vec_from_box),
-    ED!(api_classify::is_vec_with_capacity, eff_new_allocation_from_cap),
-    ED!(api_classify::is_into_boxed_slice, eff_box_from_vec),
-    ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
+    ED!(other_api::is_slice_to_vec, eff_vec_from_box),
+    ED!(
+        other_api::is_vec_with_capacity,
+        eff_new_allocation_from_cap
+    ),
+    ED!(other_api::is_into_boxed_slice, eff_box_from_vec),
+    ED!(other_api::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
-    ED!(api_classify::is_checked_next_pow2, eff_return_option_some_nonzero),
+    ED!(
+        other_api::is_checked_next_pow2,
+        eff_return_option_some_nonzero
+    ),
     // Raw-pointer `cast` is excluded (`is_as_ptr_valid`) — left to inlining.
-    ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
-    ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
-    ED!(api_classify::is_slice_get_unchecked, eff_alias_ptr),
+    ED!(other_api::is_as_ptr_valid, eff_alias_ptr),
+    ED!(other_api::is_str_as_bytes, eff_alias_arg0),
+    ED!(other_api::is_slice_get_unchecked, eff_alias_ptr),
     // `SliceIndex::get_unchecked(self, slice)` returns `slice + self` (receiver
     // is the index), so model as element-strided add off argument 1.
-    ED!(api_classify::is_sliceindex_get_unchecked, eff_sliceindex_get_unchecked),
-    ED!(api_classify::is_ownership_reconstruction, eff_ownership_recon),
-    ED!(api_classify::is_manually_drop_drop, eff_drop_memory),
-    ED!(api_classify::is_std_drop, eff_drop_memory),
-    ED!(api_classify::is_drop_in_place, eff_drop_memory),
-    ED!(api_classify::is_split_at, eff_split_at),
-    ED!(api_classify::is_from_raw_parts, eff_from_raw_parts),
-    ED!(api_classify::is_with_metadata_of, eff_return_pointer_arg),
-    ED!(api_classify::is_align_offset, eff_align_offset),
-    ED!(api_classify::is_cstr_from_ptr, eff_alias_arg0),
-    ED!(api_classify::is_slice_range, eff_slice_range),
-    ED!(api_classify::is_mem_replace, eff_mem_replace),
-    ED!(api_classify::is_layout_align, eff_layout_align),
-    // Local `_ext` re-implementations, matched by name-scanning `fn_defs()`.
-    ED!(api_classify::is_align_to_local, eff_align_to),
-    ED!(api_classify::is_iter_position, eff_option_scan_index),
-    ED!(api_classify::is_strlen, eff_scan_length),
+    ED!(
+        other_api::is_sliceindex_get_unchecked,
+        eff_sliceindex_get_unchecked
+    ),
+    ED!(
+        other_api::is_ownership_reconstruction,
+        eff_ownership_recon
+    ),
+    ED!(other_api::is_manually_drop_drop, eff_drop_memory),
+    ED!(other_api::is_std_drop, eff_drop_memory),
+    ED!(other_api::is_drop_in_place, eff_drop_memory),
+    ED!(other_api::is_split_at, eff_split_at),
+    ED!(other_api::is_from_raw_parts, eff_from_raw_parts),
+    ED!(other_api::is_with_metadata_of, eff_return_pointer_arg),
+    ED!(other_api::is_align_offset, eff_align_offset),
+    ED!(other_api::is_cstr_from_ptr, eff_alias_arg0),
+    ED!(other_api::is_slice_range, eff_slice_range),
+    ED!(other_api::is_mem_replace, eff_mem_replace),
+    ED!(other_api::is_layout_align, eff_layout_align),
+    ED!(other_api::is_align_to_local, eff_align_to),
+    ED!(other_api::is_iter_position, eff_option_scan_index),
+    ED!(other_api::is_strlen, eff_scan_length),
     // ── MIR available — deliberately opaque ─────────────────────────
     // `eff_none` keeps the call in the registry so the path graph does not inline.
-    ED!(api_classify::is_nonnull_new_unchecked, eff_return_pointer_arg),
-    ED!(api_classify::is_maybe_uninit_uninit, eff_none),
     ED!(
-        api_classify::is_maybe_uninit_assume_init,
+        other_api::is_nonnull_new_unchecked,
+        eff_return_pointer_arg
+    ),
+    ED!(other_api::is_maybe_uninit_uninit, eff_none),
+    ED!(
+        other_api::is_maybe_uninit_assume_init,
         eff_return_arg_value
     ),
-    ED!(api_classify::is_maybe_uninit_write, eff_write_mem),
+    ED!(other_api::is_maybe_uninit_write, eff_write_mem),
 ];
 
 /// True when the VM has a symbolic model for `callee` (any registry entry). The
@@ -132,7 +166,7 @@ pub(crate) fn is_symbolically_modeled(callee: Option<DefId>) -> bool {
 }
 
 pub(crate) fn is_unmodeled_intrinsic(tcx: TyCtxt<'_>, callee: Option<DefId>) -> bool {
-    callee.is_some_and(|id| tcx.intrinsic(id).is_some()) && !is_symbolically_modeled(callee)
+    callee.is_some_and(|id| intrinsic_api::is_intrinsic(tcx, id)) && !is_symbolically_modeled(callee)
 }
 
 pub(crate) fn intrinsic_dependency_summary<'tcx>(
@@ -144,15 +178,34 @@ pub(crate) fn intrinsic_dependency_summary<'tcx>(
     arg_count: usize,
 ) -> Option<CallDependencySummary> {
     let id = callee?;
-    if tcx.intrinsic(id).is_none() && !api_classify::is_ptr_copy(callee) {
+    if !intrinsic_api::is_intrinsic(tcx, id) && !other_api::is_ptr_copy(callee) {
         return None;
     }
-    let write_args = lookup_effect(tcx, caller, callee, func, destination)
-        .unwrap_or_default()
-        .iter()
-        .flat_map(CallEffect::written_args)
-        .filter(|arg| *arg < arg_count)
-        .collect();
+    let modeled = lookup_effect(tcx, caller, callee, func, destination);
+    let write_args = if let Some(effects) = modeled {
+        effects
+            .iter()
+            .flat_map(CallEffect::written_args)
+            .filter(|arg| *arg < arg_count)
+            .collect()
+    } else {
+        tcx.fn_sig(id)
+            .skip_binder()
+            .inputs()
+            .skip_binder()
+            .iter()
+            .take(arg_count)
+            .enumerate()
+            .filter_map(|(index, ty)| {
+                matches!(
+                    ty.kind(),
+                    TyKind::RawPtr(_, rustc_middle::ty::Mutability::Mut)
+                        | TyKind::Ref(_, _, rustc_middle::ty::Mutability::Mut)
+                )
+                .then_some(index)
+            })
+            .collect()
+    };
     Some(CallDependencySummary {
         return_depends_on_args: (0..arg_count).collect(),
         write_args,
@@ -348,9 +401,9 @@ fn eff_wrapping_sub(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 fn eff_with_overflow(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     let callee = mir_utils::dep_callee_def_id(ctx.func);
-    let op = if api_classify::is_intrinsic_add_with_overflow(callee) {
+    let op = if intrinsic_api::is_add_with_overflow(callee) {
         OverflowOp::Add
-    } else if api_classify::is_intrinsic_sub_with_overflow(callee) {
+    } else if intrinsic_api::is_sub_with_overflow(callee) {
         OverflowOp::Sub
     } else {
         OverflowOp::Mul
@@ -475,8 +528,7 @@ fn eff_layout_align(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 }
 
 fn eff_layout_const(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    layout_constant_effect(ctx.tcx, ctx.caller, ctx.func)
-        .map_or_else(Vec::new, |e| vec![e])
+    layout_constant_effect(ctx.tcx, ctx.caller, ctx.func).map_or_else(Vec::new, |e| vec![e])
 }
 
 fn eff_branch(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
@@ -525,14 +577,10 @@ fn layout_constant_effect<'tcx>(
 ) -> Option<CallEffect> {
     let ty = layout_call_ty(func)?;
     let callee = mir_utils::dep_callee_def_id(func)?;
-    let is_align = def_id::contains(
-        &[def_id::mem_align_of(), def_id::intrinsics_align_of()],
-        callee,
-    );
-    let is_size = def_id::contains(
-        &[def_id::mem_size_of(), def_id::intrinsics_size_of()],
-        callee,
-    );
+    let is_align = other_api::mem_align_of() == Some(callee)
+        || intrinsic_api::is_align_of(Some(callee));
+    let is_size = other_api::mem_size_of() == Some(callee)
+        || intrinsic_api::is_size_of(Some(callee));
     if !is_size && !is_align {
         return None;
     }
@@ -557,7 +605,10 @@ fn eff_box_from_vec(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 /// Transparent-wrapper deref (`ManuallyDrop`/`MaybeDangling`) when the registry
 /// has no match: the return aliases the receiver's inner value.
-pub(crate) fn effect_summary<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> Option<CallEffectSummary> {
+pub(crate) fn effect_summary<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    func: &Operand<'tcx>,
+) -> Option<CallEffectSummary> {
     if let Some(peel) = transparent_deref_peel(tcx, func) {
         return Some(vec![CallEffect::ReturnTransparentDeref { arg: 0, peel }]);
     }
@@ -584,9 +635,10 @@ fn transparent_deref_peel<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> Opti
 /// Element type of a `Vec<T>`, if `ty` is a `Vec`.
 pub(crate) fn vec_elem_ty<'tcx>(ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
     if let TyKind::Adt(adt_def, substs) = ty.kind()
-        && api_classify::is_std_vec(adt_def.did()) {
-            return substs.first().and_then(|s| s.as_type());
-        }
+        && other_api::is_std_vec(adt_def.did())
+    {
+        return substs.first().and_then(|s| s.as_type());
+    }
     None
 }
 

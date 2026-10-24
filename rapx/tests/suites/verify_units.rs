@@ -663,7 +663,7 @@ fn unknown_unsound_01() {
 fn unsupported_mir_01() {
     let output = run_with_args("verify_units/unsupported_mir_1", CMD_VERIFY_TARGETED);
     assert_function_result(&output, "unknown_inline_asm_write", "UNKNOWN");
-    assert_function_result(&output, "unknown_intrinsic_copy", "UNKNOWN");
+    assert_function_result(&output, "unsound_intrinsic_copy", "UNSOUND");
     assert_function_result(&output, "unknown_direct_intrinsic_copy", "UNKNOWN");
     assert_function_result(&output, "unknown_direct_assume", "UNKNOWN");
 }
@@ -684,6 +684,37 @@ fn intrinsic_effects_01() {
     assert_function_result(&output, "unknown_after_float_to_int", "UNKNOWN");
     assert_function_result(&output, "unsound_after_typed_swap", "UNSOUND");
     assert_function_result(&output, "sound_after_typed_swap", "SOUND");
+}
+
+#[test]
+fn intrinsic_flow_01() {
+    let output = run_with_args("verify_units/intrinsic_flow_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_thread_local_value", "SOUND");
+    assert_function_result(&output, "unsound_thread_local_value", "UNSOUND");
+    assert_function_result(&output, "unknown_volatile_store_wrapper", "UNKNOWN");
+    assert_function_result(&output, "sound_repeated_array_field", "SOUND");
+    assert_function_result(&output, "unsound_repeated_array_field", "UNSOUND");
+    assert_function_result(&output, "sound_symbolic_repeated_array_field", "SOUND");
+    assert_function_result(&output, "sound_unrelated_black_box", "SOUND");
+    assert_function_result(&output, "sound_black_box_value", "SOUND");
+    assert_function_result(&output, "unsound_black_box_value", "UNSOUND");
+    assert_function_result(&output, "sound_inline_write_bytes", "SOUND");
+    assert_function_result(&output, "unsound_inline_write_bytes", "UNSOUND");
+    assert_function_result(&output, "sound_direct_intrinsic_copy", "SOUND");
+    assert_function_result(&output, "unsound_direct_intrinsic_copy", "UNSOUND");
+    assert_function_result(&output, "sound_repeated_array_read", "SOUND");
+    assert_function_result(&output, "sound_large_repeated_array_read", "SOUND");
+    assert_function_result(&output, "sound_large_symbolic_array_read", "SOUND");
+    assert_function_result(&output, "sound_reassigned_repeated_array", "SOUND");
+    assert_function_result(&output, "sound_repeated_array_reference", "SOUND");
+    assert_function_result(&output, "sound_symbolic_array_write", "SOUND");
+    assert_function_result(&output, "unsound_symbolic_array_write", "UNSOUND");
+    assert_function_result(&output, "unsound_repeated_array_read", "UNSOUND");
+    assert_function_result(&output, "unsound_array_overwrite", "UNSOUND");
+    assert_function_result(&output, "sound_array_overwrite", "SOUND");
+    assert_function_result(&output, "sound_explicit_array_read", "SOUND");
+    assert_function_result(&output, "sound_symbolic_array_read", "SOUND");
+    assert_function_result(&output, "unsound_symbolic_array_read", "UNSOUND");
 }
 
 #[test]

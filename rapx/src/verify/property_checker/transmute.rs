@@ -13,7 +13,6 @@ use crate::verify::{
 use super::PropertyChecker;
 
 impl PropertyChecker {
-    // ── check_valid_transmute ──────────────────────────────────
 
     pub(super) fn check_valid_transmute<'z3, 'tcx>(
         &self,
@@ -45,7 +44,6 @@ impl PropertyChecker {
         }
     }
 
-    // ── check_trait ────────────────────────────────────────────
 
     pub(super) fn check_trait<'z3, 'tcx>(
         &self,
@@ -111,7 +109,6 @@ impl PropertyChecker {
         CheckResult::Unknown(UnknownReason::Unimplemented)
     }
 
-    // ── check_split_transmute ──────────────────────────────────
 
     pub(super) fn check_split_transmute<'z3, 'tcx>(
         &self,

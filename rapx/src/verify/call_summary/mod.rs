@@ -9,7 +9,7 @@ use rustc_middle::{
 };
 
 use crate::helpers::mir_utils;
-use crate::verify::api_classify::is_branch;
+use crate::other_api::is_branch;
 
 /// Dependency summary consumed by the backward visitor.
 #[derive(Clone, Debug)]
@@ -255,8 +255,8 @@ pub(crate) fn dependency_summary<'tcx>(
     // callees alike, no hand-written table needed.
     if let Some(callee) = callee {
         if arg_count > 0
-            && (crate::verify::api_classify::is_iter_next(Some(callee))
-                || crate::verify::api_classify::is_range_next(Some(callee)))
+            && (crate::other_api::is_iter_next(Some(callee))
+                || crate::other_api::is_range_next(Some(callee)))
         {
             let mut summary = CallDependencySummary::fallback(arg_count);
             summary.write_args.push(0);

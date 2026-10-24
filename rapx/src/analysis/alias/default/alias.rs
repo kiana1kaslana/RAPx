@@ -1,5 +1,5 @@
 use super::{MopFnAliasMap, graph::*};
-use crate::def_id::{call_mut, clone, contains, replace, take};
+use crate::other_api::{call_mut, clone, contains, replace, take};
 use crate::limit::MAX_VALUES_PER_PATH;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{

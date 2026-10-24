@@ -1,6 +1,6 @@
 use super::PathTree;
 use crate::compat::{FxHashMap, FxHashSet};
-use crate::def_id;
+use crate::other_api;
 use crate::helpers::mir_utils;
 use crate::graphs::{
     cfg::{CfgBlock, ControlFlowGraph},
@@ -497,11 +497,11 @@ fn build_function_info<'tcx>(
                 ..
             } = terminator.kind
                 && let Some(did) = mir_utils::dep_callee_def_id(func) {
-                    if def_id::known_nonnull_fns().contains(&did) {
+                    if other_api::known_nonnull_fns().contains(&did) {
                         info.origin
                             .insert(local_base + destination.local.as_usize(), LocalOrigin::NonNull);
                     }
-                    if def_id::null_ptr_fns().contains(&did) {
+                    if other_api::null_ptr_fns().contains(&did) {
                         info.origin
                             .insert(local_base + destination.local.as_usize(), LocalOrigin::Const(0));
                     }
@@ -784,7 +784,7 @@ impl<'tcx> PathGraph<'tcx> {
                 // Monomorphize the generic `slice::get`/`get_mut` wrapper so its
                 // `SliceIndex::get` delegation resolves.
                 let instance = if cross_crate
-                    && crate::verify::api_classify::is_slice_get(Some(base_callee))
+                    && crate::other_api::is_slice_get(Some(base_callee))
                 {
                     mir_utils::resolve_callee_instance(tcx, self.cfg.block(i).def_id, func)
                 } else {
@@ -792,13 +792,13 @@ impl<'tcx> PathGraph<'tcx> {
                 };
                 let has_fn_sim =
                     crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee));
-                let is_ub_check = crate::verify::api_classify::is_ub_check(tcx, callee);
+                let is_ub_check = crate::other_api::is_ub_check(tcx, callee);
                 // Skip cross-crate trait methods with a default body (they call a
                 // further required method whose effect we can't attribute).
                 let cross_crate_trait_method = cross_crate
                     && is_trait_method
                     && tcx.is_mir_available(base_callee);
-                if tcx.intrinsic(callee).is_some()
+                if crate::intrinsic_api::is_intrinsic(tcx, callee)
                     || !tcx.is_mir_available(callee)
                     || expanded.contains(&callee)
                     || has_fn_sim
@@ -1254,7 +1254,7 @@ impl<'tcx> PathGraph<'tcx> {
                     }
                 }
             }
-            if crate::verify::api_classify::is_slice_get(Some(callee)) {
+            if crate::other_api::is_slice_get(Some(callee)) {
                 if let Some(range) = args.get(1)
                     && let Some(range_local) =
                         range.node.place().map(|p| p.local.as_usize())
@@ -1271,7 +1271,7 @@ impl<'tcx> PathGraph<'tcx> {
                         cs.lengths.insert(dest, (start, end));
                     }
                 }
-            } else if crate::verify::api_classify::is_len(Some(callee)) {
+            } else if crate::other_api::is_len(Some(callee)) {
                 // `slice::len(slice)` -> resolve the slice's length.
                 if let Some(slice) = args.get(0)
                     && let Some(slice_local) =

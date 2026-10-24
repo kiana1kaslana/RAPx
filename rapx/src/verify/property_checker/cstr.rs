@@ -10,7 +10,7 @@ use z3::{
 use crate::compat::FxHashMap;
 use crate::verify::checkpoint::Checkpoint;
 use crate::helpers::mir_utils::dep_callee_def_id;
-use crate::verify::api_classify::is_as_ptr;
+use crate::other_api::is_as_ptr;
 use crate::verify::vm::state::{AllocId, VmState};
 use crate::verify::{
     contract::{ContractExpr, Property, PropertyArg},
@@ -77,7 +77,6 @@ fn body_parents(body: &Body<'_>) -> FxHashMap<Local, Local> {
 }
 
 impl PropertyChecker {
-    // ── check_valid_cstr ───────────────────────────────────────
 
     pub(super) fn check_valid_cstr<'z3, 'tcx>(
         &self,
@@ -146,7 +145,6 @@ impl PropertyChecker {
                 .map(|v| v as usize)
                 .unwrap_or(0);
 
-            // 1. Try fast-path: concrete byte-level check from known_nul / known_non_nul
             if let Some(r) = self.check_valid_cstr_from_known_nul(vm_state, alloc_id, start_offset)
             {
                 return r;
@@ -171,7 +169,7 @@ impl PropertyChecker {
         //    (from_bytes_with_nul_unchecked, from_vec_with_nul_unchecked)
         //    and we can't verify all bytes, return Unknown.
         let is_strict =
-            crate::verify::api_classify::is_cstr_unchecked_constructor(checkpoint.callee);
+            crate::other_api::is_cstr_unchecked_constructor(checkpoint.callee);
         if is_strict {
             CheckResult::Unknown(UnknownReason::Unimplemented)
         } else {
@@ -190,7 +188,6 @@ impl PropertyChecker {
         alloc_id: AllocId,
         start_offset: usize,
     ) -> Option<CheckResult> {
-        // Collect all concrete offsets where we know what the byte is
         let nul_offsets_all = vm_state.alloc_nul_offsets(alloc_id);
         let known_offsets: Vec<usize> = nul_offsets_all
             .iter()
@@ -204,7 +201,6 @@ impl PropertyChecker {
 
         let max_known = known_offsets.iter().max().copied().unwrap_or(0);
 
-        // Find the NUL byte at or after start_offset
         let nul_offsets: Vec<usize> = nul_offsets_all
             .into_iter()
             .filter(|off| *off >= start_offset)
@@ -220,13 +216,11 @@ impl PropertyChecker {
             return Some(CheckResult::Failed);
         }
 
-        // Check if there's exactly one NUL at the end of the known range
         let min_nul = nul_offsets.iter().min().copied().unwrap_or(0);
 
         // All offsets between start_offset and min_nul must be known non-NUL
         for off in start_offset..min_nul {
             if vm_state.is_byte_nul(alloc_id, off) {
-                // Interior NUL found before the first NUL after start_offset
                 return Some(CheckResult::Failed);
             }
             if !vm_state.is_byte_non_nul(alloc_id, off) {
@@ -376,7 +370,6 @@ impl PropertyChecker {
         let target_local = first_arg_local(checkpoint)?;
         let body = vm_state.body();
 
-        // Build parent map (same as legacy)
         let parents = body_parents(body);
         let root = mir_utils::resolve_through_casts(
             body,
@@ -461,7 +454,6 @@ impl PropertyChecker {
         let body = vm_state.body();
         let tcx = vm_state.tcx;
 
-        // 1. Use worklist-based analysis for as_ptr() chains and branch cases
         let all_bytes =
             mir_utils::collect_all_const_bytes_worklist(tcx, body, target_local);
         if !all_bytes.is_empty() {

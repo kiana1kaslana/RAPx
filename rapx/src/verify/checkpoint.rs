@@ -5,24 +5,24 @@
 //! `collect_*` functions scan MIR for them; the rest of the verifier consumes
 //! the resulting records.
 
-use rustc_hir::{Safety, def_id::DefId};
 #[cfg(all(rapx_has_attr_ir, not(rapx_box_deref_transmute)))]
 use rustc_attr_ir::LangItem;
 #[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100), not(rapx_box_deref_transmute)))]
 use rustc_hir::LangItem;
 #[cfg(all(not(rapx_has_attr_ir), rapx_ge_100, not(rapx_box_deref_transmute)))]
 use rustc_hir::attrs::lang_items::LangItem;
+use rustc_hir::{Safety, def_id::DefId};
+#[cfg(rapx_box_deref_transmute)]
+use rustc_middle::mir::CastKind;
+#[cfg(not(rapx_box_deref_transmute))]
+use rustc_middle::ty::TyKind;
 use rustc_middle::{
     mir::{
-        BasicBlock, Body, Local, Operand, Place, ProjectionElem, Rvalue, StatementKind,
-        TerminatorKind,
+        BasicBlock, Body, Local, NonDivergingIntrinsic, Operand, Place, ProjectionElem, Rvalue,
+        StatementKind, TerminatorKind,
     },
     ty::{self, Ty, TyCtxt},
 };
-#[cfg(not(rapx_box_deref_transmute))]
-use rustc_middle::ty::TyKind;
-#[cfg(rapx_box_deref_transmute)]
-use rustc_middle::mir::CastKind;
 use std::collections::HashSet;
 
 use crate::helpers::mir_scan::{get_fn_safety, place_has_raw_deref};
@@ -156,12 +156,19 @@ pub fn collect_unsafe_callsites<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Vec<C
     let body = tcx.optimized_mir(def_id);
     for (bb, data) in body.basic_blocks.iter_enumerated() {
         for (statement_index, statement) in data.statements.iter().enumerate() {
-            if matches!(&statement.kind, StatementKind::Intrinsic(..)) {
+            if let StatementKind::Intrinsic(intrinsic) = &statement.kind {
+                let (callee, args) = match &**intrinsic {
+                    NonDivergingIntrinsic::CopyNonOverlapping(copy) => (
+                        crate::intrinsic_api::get("copy_nonoverlapping"),
+                        vec![copy.src.clone(), copy.dst.clone(), copy.count.clone()],
+                    ),
+                    _ => (None, Vec::new()),
+                };
                 checkpoints.push(Checkpoint {
                     caller: def_id,
-                    callee: None,
+                    callee,
                     block: bb,
-                    args: Vec::new(),
+                    args,
                     kind: CheckpointKind::UnsafeCall,
                     destination: None,
                     is_mut_ref: false,
@@ -214,13 +221,8 @@ pub fn collect_unsafe_callsites<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Vec<C
         // Normalize a trait-method callee to the concrete impl method so that
         // inline `#[rapx::requires]` contracts (which live on the impl, not the
         // trait declaration) are found during contract lookup.
-        let resolved_callee = resolve_callee_impl(
-            tcx,
-            def_id,
-            *callee_def_id,
-            callee_args,
-        )
-        .unwrap_or(*callee_def_id);
+        let resolved_callee =
+            resolve_callee_impl(tcx, def_id, *callee_def_id, callee_args).unwrap_or(*callee_def_id);
 
         checkpoints.push(Checkpoint {
             caller: def_id,
@@ -472,14 +474,15 @@ pub fn collect_static_mut_access_info<'tcx>(
                 let (_lhs, rhs) = &**assign;
                 if let Rvalue::Use(op @ Operand::Constant(c), ..) = rhs
                     && let Some(static_id) = c.check_static_ptr(tcx)
-                        && matches!(tcx.static_mutability(static_id), Some(m) if m.is_mut()) {
-                            let ty = tcx.type_of(static_id).skip_binder();
-                            infos.push(StaticMutAccessInfo {
-                                block: bb,
-                                ty,
-                                ptr_operand: op.clone(),
-                            });
-                        }
+                    && matches!(tcx.static_mutability(static_id), Some(m) if m.is_mut())
+                {
+                    let ty = tcx.type_of(static_id).skip_binder();
+                    infos.push(StaticMutAccessInfo {
+                        block: bb,
+                        ty,
+                        ptr_operand: op.clone(),
+                    });
+                }
             }
         }
 
@@ -487,20 +490,20 @@ pub fn collect_static_mut_access_info<'tcx>(
             && let TerminatorKind::Call { args, .. } | TerminatorKind::TailCall { args, .. } =
                 &terminator.kind
         {
-                for arg in args {
-                    if let op @ Operand::Constant(c) = &arg.node
-                        && let Some(static_id) = c.check_static_ptr(tcx)
-                            && matches!(tcx.static_mutability(static_id), Some(m) if m.is_mut())
-                            {
-                                let ty = tcx.type_of(static_id).skip_binder();
-                                infos.push(StaticMutAccessInfo {
-                                    block: bb,
-                                    ty,
-                                    ptr_operand: op.clone(),
-                                });
-                            }
+            for arg in args {
+                if let op @ Operand::Constant(c) = &arg.node
+                    && let Some(static_id) = c.check_static_ptr(tcx)
+                    && matches!(tcx.static_mutability(static_id), Some(m) if m.is_mut())
+                {
+                    let ty = tcx.type_of(static_id).skip_binder();
+                    infos.push(StaticMutAccessInfo {
+                        block: bb,
+                        ty,
+                        ptr_operand: op.clone(),
+                    });
                 }
             }
+        }
     }
 
     infos

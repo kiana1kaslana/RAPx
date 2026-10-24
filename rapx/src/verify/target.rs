@@ -509,7 +509,6 @@ fn resolve_chain_contracts<'tcx>(
                     continue;
                 }
 
-                // Try annotation first.
                 let mut reqs = get_contract_from_annotation(tcx, sub_def_id);
 
                 // Try trait method requires.
@@ -517,12 +516,10 @@ fn resolve_chain_contracts<'tcx>(
                     reqs = get_trait_method_requires(tcx, sub_def_id);
                 }
 
-                // Try std contracts database.
                 if reqs.is_empty() && is_std_crate_def_id(tcx, sub_def_id) {
                     reqs = super::contract::json::query_json_contracts(tcx, sub_def_id);
                 }
 
-                // If still no contracts, recurse into this callee.
                 if reqs.is_empty() {
                     reqs = resolve_chain_contracts(tcx, sub_def_id, visited);
                 }
@@ -672,7 +669,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                         // intrinsics (`extern "rust-intrinsic"`) have no MIR
                         // and their safety is enforced by the type system, so
                         // they never carry a JSON contract either.
-                        let is_intrinsic = self.tcx.intrinsic(callee_def_id).is_some();
+                        let is_intrinsic = crate::intrinsic_api::is_intrinsic(self.tcx, callee_def_id);
                         let has_json_entry = is_std
                             && super::contract::json::get_std_contracts_from_json(
                                 self.tcx,
@@ -1066,7 +1063,6 @@ impl<'tcx> Visitor<'tcx> for VerifyTargetCollector<'tcx> {
         id: LocalDefId,
     ) -> Self::Result {
         if matches!(self.mode, VerifyMode::Targeted) && !has_rapx_verify_attr(self.tcx, id) {
-            // Drop impls on structs with invariants are implicitly verified.
             if !is_drop_impl(self.tcx, id.to_def_id()) {
                 return;
             }
@@ -1160,7 +1156,6 @@ impl<'tcx> Analysis for PrepareTargets<'tcx> {
             self.module_filter.clone(),
         );
 
-        // Free functions (no owning struct)
         let free_targets: Vec<_> = collector
             .function_targets
             .iter()
@@ -1178,7 +1173,6 @@ impl<'tcx> Analysis for PrepareTargets<'tcx> {
             rap_info!("");
         }
 
-        // Structs with methods
         let mut struct_ids: Vec<_> = collector.struct_targets.keys().copied().collect();
         struct_ids.sort_by_key(|def_id| self.tcx.def_path_str(*def_id));
 
@@ -1199,7 +1193,6 @@ impl<'tcx> Analysis for PrepareTargets<'tcx> {
             }
         }
 
-        // Traits with impl methods
         let mut trait_targets: Vec<_> = collector.trait_targets.iter().collect();
         trait_targets.sort_by_key(|t| self.tcx.def_path_str(t.def_id));
 
@@ -1706,7 +1699,6 @@ pub(crate) fn get_contract_from_annotation<'tcx>(
     if let Some(local_def_id) = def_id.as_local() {
         let hir_id = tcx.local_def_id_to_hir_id(local_def_id);
         let hir_attrs = tcx.hir_attrs(hir_id);
-        // hir_attrs is &'tcx [Attribute<'tcx>]; iter yields &'tcx Attribute<'tcx>
         return collect_properties_from_named_attrs(tcx, hir_attrs, def_id, "requires", "requires");
     }
 

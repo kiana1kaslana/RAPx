@@ -4,7 +4,7 @@ use rustc_middle::mir::{BinOp, Operand, UnOp};
 use z3::ast::{Ast, Bool, Int};
 
 use crate::helpers::mir_utils;
-use crate::verify::api_classify;
+use crate::other_api;
 
 use super::state::{VmState, VmValue};
 
@@ -50,7 +50,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let is_gcd = body.basic_blocks.iter().any(|bb| {
             if let rustc_middle::mir::TerminatorKind::Call { func, .. } = &bb.terminator().kind
                 && let Some(did) = mir_utils::dep_callee_def_id(func) {
-                    return api_classify::is_gcd(Some(did));
+                    return other_api::is_gcd(Some(did));
                 }
             false
         });
@@ -141,7 +141,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
-    // ── Arithmetic ────────────────────────────────────────────────
 
     /// Encode a boolean condition as the integer `1`/`0`.
     fn bool_as_int(&self, cond: &Bool<'z3>) -> Int<'z3> {

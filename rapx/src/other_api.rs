@@ -1,16 +1,12 @@
-//! Resolution of well-known `core`/`std`/`alloc` function paths to their
-//! internal [`DefId`]s.
+//! Known `core`/`std`/`alloc` API identities and semantic classifications.
 //!
-//! This module is the single home for "which standard-library item is this
-//! `DefId`?", used by [`crate::verify::api_classify`] and the alias checker to
-//! match APIs exactly instead of substring-matching a `def_path_str`.  It is
-//! deliberately placed at the crate root (next to [`crate::compat`]) rather
-//! than under `helpers/`, because it owns global state and a one-time
-//! `init(tcx)` hook in the compiler callback.
+//! The path table resolves well-known items to [`DefId`]s. The classifiers
+//! below combine those identities into operations used by analyses and checks.
+//! The table owns global state initialized by the compiler callback.
 //!
 //! # How a lookup works
 //!
-//! 1. The [`intrinsics!`] macro declares a *path table*: each identifier maps
+//! 1. The [`known_items!`] macro declares a *path table*: each identifier maps
 //!    to one or more candidate `fn_def.name()` strings (typically the `std::`
 //!    re-export plus the `core::`/`alloc::` canonical form, for `#![no_std]`
 //!    crates) and generates a `{id}() -> Option<DefId>` accessor.
@@ -30,7 +26,7 @@
 //!
 //! # Limitations
 //!
-//! - In `#![no_std]` builds some intrinsics are absent; [`init`] only warns
+//! - In `#![no_std]` builds some standard-library items are absent; [`init`] only warns
 //!   (`rap_warn!`) instead of panicking, so an entry with no matching path
 //!   simply yields `None`.
 
@@ -47,9 +43,9 @@ use rustc_public::{CrateDef, rustc_internal};
 use rustc_span::sym;
 use std::sync::OnceLock;
 
-static INIT: OnceLock<Intrinsics> = OnceLock::new();
+static INIT: OnceLock<KnownItems> = OnceLock::new();
 
-struct Intrinsics {
+struct KnownItems {
     // The key is fn path, starting from `core::` or `std::`. The value is internal def id.
     map: IndexMap<Box<str>, DefId>,
 }
@@ -57,8 +53,8 @@ struct Intrinsics {
 static TYPES: OnceLock<Types> = OnceLock::new();
 
 /// Resolved `DefId`s of well-known std *types* (ADTs), used by the ADT
-/// type-name classifiers ([`crate::verify::api_classify::is_std_box`],
-/// [`crate::verify::api_classify::is_std_vec`], …).  Each entry collects the
+/// type-name classifiers ([`crate::other_api::is_std_box`],
+/// [`crate::other_api::is_std_vec`], …).  Each entry collects the
 /// std type's `DefId` (via lang/diagnostic item, or — for `NonNull`, which has
 /// neither — by name-scanning the std crates' `adts()`) *and* any same-named
 /// re-implementations in the local crate (the std-challenge suites re-implement
@@ -377,7 +373,7 @@ pub fn negative_type_defs(name: &str) -> &'static [DefId] {
 }
 
 /// Resolved `DefId`s of std *methods* that are matched by *generic name* rather
-/// than a fixed `intrinsics!` path (e.g. `len`, `capacity`, `::abs`,
+/// than a fixed `known_items!` path (e.g. `len`, `capacity`, `::abs`,
 /// `::checked_add`, `::split_at`, `Iterator::position`, …). Each group collects
 /// every `fn_def` — from the std crates *and* the local crate (the
 /// std-challenge suites re-implement `Vec`/slice-like types and their methods) —
@@ -464,8 +460,7 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             // sugar): matched by lang-item trait container, not by def_path.
             if let Some(assoc) = tcx.opt_associated_item(did)
                 && let Some(trait_id) = assoc.trait_container(tcx)
-                && (tcx.is_lang_item(trait_id, LangItem::Index)
-                    && assoc.name().as_str() == "index"
+                && (tcx.is_lang_item(trait_id, LangItem::Index) && assoc.name().as_str() == "index"
                     || tcx.is_lang_item(trait_id, LangItem::IndexMut)
                         && assoc.name().as_str() == "index_mut")
             {
@@ -732,14 +727,14 @@ method_fns! {
     eq_fns => eq_fns,
 }
 
-fn init_inner(tcx: TyCtxt) -> Intrinsics {
+fn init_inner(tcx: TyCtxt) -> KnownItems {
     const CRATES: &[&str] = &["core", "std", "alloc"];
 
     // Map every registered path — both with and without its
     // `std::`/`core::`/`alloc::` prefix — to its entry index.
     // `rustc_public::CrateDef::name()` emits the crate prefix only on newer
     // toolchains, so both forms must resolve to the same entry.
-    let path_to_idx: std::collections::HashMap<&str, usize> = INTRINSICS
+    let path_to_idx: std::collections::HashMap<&str, usize> = KNOWN_ITEM_PATHS
         .iter()
         .enumerate()
         .flat_map(|(idx, paths)| {
@@ -755,8 +750,10 @@ fn init_inner(tcx: TyCtxt) -> Intrinsics {
         })
         .collect();
 
-    let mut indices: IndexMap<_, _> = (0..INTRINSICS.len()).map(|idx| (idx, false)).collect();
-    let mut map = IndexMap::<Box<str>, DefId>::with_capacity(INTRINSICS.len());
+    let mut indices: IndexMap<_, _> = (0..KNOWN_ITEM_PATHS.len())
+        .map(|idx| (idx, false))
+        .collect();
+    let mut map = IndexMap::<Box<str>, DefId>::with_capacity(KNOWN_ITEM_PATHS.len());
 
     let mut try_insert = |name: &str, def_id: rustc_public::DefId| {
         let Some(&idx) = path_to_idx.get(name) else {
@@ -766,13 +763,13 @@ fn init_inner(tcx: TyCtxt) -> Intrinsics {
             indices.insert(idx, true),
             Some(false),
             "DefId for {name} has been found: {:?}",
-            map.get(INTRINSICS[idx][0])
+            map.get(KNOWN_ITEM_PATHS[idx][0])
         );
         // Store under the canonical (first) registered path so the `{id}()`
         // accessors — which probe the registered paths — find it regardless of
         // whether `name` carried a crate prefix.
         map.insert(
-            Box::from(INTRINSICS[idx][0]),
+            Box::from(KNOWN_ITEM_PATHS[idx][0]),
             rustc_internal::internal(tcx, def_id),
         );
     };
@@ -791,7 +788,7 @@ fn init_inner(tcx: TyCtxt) -> Intrinsics {
     #[cfg(debug_assertions)]
     map.sort_unstable_by(|a, _, b, _| a.cmp(b));
 
-    if INTRINSICS.len() != map.len() {
+    if KNOWN_ITEM_PATHS.len() != map.len() {
         // The reason to not make this an assertion is allowing compilation on
         // missing instrinsics, e.g. no_std crates without using alloc will never
         // have the dealloc intrinsic.
@@ -805,33 +802,33 @@ fn init_inner(tcx: TyCtxt) -> Intrinsics {
                 // Only report entries whose crate was actually loaded for this
                 // compilation. Entries pointing solely at unloaded crates (e.g.
                 // `alloc` when verifying `core`) are expected to be absent.
-                let in_loaded_crate = INTRINSICS[idx].iter().any(|p| {
+                let in_loaded_crate = KNOWN_ITEM_PATHS[idx].iter().any(|p| {
                     p.split("::")
                         .next()
                         .is_some_and(|pfx| loaded_crates.contains(pfx))
                 });
-                in_loaded_crate.then_some(INTRINSICS[idx])
+                in_loaded_crate.then_some(KNOWN_ITEM_PATHS[idx])
             })
             .collect::<Vec<_>>();
         if !not_found.is_empty() {
             rap_warn!(
-                "Intrinsic functions is incompletely retrieved.\n\
+                "Known standard-library functions are incompletely resolved.\n\
                  {} fn ids are not found: {not_found:#?}",
                 not_found.len()
             );
         }
     }
 
-    Intrinsics { map }
+    KnownItems { map }
 }
 
-macro_rules! intrinsics {
+macro_rules! known_items {
     ($( $(#[$attr:meta])* $id:ident : $paths:expr ,)+) => {
-        const INTRINSICS: &[&[&str]] = &[$( $(#[$attr])* $paths ,)+];
+        const KNOWN_ITEM_PATHS: &[&[&str]] = &[$( $(#[$attr])* $paths ,)+];
         $(
             $(#[$attr])*
             pub fn $id() -> Option<DefId> {
-                let map = &INIT.get().expect("Intrinsics DefIds haven't been initialized.").map;
+                let map = &INIT.get().expect("Known item DefIds haven't been initialized.").map;
                 for path in $paths {
                     match map.get(*path) {
                         Some(id) => return Some(*id),
@@ -846,7 +843,7 @@ macro_rules! intrinsics {
 
 // for #![no_std] crates, intrinsics fn paths start from core instead of core.
 // cc https://github.com/Artisan-Lab/RAPx/issues/190
-intrinsics! {
+known_items! {
     call_mut: &[
         "std::ops::FnMut::call_mut",
         "core::ops::FnMut::call_mut",
@@ -934,127 +931,6 @@ intrinsics! {
     ptr_copy_nonoverlapping: &[
         "std::ptr::copy_nonoverlapping",
         "core::ptr::copy_nonoverlapping"
-    ],
-    // ── Core intrinsics ──
-    intrinsics_copy: &[
-        "std::intrinsics::copy",
-        "core::intrinsics::copy"
-    ],
-    intrinsics_copy_nonoverlapping: &[
-        "std::intrinsics::copy_nonoverlapping",
-        "core::intrinsics::copy_nonoverlapping"
-    ],
-    intrinsics_typed_swap_nonoverlapping: &[
-        "std::intrinsics::typed_swap_nonoverlapping",
-        "core::intrinsics::typed_swap_nonoverlapping"
-    ],
-    intrinsics_write_bytes: &[
-        "std::intrinsics::write_bytes",
-        "core::intrinsics::write_bytes"
-    ],
-    intrinsics_float_to_int_unchecked: &[
-        "std::intrinsics::float_to_int_unchecked",
-        "core::intrinsics::float_to_int_unchecked"
-    ],
-    intrinsics_exact_div: &[
-        "std::intrinsics::exact_div",
-        "core::intrinsics::exact_div"
-    ],
-    intrinsics_raw_eq: &[
-        "std::intrinsics::raw_eq",
-        "core::intrinsics::raw_eq"
-    ],
-    intrinsics_vtable_size: &[
-        "std::intrinsics::vtable_size",
-        "core::intrinsics::vtable_size"
-    ],
-    intrinsics_vtable_align: &[
-        "std::intrinsics::vtable_align",
-        "core::intrinsics::vtable_align"
-    ],
-    intrinsics_size_of_val: &[
-        "std::intrinsics::size_of_val",
-        "core::intrinsics::size_of_val"
-    ],
-    intrinsics_size_of: &[
-        "std::intrinsics::size_of",
-        "core::intrinsics::size_of"
-    ],
-    intrinsics_align_of: &[
-        "std::intrinsics::align_of",
-        "core::intrinsics::align_of"
-    ],
-    select_unpredictable: &[
-        "std::intrinsics::select_unpredictable",
-        "core::intrinsics::select_unpredictable"
-    ],
-    intrinsics_unlikely: &[
-        "std::intrinsics::unlikely",
-        "core::intrinsics::unlikely"
-    ],
-    intrinsics_likely: &[
-        "std::intrinsics::likely",
-        "core::intrinsics::likely"
-    ],
-    intrinsics_add_with_overflow: &[
-        "std::intrinsics::add_with_overflow",
-        "core::intrinsics::add_with_overflow"
-    ],
-    intrinsics_sub_with_overflow: &[
-        "std::intrinsics::sub_with_overflow",
-        "core::intrinsics::sub_with_overflow"
-    ],
-    intrinsics_mul_with_overflow: &[
-        "std::intrinsics::mul_with_overflow",
-        "core::intrinsics::mul_with_overflow"
-    ],
-    intrinsics_saturating_add: &[
-        "std::intrinsics::saturating_add",
-        "core::intrinsics::saturating_add"
-    ],
-    intrinsics_unchecked_add: &[
-        "std::intrinsics::unchecked_add",
-        "core::intrinsics::unchecked_add"
-    ],
-    intrinsics_unchecked_mul: &[
-        "std::intrinsics::unchecked_mul",
-        "core::intrinsics::unchecked_mul"
-    ],
-    intrinsics_wrapping_sub: &[
-        "std::intrinsics::wrapping_sub",
-        "core::intrinsics::wrapping_sub"
-    ],
-    intrinsics_saturating_sub: &[
-        "std::intrinsics::saturating_sub",
-        "core::intrinsics::saturating_sub"
-    ],
-    intrinsics_integer_min: &[
-        "std::intrinsics::integer_min",
-        "core::intrinsics::integer_min"
-    ],
-    intrinsics_integer_max: &[
-        "std::intrinsics::integer_max",
-        "core::intrinsics::integer_max"
-    ],
-    intrinsics_bswap: &[
-        "std::intrinsics::bswap",
-        "core::intrinsics::bswap"
-    ],
-    intrinsics_ctpop: &[
-        "std::intrinsics::ctpop",
-        "core::intrinsics::ctpop"
-    ],
-    intrinsics_bitreverse: &[
-        "std::intrinsics::bitreverse",
-        "core::intrinsics::bitreverse"
-    ],
-    intrinsics_rotate_left: &[
-        "std::intrinsics::rotate_left",
-        "core::intrinsics::rotate_left"
-    ],
-    intrinsics_rotate_right: &[
-        "std::intrinsics::rotate_right",
-        "core::intrinsics::rotate_right"
     ],
     assume_init_read: &[
         "std::mem::MaybeUninit::<T>::assume_init_read",
@@ -1249,18 +1125,6 @@ intrinsics! {
     mut_ptr_wrapping_byte_offset: &[
         "std::ptr::mut_ptr::<impl *mut T>::wrapping_byte_offset",
         "core::ptr::mut_ptr::<impl *mut T>::wrapping_byte_offset"
-    ],
-    intrinsics_ptr_offset_from: &[
-        "std::intrinsics::ptr_offset_from",
-        "core::intrinsics::ptr_offset_from"
-    ],
-    intrinsics_ptr_offset_from_unsigned: &[
-        "std::intrinsics::ptr_offset_from_unsigned",
-        "core::intrinsics::ptr_offset_from_unsigned"
-    ],
-    intrinsics_arith_offset: &[
-        "std::intrinsics::arith_offset",
-        "core::intrinsics::arith_offset"
     ],
     nonnull_add: &[
         "std::ptr::NonNull::<T>::add",
@@ -1631,7 +1495,772 @@ pub fn is_drop_fn(target: DefId) -> bool {
     contains(&drop_fn, target)
 }
 
-/// Is the targe DefId in the given array.
+/// Whether the target `DefId` is in the given array.
 pub fn contains(v: &[Option<DefId>], target: DefId) -> bool {
     v.contains(&Some(target))
 }
+
+pub(crate) fn matches_any(target: Option<DefId>, candidates: &[Option<DefId>]) -> bool {
+    target.is_some_and(|id| contains(candidates, id))
+}
+
+mod classify {
+    //! Standard-library API call classification helpers.
+    //!
+    //! Each classifier answers "what kind of operation is this call?" (pointer
+    //! arithmetic, raw memory access, ownership transfer, …). Callers — the path
+    //! graph, VM, alias/hazard scanner, and call-summary registry — use these to pick
+    //! a modelling strategy or discharge a safety obligation.
+    //!
+    //! # Matching mechanism
+    //!
+    //! Every classifier takes a `DefId` — `fn(Option<DefId>) -> bool` for callee
+    //! matching, or `fn(DefId) -> bool` for ADT *type* matching — and answers via
+    //! exact set membership in [`crate::other_api`] rather than substring-matching a
+    //! `def_path_str`. [`crate::other_api`] resolves the well-known `std`/`core`/`alloc`
+    //! items (by lang/diagnostic item, explicit path, or — for the open-ended
+    //! groups and the std-challenge suites' local re-implementations — by
+    //! name-scanning `fn_defs()` at init), so a call site is matched by identity
+    //! without the false positives of per-call-site name matching.
+
+    use crate::intrinsic_api;
+    use crate::other_api;
+    use rustc_hir::def_id::DefId;
+    use rustc_middle::ty::Ty;
+    use rustc_middle::ty::TyCtxt;
+
+    /// Whether `callee` is `Some` and matches any resolved DefId in the slice.
+    fn any_def(callee: Option<DefId>, defs: &[DefId]) -> bool {
+        callee.is_some_and(|c| defs.contains(&c))
+    }
+
+    // ── Ownership reconstruction ──────────────────────────────────────
+
+    /// Whether `callee` reconstructs an owned value, taking ownership of the
+    /// pointed-to memory: from a single raw pointer (`Box::from_raw`,
+    /// `CString::from_raw`, `Arc::from_raw`, `Rc::from_raw`) or from a `Vec<u8>`
+    /// (`CString::from_vec_with_nul_unchecked`). Distinct from
+    /// [`is_from_raw_parts`], which builds a slice/`Vec` from `(ptr, len[, cap])`.
+    pub fn is_ownership_reconstruction(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::box_from_raw(),
+                other_api::cstring_from_raw(),
+                other_api::arc_from_raw(),
+                other_api::rc_from_raw(),
+                other_api::box_from_raw_in(),
+                other_api::arc_from_raw_in(),
+                other_api::rc_from_raw_in(),
+                other_api::cstring_from_vec_with_nul_unchecked(),
+            ],
+        )
+    }
+
+    /// Whether `callee` is `ManuallyDrop::<T>::drop` — the *manual* drop that frees
+    /// the pointee's allocation without the `ManuallyDrop` wrapper's own (no-op)
+    /// drop glue.
+    pub fn is_manually_drop_drop(callee: Option<DefId>) -> bool {
+        callee.is_some_and(|c| other_api::manually_drop() == Some(c))
+    }
+
+    /// Whether `callee` is `std::mem::drop` / `core::mem::drop` — the value drop
+    /// that frees the argument's heap allocation.
+    pub fn is_std_drop(callee: Option<DefId>) -> bool {
+        callee.is_some_and(|c| other_api::drop() == Some(c))
+    }
+
+    /// Whether `callee` is `drop_in_place::<T>` — the MIR drop shim that drops the
+    /// pointee in place and (for an owning pointee like `Box`/`Vec`) frees its
+    /// heap allocation.
+    pub fn is_drop_in_place(callee: Option<DefId>) -> bool {
+        callee.is_some_and(|c| other_api::drop_in_place() == Some(c))
+    }
+
+    // ── Pointer extraction / cast ─────────────────────────────────────
+
+    /// Whether `callee` produces a raw pointer (or `NonNull`) alias of its first
+    /// argument: `as_ptr`/`as_mut_ptr`, `into_raw`, and pointer `cast` (incl.
+    /// `cast_mut`/`cast_const`). `as_ptr_range`/`as_mut_ptr_range` are excluded
+    /// because they return a `Range` of two pointers rather than a single pointer;
+    /// `NonNull::new_unchecked`/`as_ref`/`as_mut` are excluded because they do not
+    /// produce a raw pointer (and `new_unchecked` must not mark its result
+    /// non-null, or it would hide `new_unchecked(null)` unsoundness).
+    pub fn is_as_ptr(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::slice_as_ptr(),
+                other_api::slice_as_mut_ptr(),
+                other_api::str_as_ptr(),
+                other_api::str_as_mut_ptr(),
+                other_api::vec_as_ptr(),
+                other_api::vec_as_mut_ptr(),
+                other_api::cstr_as_ptr(),
+                other_api::nonnull_as_ptr(),
+                other_api::const_ptr_slice_as_ptr(),
+                other_api::mut_ptr_slice_as_mut_ptr(),
+                other_api::nonnull_slice_as_mut_ptr(),
+                other_api::box_as_ptr(),
+                other_api::box_as_mut_ptr(),
+                other_api::maybe_uninit_as_ptr(),
+                other_api::maybe_uninit_as_mut_ptr(),
+                other_api::arc_as_ptr(),
+                other_api::rc_as_ptr(),
+                other_api::const_ptr_cast(),
+                other_api::const_ptr_cast_mut(),
+                other_api::const_ptr_cast_array(),
+                other_api::mut_ptr_cast(),
+                other_api::mut_ptr_cast_const(),
+                other_api::mut_ptr_cast_array(),
+                other_api::nonnull_cast(),
+                other_api::box_into_raw(),
+                other_api::cstring_into_raw(),
+                other_api::arc_into_raw(),
+                other_api::rc_into_raw(),
+            ],
+        )
+    }
+
+    /// Whether `callee` is a raw-pointer `cast`/`cast_mut`/`cast_const`. These only
+    /// *reinterpret* the address — they preserve null-ness and provenance, but do
+    /// not establish that the result is non-null, aligned, or points at initialized
+    /// memory. Distinguished from [`is_as_ptr`] so [`is_as_ptr_valid`] can keep
+    /// them on the MIR-inlining path rather than the `ReturnPointerFromArg` model
+    /// (which asserts those facts).
+    pub(crate) fn is_raw_ptr_cast(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::const_ptr_cast(),
+                other_api::const_ptr_cast_mut(),
+                other_api::const_ptr_cast_array(),
+                other_api::mut_ptr_cast(),
+                other_api::mut_ptr_cast_const(),
+                other_api::mut_ptr_cast_array(),
+            ],
+        )
+    }
+
+    /// [`is_as_ptr`] restricted to the *pointer-validity-establishing* subset:
+    /// `as_ptr`/`as_mut_ptr`, `into_raw`, and `NonNull::cast` — which expose a
+    /// non-null, aligned, initialized backing pointer. Raw-pointer `cast`/
+    /// `cast_mut`/`cast_const` are excluded because they only reinterpret the
+    /// address (preserving null-ness) and are left to MIR inlining.
+    pub fn is_as_ptr_valid(callee: Option<DefId>) -> bool {
+        is_as_ptr(callee) && !is_raw_ptr_cast(callee)
+    }
+
+    /// `str::as_bytes`: reinterprets `&str` as `&[u8]` — same data pointer and
+    /// byte length, so the result aliases the argument.
+    pub fn is_str_as_bytes(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::str_as_bytes()])
+    }
+
+    /// The whole `assert_unsafe_precondition!` machinery: the `check_language_ub`
+    /// gate, the generated `precondition_check` body, and the
+    /// `#[cfg(debug_assertions)]` check helpers (`runtime_add_nowrap`,
+    /// `maybe_is_aligned*`, `is_valid_allocation_size`, `maybe_is_nonoverlapping`).
+    ///
+    /// All of these are debug-only / ub-checks-gated and model release semantics
+    /// (checks disabled), so they must be skipped rather than inlined: the gate
+    /// folds to `false` (no check), and the body/helpers' divergence branches would
+    /// otherwise leave pointer results uninitialized (e.g. `swap_unchecked`'s
+    /// `ptr.add(b)` on the failed-check arm).
+    pub fn is_ub_check(tcx: TyCtxt<'_>, callee: DefId) -> bool {
+        let s = tcx.def_path_str(callee);
+        s.contains("ub_checks::check_language_ub")
+            || s.contains("::precondition_check")
+            || s.contains("::runtime_add_nowrap")
+            || s.contains("ub_checks::maybe_is_aligned")
+            || s.contains("ub_checks::is_valid_allocation_size")
+            || s.contains("ub_checks::maybe_is_nonoverlapping")
+    }
+
+    // ── Pointer arithmetic ────────────────────────────────────────────
+    // Direction (`add` vs `sub`) and granularity (`element` vs `byte`) are two
+    // orthogonal axes. Each of the four combinations is a first-class classifier
+    // below; the aggregate predicates at the end are unions over a single axis,
+    // for callers that only care about one dimension.
+
+    /// Element-strided `add`/`wrapping_add` and signed `offset`/`wrapping_offset`
+    /// (stride = `size_of::<T>()`). `offset_from`/`offset_from_unsigned` are *not*
+    /// matched (they subtract two pointers into an `isize`).
+    pub(crate) fn is_element_ptr_add(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::const_ptr_add(),
+                other_api::const_ptr_wrapping_add(),
+                other_api::const_ptr_offset(),
+                other_api::const_ptr_wrapping_offset(),
+                other_api::mut_ptr_add(),
+                other_api::mut_ptr_wrapping_add(),
+                other_api::mut_ptr_offset(),
+                other_api::mut_ptr_wrapping_offset(),
+                other_api::nonnull_add(),
+                other_api::nonnull_offset(),
+            ],
+        )
+    }
+
+    /// Element-strided `sub`/`wrapping_sub` (stride = `size_of::<T>()`).
+    pub(crate) fn is_element_ptr_sub(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::const_ptr_sub(),
+                other_api::const_ptr_wrapping_sub(),
+                other_api::mut_ptr_sub(),
+                other_api::mut_ptr_wrapping_sub(),
+                other_api::nonnull_sub(),
+            ],
+        )
+    }
+
+    /// Byte-granular `byte_add`/`wrapping_byte_add` and signed
+    /// `byte_offset`/`wrapping_byte_offset` (stride 1).
+    pub(crate) fn is_byte_ptr_add(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::const_ptr_byte_add(),
+                other_api::const_ptr_wrapping_byte_add(),
+                other_api::const_ptr_byte_offset(),
+                other_api::const_ptr_wrapping_byte_offset(),
+                other_api::mut_ptr_byte_add(),
+                other_api::mut_ptr_wrapping_byte_add(),
+                other_api::mut_ptr_byte_offset(),
+                other_api::mut_ptr_wrapping_byte_offset(),
+                other_api::nonnull_byte_add(),
+                other_api::nonnull_byte_offset(),
+            ],
+        )
+    }
+
+    /// Byte-granular `byte_sub`/`wrapping_byte_sub` (stride 1).
+    pub(crate) fn is_byte_ptr_sub(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::const_ptr_byte_sub(),
+                other_api::const_ptr_wrapping_byte_sub(),
+                other_api::mut_ptr_byte_sub(),
+                other_api::mut_ptr_wrapping_byte_sub(),
+                other_api::nonnull_byte_sub(),
+            ],
+        )
+    }
+
+    /// Any pointer `add` (element or byte). `offset`/`byte_offset` take a signed
+    /// `isize`, so a negative offset is still classified here (the sign lives in
+    /// the argument); see [`is_pointer_sub`] for the positive-count `sub` family.
+    pub fn is_pointer_add(callee: Option<DefId>) -> bool {
+        is_element_ptr_add(callee) || is_byte_ptr_add(callee)
+    }
+
+    /// Any pointer `sub` (element or byte): a positive count, `base - count * stride`.
+    pub fn is_pointer_sub(callee: Option<DefId>) -> bool {
+        is_element_ptr_sub(callee) || is_byte_ptr_sub(callee)
+    }
+
+    // ── Layout constants ──────────────────────────────────────────────
+
+    /// Whether `callee` is the compile-time layout constant `size_of::<T>()` or
+    /// `align_of::<T>()`. The runtime intrinsics (`size_of_val`, `align_of_val`,
+    /// `pref_align_of`, `*_val_raw`, …) are *not* classified here.
+    pub fn is_layout_constant(callee: Option<DefId>) -> bool {
+        intrinsic_api::is_size_of(callee)
+            || intrinsic_api::is_align_of(callee)
+            || other_api::matches_any(
+                callee,
+                &[other_api::mem_size_of(), other_api::mem_align_of()],
+            )
+    }
+
+    /// Whether `callee` is `ptr::align_offset` / `NonNull::align_offset` /
+    /// `*const T::align_offset` / `*mut T::align_offset`.
+    pub fn is_align_offset(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::ptr_align_offset(),
+                other_api::nonnull_align_offset(),
+                other_api::const_ptr_align_offset(),
+                other_api::mut_ptr_align_offset(),
+            ],
+        )
+    }
+
+    // ── Raw pointer read / write ──────────────────────────────────────
+
+    /// Whether `callee` writes through a raw pointer to its first argument
+    /// (`ptr::write`, `write_bytes`, `write_unaligned`, `write_volatile`).
+    pub fn is_ptr_write(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::ptr_write(),
+                other_api::ptr_write_unaligned(),
+                other_api::ptr_write_volatile(),
+                other_api::ptr_write_bytes(),
+            ],
+        )
+    }
+
+    pub fn is_ptr_copy(callee: Option<DefId>) -> bool {
+        intrinsic_api::is_copy(callee)
+            || other_api::matches_any(
+                callee,
+                &[other_api::ptr_copy(), other_api::ptr_copy_nonoverlapping()],
+            )
+    }
+
+    /// Whether `callee` reads through a raw pointer or copies memory
+    /// (`ptr::read`/`read_unaligned`/`read_volatile`, `copy_to`/`copy_from`,
+    /// `MaybeUninit::assume_init_read`, and intrinsics `copy`/`copy_nonoverlapping`).
+    pub fn is_ptr_read(callee: Option<DefId>) -> bool {
+        intrinsic_api::is_copy(callee)
+            || other_api::matches_any(
+                callee,
+                &[
+                    other_api::ptr_read(),
+                    other_api::ptr_read_unaligned(),
+                    other_api::ptr_read_volatile(),
+                    other_api::copy_to(),
+                    other_api::copy_to_nonoverlapping(),
+                    other_api::copy_from(),
+                    other_api::copy_from_nonoverlapping(),
+                    other_api::assume_init_read(),
+                ],
+            )
+    }
+
+    // ── MaybeUninit ───────────────────────────────────────────────────
+
+    /// Whether `callee` is `MaybeUninit::write`, which initializes the slot (unlike
+    /// raw `ptr::write`, handled by [`is_mem_copy_or_write`]).
+    pub fn is_maybe_uninit_write(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::maybe_uninit_write()])
+    }
+
+    /// Whether `callee` is `MaybeUninit::uninit` (a new uninitialized slot).
+    pub fn is_maybe_uninit_uninit(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::maybe_uninit_uninit()])
+    }
+
+    /// Whether `callee` is a `MaybeUninit` "assume initialized" accessor
+    /// (`assume_init`, `assume_init_read`, `assume_init_ref`, `assume_init_mut`).
+    pub fn is_maybe_uninit_assume_init(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::maybe_uninit_assume_init(),
+                other_api::assume_init_read(),
+                other_api::maybe_uninit_assume_init_ref(),
+                other_api::maybe_uninit_assume_init_mut(),
+            ],
+        )
+    }
+
+    /// Memory copy/write intrinsics that legitimately write through a raw pointer
+    /// without requiring the target bytes to be pre-initialized (e.g. `ptr::write`,
+    /// `write_bytes`, `copy_nonoverlapping`, `ptr::copy`). Used by the checker to
+    /// discharge `Init`/`Typed` obligations on `MaybeUninit` targets.
+    pub fn is_mem_copy_or_write(callee: Option<DefId>) -> bool {
+        intrinsic_api::is_copy(callee)
+            || other_api::matches_any(
+                callee,
+                &[
+                    other_api::copy_from_nonoverlapping(),
+                    other_api::copy_to_nonoverlapping(),
+                    other_api::ptr_write(),
+                    other_api::ptr_write_bytes(),
+                ],
+            )
+    }
+
+    // ── Queries and unwrap ────────────────────────────────────────────
+
+    /// Whether `callee` is a `len` query method. Matched by `DefId` via
+    /// [`crate::other_api::len_fns`], which resolves every `::len` `fn_def` in the std
+    /// crates *and* the local crate — so the std-challenge suites' re-implemented
+    /// `len` methods are modelled too, without substring-matching a `def_path_str`.
+    pub fn is_len(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::len_fns())
+    }
+
+    // ── Slice / C-string ──────────────────────────────────────────────
+
+    /// Whether `callee` is a `from_raw_parts` constructor (`slice`/`str`/`ptr`/
+    /// `String`/`Vec`/`NonNull`). Matched by `DefId` via
+    /// [`crate::other_api::from_raw_parts_fns`] (resolved from `fn_defs()`, including
+    /// local re-implementations), instead of substring-matching `def_path_str`.
+    pub fn is_from_raw_parts(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::from_raw_parts_fns())
+    }
+
+    /// `*const T::with_metadata_of` / `*mut T::with_metadata_of` (used by
+    /// `byte_add`/`byte_offset`): re-attaches metadata onto a data address.  For a
+    /// sized pointee it is a no-op cast and must preserve the pointer's provenance
+    /// and non-nullness (rather than going through `from_raw_parts`, whose
+    /// fresh-allocation effect would reset them).
+    pub fn is_with_metadata_of(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::with_metadata_of_fns())
+    }
+
+    /// Whether `callee` is a `from_raw_parts_mut` constructor.
+    pub fn is_from_raw_parts_mut(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::from_raw_parts_mut_fns())
+    }
+
+    pub fn is_cstr_from_ptr(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::cstr_from_ptr()])
+    }
+
+    /// `_unchecked` C-string constructors whose caller must guarantee NUL
+    /// termination (`CStr::from_bytes_with_nul_unchecked`,
+    /// `CString::from_vec_with_nul_unchecked`).
+    pub fn is_cstr_unchecked_constructor(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::cstr_from_bytes_with_nul_unchecked(),
+                other_api::cstring_from_vec_with_nul_unchecked(),
+            ],
+        )
+    }
+
+    // ── Vec constructors / methods ────────────────────────────────────
+
+    pub fn is_vec_push_or_reserve(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::vec_push(),
+                other_api::vec_reserve(),
+                other_api::vec_reserve_exact(),
+            ],
+        )
+    }
+    pub fn is_vec_alloc_constructor(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::vec_from_elem()])
+    }
+    pub fn is_vec_from_box(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::slice_into_vec(),
+                #[cfg(rapx_ge_99)]
+                other_api::box_assume_init_into_vec_unsafe(),
+            ],
+        )
+    }
+    /// `alloc::alloc::exchange_malloc` (`Box::new`'s allocator on some toolchains).
+    pub fn is_exchange_malloc(callee: Option<DefId>) -> bool {
+        callee.is_some_and(|c| other_api::exchange_malloc() == Some(c))
+    }
+    /// `slice::to_vec` (`<[T]>::to_vec` via `to_vec_in::ConvertVec::to_vec`) —
+    /// allocates a fresh buffer and copies the slice's elements.
+    pub fn is_slice_to_vec(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::slice_to_vec()])
+    }
+    /// `Vec::with_capacity` — matched by `DefId` via
+    /// [`crate::other_api::with_capacity_fns`].
+    pub fn is_vec_with_capacity(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::with_capacity_fns())
+    }
+    /// `Box::new` / `new_in` / `new_uninit` / `new_uninit_in` (and `try_` variants)
+    /// — fresh heap allocation constructors.
+    pub fn is_box_alloc_ctor(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::box_alloc_ctors())
+    }
+    pub fn is_into_boxed_slice(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::vec_into_boxed_slice()])
+    }
+
+    // ── Alias-hazard classification ───────────────────────────────────
+    // These are the single home for "what does this raw-pointer API do" used by the
+    // alias/hazard scanner. `is_ownership_transfer` is the raw-pointer subset of
+    // [`is_ownership_reconstruction`]: it excludes `from_vec_with_nul_unchecked`
+    // (which consumes a `Vec<u8>` rather than a raw pointer). `Vec::from_raw_parts`
+    // / `from_parts` ownership transfer is matched separately by
+    // [`is_vec_ownership_transfer`].
+
+    pub fn is_ownership_transfer(callee: Option<DefId>) -> bool {
+        let Some(callee) = callee else { return false };
+        is_ownership_reconstruction(Some(callee))
+            && !other_api::contains(&[other_api::cstring_from_vec_with_nul_unchecked()], callee)
+    }
+
+    pub fn is_vec_ownership_transfer(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::vec_ownership_transfer_fns())
+    }
+
+    /// Whether `callee` is `NonNull::new` (the null-checked constructor).
+    pub(crate) fn is_nonnull_checked_new(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::nonnull_new()])
+    }
+
+    /// Whether `callee` is `NonNull::new_unchecked` (the unchecked transparent
+    /// wrapper). Modeled as a provenance-preserving alias so the pointer's element
+    /// offset survives inlined iterator bodies (`post_inc_start`'s
+    /// `new_unchecked(ptr.add(1))`); non-nullness is inherited from the source, not
+    /// asserted, so `new_unchecked(null)` unsoundness is still caught.
+    pub(crate) fn is_nonnull_new_unchecked(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::nonnull_new_unchecked()])
+    }
+
+    /// Whether `callee` is `NonNull::as_ref` or `NonNull::as_mut`.
+    pub fn is_nonnull_as_ref_as_mut(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[other_api::nonnull_as_ref(), other_api::nonnull_as_mut()],
+        )
+    }
+
+    /// Whether `callee` is `NonNull::as_mut` (produces an exclusive `&mut`).
+    pub fn is_nonnull_as_mut(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::nonnull_as_mut()])
+    }
+
+    /// Whether `callee` is a `Vec` method that may reallocate (invalidating any
+    /// outstanding raw pointers derived from it).
+    pub fn is_vec_invalidating_method(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::vec_push(),
+                other_api::vec_reserve(),
+                other_api::vec_reserve_exact(),
+                other_api::vec_shrink_to_fit(),
+                other_api::vec_shrink_to(),
+                other_api::vec_insert(),
+                other_api::vec_remove(),
+                other_api::vec_clear(),
+                other_api::vec_truncate(),
+                other_api::vec_set_len(),
+            ],
+        )
+    }
+
+    /// Whether `callee` returns ownership of an allocation as a raw pointer
+    /// (`Box::into_raw`, `CString::into_raw`, `Arc::into_raw`, `Rc::into_raw`, ...).
+    pub fn is_ownership_return(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::box_into_raw(),
+                other_api::cstring_into_raw(),
+                other_api::arc_into_raw(),
+                other_api::rc_into_raw(),
+            ],
+        )
+    }
+
+    /// Whether `callee` is a benign, read-only use of a raw-pointer origin
+    /// (`len`, `is_empty`, `is_null`, `addr`, `as_ptr`/`as_mut_ptr`, `cast`).
+    pub fn is_benign_origin_use(callee: Option<DefId>) -> bool {
+        other_api::matches_any(
+            callee,
+            &[
+                other_api::const_ptr_is_null(),
+                other_api::const_ptr_addr(),
+                other_api::const_ptr_cast(),
+                other_api::const_ptr_cast_mut(),
+                other_api::const_ptr_slice_is_empty(),
+                other_api::const_ptr_slice_len(),
+                other_api::const_ptr_slice_as_ptr(),
+                other_api::mut_ptr_is_null(),
+                other_api::mut_ptr_addr(),
+                other_api::mut_ptr_cast(),
+                other_api::mut_ptr_cast_const(),
+                other_api::mut_ptr_slice_is_empty(),
+                other_api::mut_ptr_slice_len(),
+                other_api::mut_ptr_slice_as_mut_ptr(),
+                other_api::nonnull_addr(),
+                other_api::nonnull_cast(),
+                other_api::nonnull_as_ptr(),
+                other_api::nonnull_slice_is_empty(),
+                other_api::nonnull_slice_len(),
+                other_api::nonnull_slice_as_mut_ptr(),
+                other_api::slice_len(),
+                other_api::slice_is_empty(),
+                other_api::slice_as_ptr(),
+                other_api::slice_as_mut_ptr(),
+                other_api::str_len(),
+                other_api::str_is_empty(),
+                other_api::str_as_ptr(),
+                other_api::str_as_mut_ptr(),
+                other_api::vec_len(),
+                other_api::vec_is_empty(),
+                other_api::vec_as_ptr(),
+                other_api::vec_as_mut_ptr(),
+                other_api::string_len(),
+                other_api::string_is_empty(),
+                other_api::cstr_as_ptr(),
+                other_api::cstr_is_empty(),
+            ],
+        )
+    }
+
+    // ── ADT type-name classifiers ─────────────────────────────────────
+    // *Shape* recognizers used by the VM to model repr(transparent) wrappers and
+    // fixed field layouts (`Vec` = ptr/cap/len, `slice::Iter` = ptr/end, …).
+    // Matched by `DefId` (resolved in [`crate::other_api`]).
+
+    pub fn is_std_vec(def_id: DefId) -> bool {
+        other_api::vec_types().contains(&def_id)
+    }
+    pub fn is_std_box(def_id: DefId) -> bool {
+        other_api::box_types().contains(&def_id)
+    }
+    pub fn is_std_cstring(def_id: DefId) -> bool {
+        other_api::cstring_types().contains(&def_id)
+    }
+    pub fn is_std_nonnull(def_id: DefId) -> bool {
+        other_api::nonnull_types().contains(&def_id)
+    }
+    pub fn is_maybe_uninit_type(def_id: DefId) -> bool {
+        other_api::maybe_uninit_types().contains(&def_id)
+    }
+
+    /// Whether `ty` (peeling through `&` / `*mut` / `*const` / `[T]` / `[T; N]`) is
+    /// `MaybeUninit<...>`, i.e. carries no validity invariant (any bit pattern is a
+    /// valid value).  Shared by the VM (`init_parameters`) and the `Typed` checker.
+    pub fn is_maybe_uninit_ty(ty: Ty<'_>) -> bool {
+        use rustc_middle::ty::TyKind;
+        let mut t = ty;
+        loop {
+            match t.kind() {
+                TyKind::Slice(e) | TyKind::Array(e, _) => t = *e,
+                TyKind::RawPtr(e, _) | TyKind::Ref(_, e, _) => t = *e,
+                TyKind::Adt(adt, _) => return is_maybe_uninit_type(adt.did()),
+                _ => return false,
+            }
+        }
+    }
+    pub fn is_std_iter_or_itermut(def_id: DefId) -> bool {
+        other_api::iter_types().contains(&def_id)
+    }
+    pub fn is_std_ordering(def_id: DefId) -> bool {
+        other_api::ordering_types().contains(&def_id)
+    }
+
+    // ── Arithmetic / collection-operation classifiers ─────────────────
+    // Matched by `DefId` via [`other_api::OP_FNS`] (resolved from `fn_defs()`).
+    // These were previously name-based in the call-summary registry; see
+    // [`crate::other_api`] for the exact method-name patterns each group collects.
+
+    pub fn is_integer_wrapping_sub_method(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::integer_wrapping_sub_fns())
+    }
+    pub fn is_checked_next_pow2(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::checked_next_pow2_fns())
+    }
+    pub fn is_layout_align(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::layout_align_fns())
+    }
+    pub fn is_split_at(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::split_at_fns())
+    }
+
+    // ── Open-ended operation classifiers ──────────────────────────────
+    // These match the std-challenge suites' local `_ext` re-implementations and
+    // generic trait-method patterns. They cannot be tied to a *closed* hard-coded
+    // set, so they are resolved by name-scanning `fn_defs()` in [`crate::other_api`]
+    // (which also collects the local crate's re-implementations) and matched by
+    // `DefId` like the other classifiers.
+
+    pub fn is_align_to_local(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::align_to_local_fns())
+    }
+    pub fn is_iter_position(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::iter_position_fns())
+    }
+    pub fn is_strlen(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::strlen_fns())
+    }
+    pub fn is_slice_get_unchecked(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::slice_get_unchecked_fns())
+    }
+
+    /// Whether `callee` is `<[T]>::get` / `<[T]>::get_mut` (the slice-side range
+    /// getters returning `Option<&[T]>`).
+    pub fn is_slice_get(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::slice_get_fns())
+    }
+
+    /// Whether `callee` is the `Index::index` / `IndexMut::index_mut` trait method
+    /// (the `a[b]` indexing sugar).
+    pub fn is_index_method(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::index_fns())
+    }
+
+    /// Whether `callee` is the `PartialEq::eq` comparison method.
+    pub fn is_eq_call(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::eq_fns())
+    }
+
+    /// Whether `callee` is `SliceIndex::get_unchecked`/`get_unchecked_mut` (the
+    /// trait method, whose receiver is the *index* and whose first argument is the
+    /// slice pointer). Distinct from [`is_slice_get_unchecked`] (the slice-side
+    /// methods whose receiver is the slice): the result aliases argument 1, not
+    /// argument 0.
+    pub fn is_sliceindex_get_unchecked(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::sliceindex_get_unchecked_fns())
+    }
+
+    /// Whether `callee` is `Range::next` / `RangeInclusive::next` (or their
+    /// `spec_next` impls). Distinct from the slice-side getters above: the receiver
+    /// is `&mut Range<A>`, and the returned element is the current `start`.
+    pub fn is_range_next(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::range_next_fns())
+    }
+
+    /// Whether `callee` is a slice iterator's `next` (`Iter::next` /
+    /// `IterMut::next`, or the `Iterator::next` trait method they forward to).
+    pub fn is_iter_next(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::iter_next_fns())
+    }
+
+    /// Whether `callee` is a slice iterator's `len` (`Iter::len` / `IterMut::len`).
+    pub fn is_iter_len(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::iter_len_fns())
+    }
+
+    /// Whether `callee` is a slice iterator's `is_empty`
+    /// (`Iter::is_empty` / `IterMut::is_empty`).
+    pub fn is_iter_is_empty(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::iter_is_empty_fns())
+    }
+
+    /// Whether `callee` is `<Option<T> as Try>::branch`.
+    pub fn is_branch(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::branch_fns())
+    }
+
+    /// Whether `callee` is a `gcd` const fn.
+    pub fn is_gcd(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::gcd_fns())
+    }
+
+    /// Whether `def_id` is `core::range::IndexRange` (or a local re-implementation).
+    pub fn is_index_range(def_id: DefId) -> bool {
+        other_api::index_range_types().contains(&def_id)
+    }
+
+    /// Whether `callee` is `slice::range(range, bounds)` — the range normalizer that
+    /// returns `Range { start, end }` with `0 <= start <= end <= bounds.end`.
+    pub fn is_slice_range(callee: Option<DefId>) -> bool {
+        any_def(callee, other_api::slice_range_fns())
+    }
+
+    /// Whether `callee` is `mem::replace(dest, src)` — returns `*dest` (the old
+    /// value), so the summary must deref the reference argument.
+    pub fn is_mem_replace(callee: Option<DefId>) -> bool {
+        other_api::matches_any(callee, &[other_api::replace()])
+    }
+}
+
+pub(crate) use classify::*;

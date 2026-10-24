@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::sync::OnceLock;
 use syn::Expr;
 
-use crate::def_id;
+use crate::other_api;
 
 /// The internal `crate::module::…` path of a `DefId` (e.g. `alloc::rcs::rc::Rc`),
 /// normalised from its `def_path_str` debug form.  Used for display/debug and as
@@ -377,7 +377,7 @@ pub fn match_ty_with_ident<'tcx>(
 fn match_std_type<'tcx>(tcx: TyCtxt<'tcx>, type_ident: &str) -> Option<Ty<'tcx>> {
     match type_ident {
         "Char" | "AsciiChar" => {
-            let did = *def_id::ascii_char_types().first()?;
+            let did = *other_api::ascii_char_types().first()?;
             let adt = tcx.adt_def(did);
             Some(Ty::new_adt(
                 tcx,

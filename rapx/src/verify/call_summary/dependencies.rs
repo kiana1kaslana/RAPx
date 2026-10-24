@@ -8,7 +8,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{
-        BasicBlock, Operand, ProjectionElem, Rvalue, StatementKind, TerminatorKind,
+        BasicBlock, NonDivergingIntrinsic, Operand, ProjectionElem, Rvalue, StatementKind,
+        TerminatorKind,
     },
     ty::TyCtxt,
 };
@@ -16,7 +17,6 @@ use rustc_middle::{
 use crate::analysis::dataflow::{DataflowAnalysis, default::DataflowAnalyzer};
 use crate::analysis::path::graph::{PathEnumerator, PathGraph};
 use crate::helpers::mir_utils as helpers;
-
 
 /// Trace backward from an operand (inner call arg) through Copy/Move/Cast/
 /// Ref/RawPtr assignments to the outer callee's argument local, returning its
@@ -73,9 +73,12 @@ fn trace_local_to_callee_arg(
                 continue;
             };
             let (func, args, destination) = match &terminator.kind {
-                TerminatorKind::Call { func, args, destination, .. } => {
-                    (func, args, destination.local)
-                }
+                TerminatorKind::Call {
+                    func,
+                    args,
+                    destination,
+                    ..
+                } => (func, args, destination.local),
                 TerminatorKind::TailCall { func, args, .. } => {
                     (func, args, rustc_middle::mir::Local::from_usize(0))
                 }
@@ -90,9 +93,9 @@ fn trace_local_to_callee_arg(
             // provenance (and thus the written-through arg) is carried by
             // their first (base/receiver) argument.
             let callee = helpers::dep_callee_def_id(func);
-            let traces_base = crate::verify::api_classify::is_as_ptr(callee)
-                || crate::verify::api_classify::is_pointer_add(callee)
-                || crate::verify::api_classify::is_pointer_sub(callee);
+            let traces_base = crate::other_api::is_as_ptr(callee)
+                || crate::other_api::is_pointer_add(callee)
+                || crate::other_api::is_pointer_sub(callee);
             if !traces_base {
                 continue;
             }
@@ -143,12 +146,8 @@ type WriteMemo = HashMap<(DefId, usize), Option<HashSet<usize>>>;
 /// Return callee argument indices that are written. Works for any callee with
 /// available MIR, and follows wrapper calls (`Vec::push` → `push_mut`) with
 /// bounded depth.
-pub(super) fn local_write_args(
-    tcx: TyCtxt<'_>,
-    callee: DefId,
-) -> Option<Vec<usize>> {
-    write_args_rec(tcx, callee, 0, &mut HashMap::new())
-        .map(|set| set.into_iter().collect())
+pub(super) fn local_write_args(tcx: TyCtxt<'_>, callee: DefId) -> Option<Vec<usize>> {
+    write_args_rec(tcx, callee, 0, &mut HashMap::new()).map(|set| set.into_iter().collect())
 }
 
 fn write_args_rec(
@@ -163,7 +162,7 @@ fn write_args_rec(
     if !tcx.is_mir_available(callee) {
         return None;
     }
-    if tcx.intrinsic(callee).is_some() || helpers::is_drop_in_place(callee) {
+    if crate::intrinsic_api::is_intrinsic(tcx, callee) || helpers::is_drop_in_place(callee) {
         return None;
     }
     let key = (callee, depth);
@@ -186,7 +185,7 @@ fn write_args_rec(
             if !path_ends_in_return(body, &path) {
                 continue;
             }
-            let writes = write_args_on_path(tcx, body, &path, depth, memo);
+            let writes = write_args_on_path(tcx, callee, body, &path, depth, memo);
             write = Some(match write {
                 Some(mut current) => {
                     current.extend(writes);
@@ -220,6 +219,7 @@ fn path_ends_in_return(body: &rustc_middle::mir::Body<'_>, path: &[usize]) -> bo
 
 fn write_args_on_path<'tcx>(
     tcx: TyCtxt<'tcx>,
+    caller: DefId,
     body: &rustc_middle::mir::Body<'tcx>,
     path: &[usize],
     depth: usize,
@@ -231,29 +231,42 @@ fn write_args_on_path<'tcx>(
             continue;
         };
 
-        // Direct writes through `&mut` args: `*self = ...`, `(*self).0 = ...`.
         for stmt in &data.statements {
+            if let StatementKind::Intrinsic(intrinsic) = &stmt.kind
+                && let NonDivergingIntrinsic::CopyNonOverlapping(copy) = &**intrinsic
+                && let Some(arg) = trace_to_callee_arg(body, &copy.dst)
+            {
+                writes.insert(arg);
+            }
             let StatementKind::Assign(assign) = &stmt.kind else {
                 continue;
             };
             let dest = &assign.0;
             if dest.projection.first() == Some(&ProjectionElem::Deref)
-                && let Some(arg) = trace_local_to_callee_arg(body, dest.local) {
-                    writes.insert(arg);
-                }
+                && let Some(arg) = trace_local_to_callee_arg(body, dest.local)
+            {
+                writes.insert(arg);
+            }
         }
 
         let Some(terminator) = data.terminator.as_ref() else {
             continue;
         };
-        let (func, args) = match &terminator.kind {
-            TerminatorKind::Call { func, args, .. }
-            | TerminatorKind::TailCall { func, args, .. } => (func, args),
+        let (func, args, destination) = match &terminator.kind {
+            TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                ..
+            } => (func, args, destination.local),
+            TerminatorKind::TailCall { func, args, .. } => {
+                (func, args, rustc_middle::mir::Local::from_usize(0))
+            }
             _ => continue,
         };
 
         // `ptr::write`-style writes: trace the pointer arg to a callee arg.
-        if crate::verify::api_classify::is_ptr_write(helpers::dep_callee_def_id(func)) {
+        if crate::other_api::is_ptr_write(helpers::dep_callee_def_id(func)) {
             if let Some(pointer_arg) = args
                 .first()
                 .and_then(|arg| trace_to_callee_arg(body, &arg.node))
@@ -263,7 +276,7 @@ fn write_args_on_path<'tcx>(
             continue;
         }
 
-        if crate::verify::api_classify::is_ptr_copy(helpers::dep_callee_def_id(func)) {
+        if crate::other_api::is_ptr_copy(helpers::dep_callee_def_id(func)) {
             if let Some(destination_arg) = args
                 .get(1)
                 .and_then(|arg| trace_to_callee_arg(body, &arg.node))
@@ -276,16 +289,25 @@ fn write_args_on_path<'tcx>(
         // Wrapper calls: a nested callee that writes its own args maps those
         // writes back onto this callee's args.
         if let Some(nested) = helpers::dep_callee_def_id(func)
-            && let Some(nested_writes) = write_args_rec(tcx, nested, depth + 1, memo)
+            && let Some(nested_writes) = super::effects::intrinsic_dependency_summary(
+                tcx,
+                caller,
+                Some(nested),
+                func,
+                destination,
+                args.len(),
+            )
+            .map(|summary| summary.write_args.into_iter().collect::<HashSet<_>>())
+            .or_else(|| write_args_rec(tcx, nested, depth + 1, memo))
         {
             for (i, arg) in args.iter().enumerate() {
                 if nested_writes.contains(&i)
-                    && let Some(outer) = trace_to_callee_arg(body, &arg.node) {
-                        writes.insert(outer);
-                    }
+                    && let Some(outer) = trace_to_callee_arg(body, &arg.node)
+                {
+                    writes.insert(outer);
+                }
             }
         }
     }
     writes
 }
-

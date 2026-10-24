@@ -6,7 +6,7 @@ use z3::ast::Int;
 
 use crate::compat::FxHashMap;
 use crate::helpers::mir_utils;
-use crate::verify::api_classify;
+use crate::other_api;
 
 use super::state::{AllocId, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
@@ -15,7 +15,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let arg_count = self.body().arg_count;
         let local_count = self.body().local_decls.len();
 
-        // Pre-allocate ALL locals and set initial values
         for local_idx in 1..local_count {
             let local = Local::from_usize(local_idx);
             if self.current_frame.local_alloc.contains_key(&local) {
@@ -28,19 +27,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
             let mut invariants = ValueFacts::default();
             if local_idx <= arg_count {
-                // ── Box / Vec parameter: heap-allocated pointee ──
                 if self.init_box_vec_param(local, ty, local_idx, &mut invariants) {
                     continue;
                 }
-                // ── Struct/tuple/enum parameter (non-Box/Vec ADT) ──
                 if self.init_struct_param(local, ty, local_idx, &mut invariants) {
                     continue;
                 }
-                // ── Reference parameter (&T, &mut T) ──
                 if self.init_reference_param(local, ty, local_idx, &mut invariants) {
                     continue;
                 }
-                // ── Scalar parameter ──
                 let is_scalar = matches!(
                     ty.kind(),
                     rustc_middle::ty::TyKind::Uint(_)
@@ -63,7 +58,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     );
                     continue;
                 }
-                // ── Raw pointer parameter (*const T, *mut T) ──
                 // Create a symbolic external allocation for provenance
                 // tracking. No invariants are set — callers must provide
                 // contracts (NonNull, ValidPtr, etc.) via assert_contract_fact
@@ -89,11 +83,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     );
                     continue;
                 }
-                // ── Array parameter ([usize; N], etc.) ──
                 if self.init_array_param(local, ty, local_idx, &mut invariants) {
                     continue;
                 }
-                // ── Struct / other parameter ──
                 let term = self.fresh_int(&format!("param_{}", local_idx));
                 self.set_local(
                     local,
@@ -107,7 +99,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 );
                 continue;
             }
-            // ── Non-parameter local: fallback value (overwritten by actual
             // assignments). For reference/raw-pointer locals the value *is* the
             // stack address; for scalar locals use a fresh symbolic value so a
             // stale stack address never leaks into scalar arithmetic (e.g. the
@@ -214,9 +205,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let rustc_middle::ty::TyKind::Adt(adt_def, substs) = ty.kind() else {
             return false;
         };
-        let is_vec = api_classify::is_std_vec(adt_def.did());
-        let is_cstring = api_classify::is_std_cstring(adt_def.did());
-        if !(api_classify::is_std_box(adt_def.did()) || is_vec || is_cstring) {
+        let is_vec = other_api::is_std_vec(adt_def.did());
+        let is_cstring = other_api::is_std_cstring(adt_def.did());
+        if !(other_api::is_std_box(adt_def.did()) || is_vec || is_cstring) {
             return false;
         }
         let heap_ty = substs.first().and_then(|s| s.as_type()).unwrap_or(ty);
@@ -304,7 +295,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // Symbolic-aware element size: a generic `T` gets `sizeof_T` (≥ 1) so the
         // allocation is `N·sizeof_T` bytes, not `N`.
         let elem_sym = self.size_sym(*elem_ty);
-        // Materialized element count (the array length `N`).
         let n_term = match n {
             Some(v) => Int::from_u64(self.z3_ctx, v as u64),
             None => {
@@ -385,7 +375,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // `&MaybeUninit<T>` / `&[MaybeUninit<T>]` carry no validity invariant —
         // the content need not be initialized — so do not claim `Init` for them
         // (the content property reduces to `Typed`).
-        let pointee_is_maybe_uninit = api_classify::is_maybe_uninit_ty(pointee_ty);
+        let pointee_is_maybe_uninit = other_api::is_maybe_uninit_ty(pointee_ty);
 
         invariants.non_null = true;
         if !pointee_is_maybe_uninit {
@@ -552,8 +542,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         // inside a referenced struct: materialize the pointee
                         // allocation so field access (e.g. `self.buckets.iter()`)
                         // resolves to the *data* elements, not the whole struct.
-                        if (api_classify::is_std_box(adt.did())
-                            || api_classify::is_std_vec(adt.did()))
+                        if (other_api::is_std_box(adt.did())
+                            || other_api::is_std_vec(adt.did()))
                             && let Some(pointee) = substs.first().and_then(|s| s.as_type())
                             {
                                 let elem_ty = match pointee.kind() {
@@ -561,7 +551,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                                     _ => pointee,
                                 };
                                 self.materialize_external_field(local, idx, field_ty, elem_ty, None);
-                            } else if !adt.is_enum() && api_classify::is_std_vec(adt.did()) {
+                            } else if !adt.is_enum() && other_api::is_std_vec(adt.did()) {
                                 self.materialize_vec_ptr_field(local, vec![idx], field_ty);
                             }
                     } else if matches!(

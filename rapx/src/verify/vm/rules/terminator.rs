@@ -22,7 +22,6 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
     // solver can reason about `offset <= len` directly.
     let cmp_cond = discr_val.bool_cond().cloned();
 
-    // Determine which target block is taken along the path.
     if let Some(chosen) = switch_succ {
         for (value, target) in targets.iter() {
             if target == chosen {
@@ -44,7 +43,6 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
         }
         // Otherwise branch: the discrim is NOT any of the explicit values.
         if targets.otherwise() == chosen {
-            // Negate every explicit target value.
             for (value, _) in targets.iter() {
                 let val_term = Int::from_u64(state.z3_ctx, value as u64);
                 state
@@ -99,7 +97,6 @@ pub(crate) fn exec_assert<'z3, 'tcx>(
         }
     }
 
-    // Guard inference: trace the assert condition back to find non_null sources
     state.infer_guard_non_null(cond, expected);
     // Infer alignment from == 0 guards on Rem expressions
     state.infer_guard_align(cond, expected);
@@ -152,9 +149,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return;
         };
 
-        // Check if cond is a Ne/Eq comparison of (x % n) or (x & (align-1)) against 0
         if let Some((lhs_pk, rhs_pk, _)) = self.op_source_of(&cond_pk) {
-            // The lhs is (x % n) / (x & (align-1)), rhs is constant 0
             let inner_pk = match (&lhs_pk, &rhs_pk) {
                 (Some(pk), None) => pk.clone(),
                 (None, Some(pk)) => pk.clone(),

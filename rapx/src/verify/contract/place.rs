@@ -26,7 +26,6 @@ pub(crate) fn parse_contract_place<'tcx>(
     def_id: DefId,
     expr: &Expr,
 ) -> Option<ContractPlace<'tcx>> {
-    // Handle .iter() / .each_element() — iterate over slice elements.
     if let Expr::MethodCall(expr_method) = expr
         && (expr_method.method == "iter" || expr_method.method == "each_element")
             && expr_method.args.is_empty()
@@ -36,7 +35,6 @@ pub(crate) fn parse_contract_place<'tcx>(
             return Some(place);
         }
 
-    // Handle .unwrap_some() method call — downcast to the Some variant.
     if let Expr::MethodCall(expr_method) = expr
         && expr_method.method == "unwrap_some" && expr_method.args.is_empty()
             && let Some((base, fields, recv_ty)) =
@@ -301,7 +299,6 @@ pub(crate) fn detect_array_for_each<'tcx>(
     let param_idx = match place.base {
         PlaceBase::Arg(n) => n,
         PlaceBase::Local(n) => {
-            // Local 0 = return, locals 1.. = parameters
             n.checked_sub(1)?
         }
         _ => return None,

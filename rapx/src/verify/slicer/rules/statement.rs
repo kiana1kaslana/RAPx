@@ -105,7 +105,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                     match base_ty.kind() {
                         rustc_middle::ty::TyKind::Ref(_, pointee, _) => match pointee.kind() {
                             rustc_middle::ty::TyKind::Adt(adt_def, _) => {
-                                crate::verify::api_classify::is_std_iter_or_itermut(adt_def.did())
+                                crate::other_api::is_std_iter_or_itermut(adt_def.did())
                             }
                             _ => false,
                         },

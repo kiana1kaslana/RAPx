@@ -20,7 +20,7 @@ use super::state::{
 };
 
 use crate::helpers::mir_utils;
-use crate::verify::api_classify;
+use crate::other_api;
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Execute all retained MIR items in path order.
@@ -272,7 +272,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return None;
         }
         let variant = adt_def.non_enum_variant();
-        // Direct `len` field.
         if let Some(len_idx) = variant
             .fields
             .iter()
@@ -284,7 +283,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 .get(&(root_ty, path))
                 .map(|v| v.z3_term.clone());
         }
-        // Recurse into ADT sub-fields (e.g. `String.vec.len`).
         for (idx, field_def) in variant.fields.iter().enumerate() {
             let field_ty = mir_utils::field_ty(self.tcx, field_def, substs);
             if matches!(field_ty.kind(), rustc_middle::ty::TyKind::Adt(_, _)) {
@@ -306,7 +304,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let rustc_middle::ty::TyKind::Adt(adt_def, _) = val.ty.kind() else {
             return None;
         };
-        if !api_classify::is_index_range(adt_def.did()) {
+        if !other_api::is_index_range(adt_def.did()) {
             return None;
         }
         let alloc_id = val.provenance_alloc_id()?;
@@ -801,7 +799,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     pub(crate) fn aggregate_field_tys(&self, ty: Ty<'tcx>) -> Vec<Ty<'tcx>> {
         match ty.kind() {
             rustc_middle::ty::TyKind::Array(elem_ty, _len) => {
-                // We don't need the exact count — just the element type for size
                 vec![*elem_ty]
             }
             rustc_middle::ty::TyKind::Tuple(elems) => elems.iter().collect(),

@@ -6,7 +6,7 @@
 
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
-use crate::verify::api_classify;
+use crate::other_api;
 use crate::verify::contract::{
     ContractExpr, NumericBinOp, PlaceBase, Property, PropertyArg, RelOp,
 };
@@ -333,7 +333,6 @@ impl PropertyChecker {
                 lhs,
                 rhs,
             } => {
-                // Recurse into mul operands in case one is a div
                 self.inject_nia_axioms(vm_state, solver, checkpoint, lhs);
                 self.inject_nia_axioms(vm_state, solver, checkpoint, rhs);
             }
@@ -386,7 +385,6 @@ impl PropertyChecker {
 
         let mut already_seen = FxHashSet::default();
 
-        // ── Also recurse through Use / Cast chains: search ALL locals
         // whose term equals target, and for each binary-op entry
         // that *consumes* that local as an operand, walk the destination.
         for local_idx in 0..vm_state.body().local_decls.len() {
@@ -418,7 +416,6 @@ impl PropertyChecker {
             }
         }
 
-        // ── Process direct matches ──
         for (lhs_pk, rhs_pk) in &op_sources {
             let (Some(lhs_pk), Some(rhs_pk)) = (lhs_pk, rhs_pk) else {
                 continue;
@@ -433,7 +430,6 @@ impl PropertyChecker {
                 continue;
             };
 
-            // Check if lhs is itself a Div / Rem result
             if let Some((div_lhs_pk, div_rhs_pk)) = lhs_pk
                 .local()
                 .and_then(|l| vm_state.local_value(l))
@@ -462,7 +458,6 @@ impl PropertyChecker {
                 solver.assert(&mul_term.le(&div_lhs_val.z3_term));
             }
 
-            // Recurse into operands
             self.inject_div_axioms_for_term(vm_state, solver, &lhs_val.z3_term, depth - 1);
             self.inject_div_axioms_for_term(vm_state, solver, &rhs_val.z3_term, depth - 1);
         }
@@ -479,7 +474,7 @@ impl PropertyChecker {
         for (_, val) in vm_state.all_local_values() {
             let is_iter = match val.ty.kind() {
                 TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                    TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
+                    TyKind::Adt(adt_def, _) => other_api::is_std_iter_or_itermut(adt_def.did()),
                     _ => false,
                 },
                 _ => false,
@@ -533,7 +528,7 @@ impl PropertyChecker {
         let local_val = vm_state.local_value(local)?;
         let is_iter = match local_val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
+                TyKind::Adt(adt_def, _) => other_api::is_std_iter_or_itermut(adt_def.did()),
                 _ => false,
             },
             _ => false,
@@ -541,7 +536,6 @@ impl PropertyChecker {
         if !is_iter {
             return None;
         }
-        // Direct lookup first, then scan by alloc_id for temp copies.
         if let (Some(ptr), Some(end)) = (
             vm_state.field_value(local, &[0]),
             vm_state.field_value(local, &[1]),

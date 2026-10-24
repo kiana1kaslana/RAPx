@@ -7,7 +7,7 @@ use rustc_middle::mir::{
 };
 
 use crate::analysis::dataflow::types::DataflowGraph;
-use crate::helpers::def_use::RelevantPlaces;
+use crate::helpers::def_use::{RelevantPlaces, operand_uses};
 use crate::verify::mir_support;
 
 use super::super::types::RelevantItem;
@@ -93,6 +93,19 @@ pub(super) fn apply_statement(ctx: &mut StatementContext<'_, '_>) {
                 ctx.relevant.insert_mir_place(place);
             }
             "Assume"
+        }
+        StatementKind::Intrinsic(intrinsic)
+            if let NonDivergingIntrinsic::CopyNonOverlapping(copy) = &**intrinsic =>
+        {
+            ctx.items.push(RelevantItem::Statement {
+                def_id: ctx.def_id,
+                block: ctx.block,
+                statement_index: ctx.statement_index,
+            });
+            ctx.relevant.extend(operand_uses(&copy.src));
+            ctx.relevant.extend(operand_uses(&copy.dst));
+            ctx.relevant.extend(operand_uses(&copy.count));
+            "CopyNonOverlapping"
         }
         kind if mir_support::ignored_statement(kind) => "Ignored",
         _ => {

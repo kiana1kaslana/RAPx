@@ -85,7 +85,6 @@ fn conv_expr<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, pair: Pair<Rule>) -> Contra
         Rule::expr => conv_expr(tcx, def_id, only_child(pair)),
         Rule::if_expr => conv_if(tcx, def_id, pair),
         Rule::cmp => {
-            // Expression layer carries no comparison operator.
             let mut inner = pair.into_inner();
             let lhs = conv_bit_or(tcx, def_id, inner.next().expect("cmp lhs"));
             if inner.next().is_some() {
@@ -282,7 +281,6 @@ fn conv_size_of_call<'tcx>(
     } else {
         ("size_of", text.split("size_of").nth(1).unwrap_or(""))
     };
-    // rest looks like " :: < usize > ()" — extract the ident between `<` and `>`.
     let ty_name = rest
         .find('<')
         .and_then(|lt| {
@@ -303,7 +301,6 @@ fn conv_size_of_call<'tcx>(
 fn conv_call<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, pair: Pair<Rule>) -> ContractExpr<'tcx> {
     let mut inner = pair.into_inner();
     let builtin = inner.next().expect("builtin").as_str().to_string();
-    // `call = builtin "(" arg_list? ")"`; arg_list's children are the `arg`s.
     let args: Vec<Pair<Rule>> = match inner.next() {
         Some(arg_list) => arg_list.into_inner().collect(),
         None => Vec::new(),

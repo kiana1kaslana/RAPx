@@ -89,7 +89,6 @@ pub(crate) fn get_std_contracts_from_json(
     let cleaned_path_name = public_def_path(tcx, lookup_def_id);
     let db = load_std_contracts_json();
 
-    // Exact match first.
     if let Some(entries) = db.get(&cleaned_path_name) {
         return Some(entries.as_slice());
     }

@@ -17,7 +17,7 @@ use super::state::{
 };
 
 use crate::helpers::mir_utils;
-use crate::verify::api_classify;
+use crate::other_api;
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Assert a contract fact as VM state invariants.
@@ -430,7 +430,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .unwrap_or(false);
 
         if has_nonfield {
-            // ForEach/Downcast target: legacy whole-local, exact size.
             let Some(local) = self.contract_target_local(property) else {
                 return;
             };
@@ -468,7 +467,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     .map(|val| {
                         (matches!(val.ty.kind(), rustc_middle::ty::TyKind::RawPtr(..))
                             || matches!(val.ty.kind(), rustc_middle::ty::TyKind::Adt(adt, _)
-                                if api_classify::is_std_nonnull(adt.did())
+                                if other_api::is_std_nonnull(adt.did())
                                     || mir_utils::is_raw_ptr_wrapper(self.tcx, adt.did())))
                             && (elem_ty.is_primitive()
                                 || matches!(elem_ty.kind(), rustc_middle::ty::TyKind::Param(_)))
@@ -674,7 +673,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             ContractExpr::Len(inner) => {
-                // Try field-based len for Iter/IterMut first.
                 if let Some(val) = self.eval_contract_expr_simple_value(inner)
                     && let Some(term) = self.try_simple_iter_len(&val) {
                         return Some(term);
@@ -737,7 +735,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         use rustc_middle::ty::TyKind;
         match val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
+                TyKind::Adt(adt_def, _) => other_api::is_std_iter_or_itermut(adt_def.did()),
                 _ => false,
             },
             _ => false,
@@ -922,7 +920,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .max(1);
         let Some(data_size) = data_size else { return };
         let elem_sz_term = Int::from_u64(self.z3_ctx, elem_sz);
-        // Prefer the materialized slice length; fall back to `size / elem_size`.
         let len = slice_val
             .and_then(|sl_val| self.slice_len_from_value(sl_val))
             .unwrap_or_else(|| data_size.div(&elem_sz_term));
@@ -1130,7 +1127,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // content carries no validity invariant, so there is nothing to mark
         // initialized — the `Init ⇒ Typed` subsumption records the element type.
         let is_maybe_uninit = Self::ty_arg(property, 1)
-            .map(api_classify::is_maybe_uninit_ty)
+            .map(other_api::is_maybe_uninit_ty)
             .unwrap_or(false);
         if is_maybe_uninit {
             return;

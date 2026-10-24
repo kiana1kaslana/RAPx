@@ -1,8 +1,8 @@
 //! Direct MIR dispatch for symbolic execution rules.
 
 use rustc_middle::mir::{
-    BasicBlock, Local, NonDivergingIntrinsic, Place, Rvalue, Statement, StatementKind,
-    Terminator, TerminatorKind,
+    BasicBlock, Local, NonDivergingIntrinsic, Place, Rvalue, Statement, StatementKind, Terminator,
+    TerminatorKind,
 };
 
 use super::super::state::{VmState, VmValue};
@@ -29,6 +29,12 @@ pub(super) fn exec_statement<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, stmt: &S
         {
             statement::exec_assume(state, operand);
             "Assume"
+        }
+        StatementKind::Intrinsic(intrinsic)
+            if let NonDivergingIntrinsic::CopyNonOverlapping(copy) = &**intrinsic =>
+        {
+            statement::exec_copy_nonoverlapping(state, copy);
+            "CopyNonOverlapping"
         }
         kind if mir_support::ignored_statement(kind) => "Ignored",
         _ => {
@@ -113,10 +119,10 @@ pub(super) fn eval_rvalue<'z3, 'tcx>(
             "CopyForDeref",
             rvalue::eval_copy_for_deref(state, place, source),
         ),
-        Rvalue::Repeat(..) => ("Repeat", rvalue::eval_fresh_value(state, place, "repeat")),
-        Rvalue::ThreadLocalRef(..) => (
+        Rvalue::Repeat(operand, _) => ("Repeat", rvalue::eval_repeat(state, place, operand)),
+        Rvalue::ThreadLocalRef(def_id) => (
             "ThreadLocalRef",
-            rvalue::eval_fresh_value(state, place, "thread_local"),
+            rvalue::eval_thread_local_ref(state, place, *def_id),
         ),
         #[cfg(not(rapx_ge_95))]
         Rvalue::NullaryOp(op) => ("NullaryOp", rvalue::eval_nullary_op(state, place, op)),
@@ -125,9 +131,7 @@ pub(super) fn eval_rvalue<'z3, 'tcx>(
             rvalue::eval_wrap_unsafe_binder(state, place, operand),
         ),
         #[cfg(rapx_rvalue_has_reborrow)]
-        Rvalue::Reborrow(_, _, source) => {
-            ("Reborrow", rvalue::eval_reborrow(state, place, source))
-        }
+        Rvalue::Reborrow(_, _, source) => ("Reborrow", rvalue::eval_reborrow(state, place, source)),
         _ => {
             state.unsupported_mir = true;
             (

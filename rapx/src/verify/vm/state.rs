@@ -6,6 +6,8 @@
 
 use crate::helpers::mir_utils;
 use rustc_hir::def_id::DefId;
+#[cfg(rapx_const_ext)]
+use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::{
     mir::{Body, ConstValue, Local, Operand, Place, ProjectionElem},
     ty::{Region, Ty, TyCtxt},
@@ -17,6 +19,8 @@ use z3::{
 
 use crate::compat::{FxHashMap, FxHashSet};
 use crate::helpers::def_use::PlaceKey;
+
+pub(crate) const REPEATED_ARRAY_ELEMENT: usize = usize::MAX;
 
 /// Unique identifier for a heap or stack allocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -472,7 +476,13 @@ pub(crate) enum ValueSource<'z3> {
 impl<'z3> ValueSource<'z3> {
     /// The `(lhs, rhs, op)` of a binary-op/comparison result, if this value is
     /// one.
-    pub(crate) fn operands(&self) -> Option<(&Option<PlaceKey>, &Option<PlaceKey>, rustc_middle::mir::BinOp)> {
+    pub(crate) fn operands(
+        &self,
+    ) -> Option<(
+        &Option<PlaceKey>,
+        &Option<PlaceKey>,
+        rustc_middle::mir::BinOp,
+    )> {
         match self {
             ValueSource::Comparison { lhs, rhs, op, .. } => Some((lhs, rhs, *op)),
             ValueSource::BinaryOp { lhs, rhs, op } => Some((lhs, rhs, *op)),
@@ -598,7 +608,8 @@ pub(crate) struct TermCaches<'z3, 'tcx> {
     /// Caching both keeps `next`/`len`/`is_empty` checks linear
     /// (`base_len - offset`) instead of a deeply-nested `((base + S) + S) …`
     /// pointer chain that Z3's NIA cannot reason about.
-    pub(crate) iter_ptr_offset: FxHashMap<(AllocId, Int<'z3>), (AllocId, Int<'z3>, Option<Int<'z3>>)>,
+    pub(crate) iter_ptr_offset:
+        FxHashMap<(AllocId, Int<'z3>), (AllocId, Int<'z3>, Option<Int<'z3>>)>,
 
     /// `UNINIT` sentinel byte value (≥ 256, outside the `u8` value range).
     /// The default element of every byte array; `select(array, i) != UNINIT`
@@ -678,11 +689,7 @@ pub(crate) struct VmState<'z3, 'tcx> {
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Create a fresh VM state for executing a path.
-    pub(crate) fn new(
-        z3_ctx: &'z3 Context,
-        tcx: TyCtxt<'tcx>,
-        caller_def_id: DefId,
-    ) -> Self {
+    pub(crate) fn new(z3_ctx: &'z3 Context, tcx: TyCtxt<'tcx>, caller_def_id: DefId) -> Self {
         // The `UNINIT` sentinel is created once and shared by every byte array:
         // an unwritten offset reads it back, so `select != UNINIT` decides
         // whether a byte was written.
@@ -918,7 +925,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     pub(crate) fn field_value(&self, local: Local, path: &[usize]) -> Option<&VmValue<'z3, 'tcx>> {
         let alloc_id = *self.current_frame.local_alloc.get(&local)?;
         let view_ty = self.body().local_decls[local].ty;
-        self.load_value(alloc_id, view_ty, path)
+        self.load_value(alloc_id, view_ty, path).or_else(|| {
+            let (index, prefix) = path.split_last()?;
+            if *index == REPEATED_ARRAY_ELEMENT {
+                return None;
+            }
+            let mut repeat_path = prefix.to_vec();
+            repeat_path.push(REPEATED_ARRAY_ELEMENT);
+            self.load_value(alloc_id, view_ty, &repeat_path)
+        })
     }
 
     /// Enumerate the field paths materialized for a local: every non-empty
@@ -949,11 +964,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Enumerate the field paths materialized for `local` in a saved caller
     /// `frame`. Field values live in the path-scoped [`MemoryContent::values`], so they
     /// are read via `frame`'s `local_alloc` and declared type.
-    pub(crate) fn frame_field_paths(
-        &self,
-        frame: &FrameState,
-        local: Local,
-    ) -> Vec<Vec<usize>> {
+    pub(crate) fn frame_field_paths(&self, frame: &FrameState, local: Local) -> Vec<Vec<usize>> {
         let Some(&alloc_id) = frame.local_alloc.get(&local) else {
             return Vec::new();
         };
@@ -1031,7 +1042,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             let Some(prov) = v.provenance.as_ref() else {
                 continue;
             };
-            if best.as_ref().is_none_or(|(depth, _, _)| path.len() < *depth) {
+            if best
+                .as_ref()
+                .is_none_or(|(depth, _, _)| path.len() < *depth)
+            {
                 best = Some((path.len(), prov.alloc_id, prov.offset.clone()));
             }
         }
@@ -1048,15 +1062,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let ty = self.body().local_decls[local].ty;
         if let Some(path) = self.container_ptr_field(ty)
             && let Some(v) = self.field_value(local, &path)
-                && v.provenance_alloc_id().is_some() {
-                    return Some(v);
-                }
-        self.field_paths(local)
-            .iter()
-            .find_map(|path| {
-                self.field_value(local, path)
-                    .filter(|v| v.provenance_alloc_id().is_some())
-            })
+            && v.provenance_alloc_id().is_some()
+        {
+            return Some(v);
+        }
+        self.field_paths(local).iter().find_map(|path| {
+            self.field_value(local, path)
+                .filter(|v| v.provenance_alloc_id().is_some())
+        })
     }
 
     /// Invalidate `local`'s owner-field provenance (mark it moved-out after a
@@ -1195,8 +1208,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // pointer strides instead of being unrelated fresh constants.
                 if let rustc_middle::mir::Const::Unevaluated(uneval, _) = constant.const_ {
                     let is_size = mir_utils::is_sized_type_property(self.tcx, uneval.def, "SIZE");
-                    let is_align =
-                        mir_utils::is_sized_type_property(self.tcx, uneval.def, "ALIGN");
+                    let is_align = mir_utils::is_sized_type_property(self.tcx, uneval.def, "ALIGN");
                     if (is_size || is_align) && !uneval.args.is_empty() {
                         let ty = uneval.args.type_at(0);
                         let term = if is_size {
@@ -1207,14 +1219,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         return VmValue::new(term, constant.const_.ty());
                     }
                 }
-                let int_val = mir_utils::eval_const_scalar_int(
-                    self.tcx,
-                    &constant.const_,
-                    &text,
-                );
+                let int_val = mir_utils::eval_const_scalar_int(self.tcx, &constant.const_, &text);
                 let field_offset = int_val.is_none()
-                    && mir_utils::offset_of_container(self.tcx, &constant.const_)
-                        .is_some();
+                    && mir_utils::offset_of_container(self.tcx, &constant.const_).is_some();
                 let enum_variant = mir_utils::const_destructure(self.tcx, &constant.const_)
                     .and_then(|(variant, _)| variant);
                 let term = if let Some(v) = int_val {
@@ -1316,6 +1323,26 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return self.local_value(place.local).cloned();
         }
         let place_ty = place.ty(self.body(), self.tcx).ty;
+        if let Some(ProjectionElem::Index(index_local)) = place.projection.last()
+            && place.projection[..place.projection.len() - 1]
+                .iter()
+                .all(|projection| matches!(projection.kind(), ProjectionElem::Field(..)))
+            && let Some(index) = self
+                .local_value(*index_local)
+                .and_then(|value| value.z3_term.simplify().as_u64())
+        {
+            let mut path = place.projection[..place.projection.len() - 1]
+                .iter()
+                .filter_map(|projection| match projection.kind() {
+                    ProjectionElem::Field(index, _) => Some(index.as_usize()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            path.push(index as usize);
+            if let Some(value) = self.field_value(place.local, &path) {
+                return Some(value.clone());
+            }
+        }
         if place.projection.len() == 1
             && matches!(place.projection[0], ProjectionElem::Deref)
             && let Some(pointer) = self.local_value(place.local)
@@ -1360,7 +1387,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return Some(self.unknown_value_for_place(place));
         }
 
-        // Collect field indices from projections
         let field_path: Vec<usize> = place
             .projection
             .iter()
@@ -1401,15 +1427,16 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // Unique, NonNull) where accessing inner pointer fields yields
                 // the same provenance as the container.
                 if let Some(base_val) = self.local_value(place.local)
-                    && let Some(ref prov) = base_val.provenance {
-                        return Some(VmValue {
-                            z3_term: base_val.z3_term.clone(),
-                            ty: place_ty,
-                            provenance: Some(prov.clone()),
-                            facts: base_val.facts.clone(),
-                            source: ValueSource::None,
-                        });
-                    }
+                    && let Some(ref prov) = base_val.provenance
+                {
+                    return Some(VmValue {
+                        z3_term: base_val.z3_term.clone(),
+                        ty: place_ty,
+                        provenance: Some(prov.clone()),
+                        facts: base_val.facts.clone(),
+                        source: ValueSource::None,
+                    });
+                }
                 return None;
             }
             // A Downcast without a materialized field falls through to the
@@ -1450,13 +1477,13 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // of the key so reinterpret casts (e.g. `LeafNode` → `InternalNode`)
                 // resolve to the right field view.
                 if let Some(base_val) = self.local_value(place.local)
-                    && let Some(alloc_id) = base_val.provenance_alloc_id() {
-                        let view_ty = mir_utils::pointee_ty(base_val.ty)
-                            .unwrap_or(base_val.ty);
-                        if let Some(val) = self.load_value(alloc_id, view_ty, &field_path).cloned() {
-                            return Some(val);
-                        }
+                    && let Some(alloc_id) = base_val.provenance_alloc_id()
+                {
+                    let view_ty = mir_utils::pointee_ty(base_val.ty).unwrap_or(base_val.ty);
+                    if let Some(val) = self.load_value(alloc_id, view_ty, &field_path).cloned() {
+                        return Some(val);
                     }
+                }
                 if let Some(base_val) = self.local_value(place.local)
                     && self.is_len_field_read(base_val.ty, &field_path)
                     && let Some(len) = self.len_from_value(base_val)
@@ -1476,11 +1503,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     base.ty = place_ty;
                 }
                 ProjectionElem::Field(_field_idx, _) => {
-                    // Try to get the field value from the VM's field tracking
                     if !field_path.is_empty()
-                        && let Some(val) = self.field_value(place.local, &field_path).cloned() {
-                            return Some(val);
-                        }
+                        && let Some(val) = self.field_value(place.local, &field_path).cloned()
+                    {
+                        return Some(val);
+                    }
                     // Fallback: return the base with updated type info
                     base.ty = place_ty;
                 }
@@ -1495,76 +1522,145 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let prefix_is_deref = place.projection[..place.projection.len() - 1]
             .iter()
             .all(|p| matches!(p.kind(), ProjectionElem::Deref));
+        if prefix_is_deref {
+            let index = match proj {
+                ProjectionElem::Index(local) => self
+                    .local_value(*local)
+                    .and_then(|value| value.z3_term.simplify().as_u64()),
+                ProjectionElem::ConstantIndex {
+                    offset,
+                    from_end: false,
+                    ..
+                } => Some(*offset),
+                _ => None,
+            };
+            if let Some(index) = index
+                && let Some(value) = self.field_value(place.local, &[index as usize])
+            {
+                return Some(value.clone());
+            }
+            if let ProjectionElem::Index(local) = proj
+                && let Some(index_value) = self.local_value(*local)
+                && matches!(
+                    place_ty.kind(),
+                    rustc_middle::ty::TyKind::Int(_)
+                        | rustc_middle::ty::TyKind::Uint(_)
+                        | rustc_middle::ty::TyKind::Bool
+                        | rustc_middle::ty::TyKind::Char
+                )
+                && let rustc_middle::ty::TyKind::Array(_, length) =
+                    self.body().local_decls[place.local].ty.kind()
+                && let Some(length) = length.try_to_target_usize(self.tcx)
+            {
+                let repeated = self
+                    .field_value(place.local, &[REPEATED_ARRAY_ELEMENT])
+                    .cloned();
+                let elements = if repeated.is_some() {
+                    self.field_paths(place.local)
+                        .into_iter()
+                        .filter_map(|path| {
+                            (path.len() == 1
+                                && path[0] < length as usize
+                                && path[0] != REPEATED_ARRAY_ELEMENT)
+                                .then(|| {
+                                    self.field_value(place.local, &path)
+                                        .cloned()
+                                        .map(|value| (path[0], value))
+                                })
+                                .flatten()
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    (0..length)
+                        .filter_map(|index| {
+                            self.field_value(place.local, &[index as usize])
+                                .cloned()
+                                .map(|value| (index as usize, value))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if repeated.is_some() || elements.len() == length as usize {
+                    let mut term = repeated
+                        .map(|value| value.z3_term)
+                        .unwrap_or_else(|| self.fresh_int("array_index"));
+                    for (index, element) in elements {
+                        let selected = index_value
+                            .z3_term
+                            ._eq(&Int::from_u64(self.z3_ctx, index as u64));
+                        term = selected.ite(&element.z3_term, &term);
+                    }
+                    return Some(VmValue::new(term, place_ty));
+                }
+            }
+        }
         if let ProjectionElem::Index(local) = proj {
-            if prefix_is_deref
-                && let Some(ref prov) = base.provenance {
-                    let alloc_id = prov.alloc_id;
-                    // The base's type may have been overwritten to the
-                    // element type by the Deref strip above; recover the
-                    // pointee element type from the base local's declared
-                    // type (`&[u8]` → `u8`, `&[T; N]` → `T`).
-                    let decl_ty = self.body().local_decls[place.local].ty;
-                    let inner_ty = match decl_ty.kind() {
-                        rustc_middle::ty::TyKind::Array(inner, _) => *inner,
-                        rustc_middle::ty::TyKind::Ref(_, inner, _) => {
-                            match inner.kind() {
-                                rustc_middle::ty::TyKind::Slice(e) => *e,
-                                _ => return Some(base.clone()),
-                            }
-                        }
+            if prefix_is_deref && let Some(ref prov) = base.provenance {
+                let alloc_id = prov.alloc_id;
+                // The base's type may have been overwritten to the
+                // element type by the Deref strip above; recover the
+                // pointee element type from the base local's declared
+                // type (`&[u8]` → `u8`, `&[T; N]` → `T`).
+                let decl_ty = self.body().local_decls[place.local].ty;
+                let inner_ty = match decl_ty.kind() {
+                    rustc_middle::ty::TyKind::Array(inner, _) => *inner,
+                    rustc_middle::ty::TyKind::Ref(_, inner, _) => match inner.kind() {
                         rustc_middle::ty::TyKind::Slice(e) => *e,
                         _ => return Some(base.clone()),
-                    };
-                    let elem_sz = self.size_of_ty(inner_ty) as usize;
-                    let step = elem_sz.max(1);
-                    if let Some(index_val) = self.local_value(*local) {
-                        // `arr[i]` = the byte at `i * size_of(elem)`; the array
-                        // model resolves symbolic indices via `select` directly.
-                        let offset = Int::mul(
-                            self.z3_ctx,
-                            &[&index_val.z3_term, &Int::from_u64(self.z3_ctx, step as u64)],
-                        );
-                        // Byte-level tracking only exists once some byte of the
-                        // allocation has been written; otherwise fall through to
-                        // the field→byte materialization below.  Even when the
-                        // allocation has a byte array, the byte may still read
-                        // `UNINIT` (e.g. a struct whose fields were written in
-                        // the value layer only), so also fall through to the
-                        // field→byte materialization in that case.
-                        if self.units[alloc_id.0].content.byte_array.is_some() {
-                            let term = self.byte_read(alloc_id, &offset);
-                            let is_uninit = offset
-                                .simplify()
-                                .as_u64()
-                                .map(|off| !self.is_byte_init(alloc_id, off as usize))
-                                .unwrap_or(false);
-                            if !is_uninit {
-                                return Some(VmValue {
-                                    z3_term: term,
-                                    ty: place_ty,
-                                    provenance: None,
-                                    facts: ValueFacts::default(),
-                                    source: ValueSource::None,
-                                });
-                            }
+                    },
+                    rustc_middle::ty::TyKind::Slice(e) => *e,
+                    _ => return Some(base.clone()),
+                };
+                let elem_sz = self.size_of_ty(inner_ty) as usize;
+                let step = elem_sz.max(1);
+                if let Some(index_val) = self.local_value(*local) {
+                    // `arr[i]` = the byte at `i * size_of(elem)`; the array
+                    // model resolves symbolic indices via `select` directly.
+                    let offset = Int::mul(
+                        self.z3_ctx,
+                        &[&index_val.z3_term, &Int::from_u64(self.z3_ctx, step as u64)],
+                    );
+                    // Byte-level tracking only exists once some byte of the
+                    // allocation has been written; otherwise fall through to
+                    // the field→byte materialization below.  Even when the
+                    // allocation has a byte array, the byte may still read
+                    // `UNINIT` (e.g. a struct whose fields were written in
+                    // the value layer only), so also fall through to the
+                    // field→byte materialization in that case.
+                    if self.units[alloc_id.0].content.byte_array.is_some() {
+                        let term = self.byte_read(alloc_id, &offset);
+                        let is_uninit = offset
+                            .simplify()
+                            .as_u64()
+                            .map(|off| !self.is_byte_init(alloc_id, off as usize))
+                            .unwrap_or(false);
+                        if !is_uninit {
+                            return Some(VmValue {
+                                z3_term: term,
+                                ty: place_ty,
+                                provenance: None,
+                                facts: ValueFacts::default(),
+                                source: ValueSource::None,
+                            });
                         }
-                        // Field→byte direction of the cast cross-view
-                        // materialization: the buffer was reinterpreted from a
-                        // struct whose scalar fields were written in the value
-                        // layer, so read the byte back out of the field value.
-                        if let Some(off) = offset.simplify().as_u64()
-                            && let Some(ty) = self.alloc(alloc_id).element_ty.as_ty()
-                                && let Some(b) = self.byte_from_field(alloc_id, ty, off as usize) {
-                                    return Some(VmValue {
-                                        z3_term: b,
-                                        ty: place_ty,
-                                        provenance: None,
-                                        facts: ValueFacts::default(),
-                                        source: ValueSource::None,
-                                    });
-                                }
+                    }
+                    // Field→byte direction of the cast cross-view
+                    // materialization: the buffer was reinterpreted from a
+                    // struct whose scalar fields were written in the value
+                    // layer, so read the byte back out of the field value.
+                    if let Some(off) = offset.simplify().as_u64()
+                        && let Some(ty) = self.alloc(alloc_id).element_ty.as_ty()
+                        && let Some(b) = self.byte_from_field(alloc_id, ty, off as usize)
+                    {
+                        return Some(VmValue {
+                            z3_term: b,
+                            ty: place_ty,
+                            provenance: None,
+                            facts: ValueFacts::default(),
+                            source: ValueSource::None,
+                        });
                     }
                 }
+            }
             return Some(base.clone());
         }
         // Any other trailing projection (Deref/Field/Downcast/…): the loop above

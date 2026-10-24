@@ -15,7 +15,7 @@ pub fn unknown_inline_asm_write() {
 }
 
 #[rapx::verify]
-pub fn unknown_intrinsic_copy() {
+pub fn unsound_intrinsic_copy() {
     let source = 0_u32;
     let mut destination = 1_u32;
     unsafe { std::intrinsics::copy_nonoverlapping(&source, &mut destination, 1); }

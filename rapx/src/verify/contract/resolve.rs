@@ -202,7 +202,6 @@ pub(crate) fn parse_type<'tcx>(
         return ty;
     }
 
-    // A multi-segment path type (`std::ascii::Char`) — resolve its last segment.
     if let Expr::Path(expr_path) = expr
         && expr_path.path.segments.len() > 1
         && let Some(last) = expr_path.path.segments.last()

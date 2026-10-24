@@ -7,7 +7,7 @@
 
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
-use crate::verify::api_classify;
+use crate::other_api;
 use crate::verify::contract::{ContractExpr, Property, PropertyArg, is_static_lifetime_ident};
 use crate::verify::report::{CheckResult, UnknownReason};
 use crate::verify::vm::state::{AllocId, OffsetKind, VmState, VmValue};
@@ -337,13 +337,13 @@ impl PropertyChecker {
             && (matches!(value.ty.kind(), TyKind::RawPtr(..))
                 || matches!(value.ty.kind(), TyKind::Ref(_, inner, _)
                     if matches!(inner.kind(), TyKind::Adt(adt, _)
-                        if api_classify::is_maybe_uninit_type(adt.did()))))
+                        if other_api::is_maybe_uninit_type(adt.did()))))
             && {
                 let a = vm_state.alloc(alloc_id);
                 !a.is_external()
                     && a.element_ty.as_ty().is_some_and(|ty| {
                         if let TyKind::Adt(adt, _) = ty.kind() {
-                            api_classify::is_maybe_uninit_type(adt.did())
+                            other_api::is_maybe_uninit_type(adt.did())
                         } else {
                             false
                         }
@@ -383,7 +383,7 @@ impl PropertyChecker {
             // / `String::new`) has no heap allocation behind the reference: the
             // container value is valid and there is nothing to free, so its
             // `ValidPtr`/`Allocated` precondition holds vacuously.
-            if crate::verify::api_classify::is_manually_drop_drop(checkpoint.callee) {
+            if crate::other_api::is_manually_drop_drop(checkpoint.callee) {
                 return CheckResult::ProvedByRule;
             }
             // A null pointer (address term 0) is definitely not backed by any
@@ -701,7 +701,6 @@ impl PropertyChecker {
                     return CheckResult::Failed;
                 }
             }
-            // Verify the entire access range is covered
             if let Some(access_val) = access.as_u64()
                 && let Some(prov) = &value.provenance
                     && let Some(prov_off) = prov.offset.as_u64() {
@@ -730,10 +729,9 @@ impl PropertyChecker {
                 && Self::is_value_aligned(vm_state, &value)
                 && matches!(value.ty.kind(), TyKind::RawPtr(..))
                 && !vm_state.alloc(id).facts.dead
-                && crate::verify::api_classify::is_mem_copy_or_write(checkpoint.callee) {
+                && crate::other_api::is_mem_copy_or_write(checkpoint.callee) {
                     return CheckResult::ProvedByRule;
                 }
-            // Check byte-level init: if all bytes in range are initialized
             let size = vm_state.allocation_size(id).clone();
             if let Some(size_val) = size.as_u64() {
                 let size_usize = (size_val as usize).min(4096);
@@ -748,7 +746,6 @@ impl PropertyChecker {
             // confirmed violation rather than an incomplete proof.
             return CheckResult::Failed;
         }
-        // Check field-level init for aggregate types
         if let Some(origin_op) = checkpoint.args.first() {
             let origin_val = vm_state.value_of_operand(origin_op);
             if let Some(prov) = &origin_val.provenance
@@ -953,8 +950,8 @@ impl PropertyChecker {
                 let param_ty = body.local_decls[param_local].ty;
                 let guarantees = matches!(param_ty.kind(), TyKind::Ref(..))
                     || matches!(param_ty.kind(), TyKind::Adt(adt_def, _)
-                        if api_classify::is_std_box(adt_def.did())
-                            || api_classify::is_std_vec(adt_def.did()));
+                        if other_api::is_std_box(adt_def.did())
+                            || other_api::is_std_vec(adt_def.did()));
                 if !guarantees {
                     return false;
                 }
@@ -975,7 +972,6 @@ impl PropertyChecker {
             return CheckResult::Failed;
         }
 
-        // A reference or owned value guarantees its pointee is live.
         CheckResult::ProvedByRule
     }
 }

@@ -401,7 +401,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                                     out.push(RelevantItem::CalleeExit { dest });
                                 }
                             } else {
-                                // Descent into a fresh callee `cur`.
                                 let current_parent =
                                     active.last().map(|(d, _, _)| *d).unwrap_or(caller);
 
@@ -455,8 +454,8 @@ impl<'tcx> VerifyEngine<'tcx> {
                                             == Some(1)
                                     });
                                     let is_ptr_arith =
-                                        crate::verify::api_classify::is_pointer_add(Some(cur))
-                                            || crate::verify::api_classify::is_pointer_sub(Some(
+                                        crate::other_api::is_pointer_add(Some(cur))
+                                            || crate::other_api::is_pointer_sub(Some(
                                                 cur,
                                             ));
                                     if (all_single_arg || is_ptr_arith) && let Some(arg) = prev_arg {

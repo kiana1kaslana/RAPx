@@ -1,15 +1,20 @@
 //! Transfer functions for MIR rvalues.
 
 use rustc_abi::FieldIdx;
+use rustc_hir::def_id::DefId;
 use rustc_index::IndexVec;
 use rustc_middle::mir::{AggregateKind, BinOp, Operand, Place, UnOp};
-use rustc_middle::ty::Ty;
+#[cfg(rapx_const_ext)]
+use rustc_middle::ty::consts::ConstExt;
+use rustc_middle::ty::{Ty, TyKind};
 use z3::ast::{Ast, Int};
 
-use super::super::state::{Provenance, ValueFacts, ValueSource, VmState, VmValue};
+use super::super::state::{
+    Provenance, REPEATED_ARRAY_ELEMENT, ValueFacts, ValueSource, VmState, VmValue,
+};
 
 use crate::helpers::mir_utils;
-use crate::verify::api_classify;
+use crate::other_api;
 
 pub(crate) fn eval_use<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -18,15 +23,15 @@ pub(crate) fn eval_use<'z3, 'tcx>(
 ) -> VmValue<'z3, 'tcx> {
     let mut val = state.value_of_operand(operand);
     if let rustc_middle::mir::Operand::Constant(c) = operand
-        && place.projection.is_empty() {
-            state.materialize_const_adt(place.local, &c.const_);
-        }
+        && place.projection.is_empty()
+    {
+        state.materialize_const_adt(place.local, &c.const_);
+    }
     state.try_materialize_const_bytes(&mut val, operand);
     state.inject_layout_constraints(operand, &val);
     state.try_emit_gcd_divisibility(operand, &val);
     val
 }
-
 
 pub(crate) fn eval_ref<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -120,7 +125,6 @@ pub(crate) fn eval_ref<'z3, 'tcx>(
     }
 }
 
-
 pub(crate) fn eval_raw_ptr<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
@@ -159,7 +163,6 @@ pub(crate) fn eval_raw_ptr<'z3, 'tcx>(
     }
 }
 
-
 pub(crate) fn eval_binary_op<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
@@ -183,11 +186,7 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
         // symbol that breaks `Allocated`'s byte-coverage query.
         let pointee = mir_utils::pointee_ty(lhs.ty);
         let stride = pointee.and_then(|p| {
-            let (_, s) = mir_utils::type_layout(
-                state.tcx,
-                state.current_frame.current_def_id,
-                p,
-            )?;
+            let (_, s) = mir_utils::type_layout(state.tcx, state.current_frame.current_def_id, p)?;
             if s == 0 && mir_utils::ty_has_type_param(p) {
                 None
             } else {
@@ -202,12 +201,14 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
     }
     let raw_term = state.eval_binary_op(op, &lhs.z3_term, &rhs.z3_term);
     let term = if op == BinOp::Sub
-        && api_classify::is_integer_wrapping_sub_method(Some(state.current_frame.current_def_id))
+        && other_api::is_integer_wrapping_sub_method(Some(state.current_frame.current_def_id))
     {
         if let Some((_, max, modulus, signed)) = state.integer_limits(lhs.ty) {
             let wrapped = raw_term.modulo(&modulus);
             if signed {
-                wrapped.gt(&max).ite(&Int::sub(state.z3_ctx, &[&wrapped, &modulus]), &wrapped)
+                wrapped
+                    .gt(&max)
+                    .ite(&Int::sub(state.z3_ctx, &[&wrapped, &modulus]), &wrapped)
             } else {
                 wrapped
             }
@@ -280,7 +281,6 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
     }
 }
 
-
 pub(crate) fn eval_unary_op<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
@@ -329,7 +329,6 @@ pub(crate) fn eval_unary_op<'z3, 'tcx>(
         source: ValueSource::None,
     }
 }
-
 
 pub(crate) fn eval_cast<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -395,7 +394,6 @@ pub(crate) fn eval_cast<'z3, 'tcx>(
         source: src_val.source.field_offset_only(),
     }
 }
-
 
 pub(crate) fn eval_aggregate<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -531,7 +529,6 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
             if is_byte_array && field_sz == 1 {
                 state.record_byte_value(alloc_id, byte_offset, field_term.clone());
             }
-            // Record known_nul / known_non_nul from constant operands
             if let Some(int_val) = mir_utils::operand_const_u64(operand) {
                 if field_sz == 1 {
                     if int_val == 0 {
@@ -550,7 +547,6 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
                         );
                     }
                 }
-                // For multi-byte fields: track each constituent byte
                 for b in 0..field_sz.min(8) {
                     let byte_off = byte_offset + b;
                     let byte_val = (int_val >> (b * 8)) & 0xFF;
@@ -584,7 +580,7 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
         // `Box::assume_init`'s rebuild drops the heap provenance and a later
         // `Box::as_ptr` field read fails `NonNull`.
         let box_prov = if let rustc_middle::ty::TyKind::Adt(adt, _) = dest_ty.kind() {
-            if api_classify::is_std_box(adt.did()) {
+            if other_api::is_std_box(adt.did()) {
                 state
                     .container_ptr_field(dest_ty)
                     .and_then(|path| state.field_value(dest_local, &path))
@@ -614,7 +610,6 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
     }
 }
 
-
 pub(crate) fn eval_discriminant<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
@@ -638,7 +633,7 @@ pub(crate) fn eval_discriminant<'z3, 'tcx>(
     // to the stored value.
     if let Some(ref pv) = place_val
         && let rustc_middle::ty::TyKind::Adt(adt_def, _) = pv.ty.kind()
-        && api_classify::is_std_ordering(adt_def.did())
+        && other_api::is_std_ordering(adt_def.did())
         && adt_def.is_enum()
     {
         let one = Int::from_u64(state.z3_ctx, 1);
@@ -647,7 +642,6 @@ pub(crate) fn eval_discriminant<'z3, 'tcx>(
             .constraints
             .assertions
             .push(pv.z3_term._eq(&discr_minus_one));
-        // Also bound the discriminant to {0, 1, 2}
         let zero = Int::from_u64(state.z3_ctx, 0);
         let two = Int::from_u64(state.z3_ctx, 2);
         state.constraints.assertions.push(term.ge(&zero));
@@ -673,7 +667,6 @@ pub(crate) fn eval_shallow_init_box<'z3, 'tcx>(
     }
 }
 
-
 pub(crate) fn eval_copy_for_deref<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
@@ -688,7 +681,6 @@ pub(crate) fn eval_copy_for_deref<'z3, 'tcx>(
     }
 }
 
-
 pub(crate) fn eval_fresh_value<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
     dest_place: &Place<'tcx>,
@@ -697,6 +689,123 @@ pub(crate) fn eval_fresh_value<'z3, 'tcx>(
     let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
     let term = state.fresh_int(name);
     VmValue::new(term, dest_ty)
+}
+
+pub(crate) fn eval_thread_local_ref<'z3, 'tcx>(
+    state: &mut VmState<'z3, 'tcx>,
+    dest_place: &Place<'tcx>,
+    def_id: DefId,
+) -> VmValue<'z3, 'tcx> {
+    let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
+    let Some(static_ty) = mir_utils::pointee_ty(dest_ty) else {
+        state.unsupported_mir = true;
+        return eval_fresh_value(state, dest_place, "thread_local");
+    };
+    let scalar = matches!(
+        static_ty.kind(),
+        TyKind::Int(_) | TyKind::Uint(_) | TyKind::Bool | TyKind::Char
+    );
+    let bytes = if scalar && !state.tcx.is_mutable_static(def_id) {
+        state
+            .tcx
+            .eval_static_initializer(def_id)
+            .ok()
+            .map(|allocation| {
+                let allocation = allocation.inner();
+                allocation
+                    .inspect_with_uninit_and_ptr_outside_interpreter(0..allocation.len())
+                    .to_vec()
+            })
+    } else {
+        None
+    };
+    let size = state.size_of_ty(static_ty);
+    if let Some(bytes) = bytes
+        && size > 0
+        && size <= 8
+        && bytes.len() == size as usize
+    {
+        let value = if state.tcx.data_layout.endian == rustc_abi::Endian::Little {
+            bytes
+                .iter()
+                .rev()
+                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+        } else {
+            bytes
+                .iter()
+                .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
+        };
+        let align = state.align_sym(static_ty);
+        let (alloc_id, base) =
+            state.allocate(Int::from_u64(state.z3_ctx, size), align, Some(static_ty));
+        state.content_mut(alloc_id).facts.initialized = true;
+        let scalar_value = VmValue::new(Int::from_u64(state.z3_ctx, value), static_ty);
+        state
+            .content_mut(alloc_id)
+            .values
+            .insert((static_ty, vec![]), scalar_value);
+        return VmValue {
+            z3_term: base,
+            ty: dest_ty,
+            provenance: Some(Provenance {
+                alloc_id,
+                offset: Int::from_u64(state.z3_ctx, 0),
+                offset_kind: None,
+            }),
+            facts: ValueFacts {
+                non_null: true,
+                init: true,
+                in_bounds: true,
+                ..Default::default()
+            },
+            source: ValueSource::None,
+        };
+    }
+    state.unsupported_mir = true;
+    eval_fresh_value(state, dest_place, "thread_local")
+}
+
+pub(crate) fn eval_repeat<'z3, 'tcx>(
+    state: &mut VmState<'z3, 'tcx>,
+    dest_place: &Place<'tcx>,
+    operand: &Operand<'tcx>,
+) -> VmValue<'z3, 'tcx> {
+    let dest_ty = dest_place.ty(state.body(), state.tcx).ty;
+    let TyKind::Array(_, length) = dest_ty.kind() else {
+        state.unsupported_mir = true;
+        return eval_fresh_value(state, dest_place, "repeat");
+    };
+    if length.try_to_target_usize(state.tcx).is_none() {
+        state.unsupported_mir = true;
+        return eval_fresh_value(state, dest_place, "repeat");
+    }
+    let value = state.value_of_operand(operand);
+    let mut field_path = dest_place
+        .projection
+        .iter()
+        .filter_map(|projection| match projection.kind() {
+            rustc_middle::mir::ProjectionElem::Field(index, _) => Some(index.as_usize()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if field_path.len() != dest_place.projection.len() {
+        state.unsupported_mir = true;
+        return eval_fresh_value(state, dest_place, "repeat");
+    }
+    if let Some(alloc_id) = state
+        .current_frame
+        .local_alloc
+        .get(&dest_place.local)
+        .copied()
+    {
+        let view_ty = state.body().local_decls[dest_place.local].ty;
+        state.content_mut(alloc_id).values.retain(|(ty, path), _| {
+            *ty != view_ty || path.len() <= field_path.len() || !path.starts_with(&field_path)
+        });
+    }
+    field_path.push(REPEATED_ARRAY_ELEMENT);
+    state.set_field_value(dest_place.local, field_path, value);
+    eval_fresh_value(state, dest_place, "repeat")
 }
 
 pub(crate) fn eval_wrap_unsafe_binder<'z3, 'tcx>(
@@ -728,7 +837,6 @@ pub(crate) fn eval_nullary_op<'z3, 'tcx>(
     VmValue::new(term, dest_ty)
 }
 
-
 #[cfg(rapx_rvalue_has_reborrow)]
 pub(crate) fn eval_reborrow<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -743,10 +851,12 @@ pub(crate) fn eval_reborrow<'z3, 'tcx>(
             if source.did() == dest.did()
     );
     #[cfg(rapx_has_phantom_deref)]
-    let has_phantom_deref = source_place
-            .projection
-            .iter()
-            .any(|projection| matches!(projection.kind(), rustc_middle::mir::ProjectionElem::PhantomDeref));
+    let has_phantom_deref = source_place.projection.iter().any(|projection| {
+        matches!(
+            projection.kind(),
+            rustc_middle::mir::ProjectionElem::PhantomDeref
+        )
+    });
     #[cfg(not(rapx_has_phantom_deref))]
     let has_phantom_deref = false;
     if !same_adt || has_phantom_deref {
@@ -802,9 +912,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     offset_kind: None,
                 })
             }
-            BinOp::BitXor | BinOp::Shr | BinOp::ShrUnchecked => {
-                lhs.provenance.clone()
-            }
+            BinOp::BitXor | BinOp::Shr | BinOp::ShrUnchecked => lhs.provenance.clone(),
             BinOp::BitOr | BinOp::Shl | BinOp::ShlUnchecked => {
                 lhs.provenance.as_ref().map(|prov| Provenance {
                     alloc_id: prov.alloc_id,
@@ -838,8 +946,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // non-null even when the lhs pointer is.  Other pointer arithmetic
         // (`add`/`sub`/`offset`) preserves non-nullness under the VM's
         // no-wrap assumption.
-        let non_null =
-            !matches!(op, BinOp::BitAnd) && provenance.is_some() && lhs.facts.non_null;
+        let non_null = !matches!(op, BinOp::BitAnd) && provenance.is_some() && lhs.facts.non_null;
 
         let align_n = match op {
             BinOp::Add
@@ -856,7 +963,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     (Some(a), None) => match a.simplify().as_u64() {
                         Some(au) => {
                             let c = rhs.z3_term.as_u64().unwrap_or(1);
-                            if c.is_multiple_of(au) { Some(a.clone()) } else { None }
+                            if c.is_multiple_of(au) {
+                                Some(a.clone())
+                            } else {
+                                None
+                            }
                         }
                         // Symbolic alignment: only a zero RHS is a guaranteed
                         // multiple of `align_T`.
@@ -873,7 +984,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     _ => None,
                 }
             }
-            BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked => match rhs.z3_term.as_u64() {
+            BinOp::Mul | BinOp::MulWithOverflow | BinOp::MulUnchecked => match rhs.z3_term.as_u64()
+            {
                 Some(c) => pow2_factor(c).map(|p| Int::from_u64(self.z3_ctx, p)),
                 None => lhs
                     .z3_term
@@ -894,21 +1006,22 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Check if a value is known to be a multiple of `align` (e.g. the result
     /// of a Mul by a constant factor of `align`).
     fn rhs_is_aligned_multiple(&self, val: &VmValue<'z3, 'tcx>, align: &Int<'z3>) -> bool {
-        // If both the value's align_n and `align` are concrete, compare directly.
         if let Some(au) = align.simplify().as_u64() {
             if let Some(a) = val
                 .facts
                 .align_n
                 .as_ref()
                 .and_then(|a| a.simplify().as_u64())
-                && a >= au && a % au == 0 {
-                    return true;
-                }
-            // If the value is a constant, check directly
+                && a >= au
+                && a % au == 0
+            {
+                return true;
+            }
             if let Some(c) = val.z3_term.as_u64()
-                && c % au == 0 {
-                    return true;
-                }
+                && c % au == 0
+            {
+                return true;
+            }
         }
         false
     }

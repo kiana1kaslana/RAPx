@@ -9,7 +9,7 @@ use crate::helpers::mir_utils;
 use super::alias_hazard::{self, AliasProducer, HazardKind};
 use crate::analysis::alias::FieldOrigin;
 use crate::verify::checkpoint::Checkpoint;
-use crate::verify::api_classify;
+use crate::other_api;
 use crate::helpers::def_use::PlaceKey;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand, ProjectionElem, Rvalue, StatementKind};
@@ -411,7 +411,7 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
                     },
                     _ => None,
                 };
-                if nonnull_adt.is_some_and(|adt| api_classify::is_std_nonnull(adt.did())) {
+                if nonnull_adt.is_some_and(|adt| other_api::is_std_nonnull(adt.did())) {
                     return VmAliasResult::Proved;
                 }
             }
@@ -489,10 +489,10 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
     // exclusive view is derived from a raw pointer with no borrow information,
     // so it cannot be exclusive while the enclosing `&mut self` is still live.
     // An escaping `&` (as_ref) is only a *possible* hazard → Unknown.
-    if api_classify::is_nonnull_as_ref_as_mut(Some(callee)) {
+    if other_api::is_nonnull_as_ref_as_mut(Some(callee)) {
         let ret_ty = vm_state.body().local_decls[rustc_middle::mir::RETURN_PLACE].ty;
         if mir_utils::type_contains_reference(ret_ty) {
-            if api_classify::is_nonnull_as_mut(Some(callee)) {
+            if other_api::is_nonnull_as_mut(Some(callee)) {
                 return VmAliasResult::Failed(
                     "escaping `&mut` derived from a raw pointer without borrow information"
                         .into(),
@@ -503,7 +503,6 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
         return VmAliasResult::Proved;
     }
 
-    // Step 1: Determine the producer
     let Some(producer) = alias_hazard::alias_producer(callee) else {
         return VmAliasResult::Unknown;
     };
@@ -547,7 +546,6 @@ fn check_view_alias<'z3, 'tcx>(
         return VmAliasResult::Failed(reason);
     }
 
-    // Resolve origin PlaceKey from the checkpoint argument
     let origin_place = alias_hazard::operand_place(origin_arg).unwrap_or_else(|| {
         // Fallback: extract from the origin value's type
         PlaceKey::from_origin(
@@ -620,7 +618,7 @@ fn check_view_alias<'z3, 'tcx>(
             // so MIR-level hazard scanning can detect reallocation hazards.
             let is_reallocatable = match &origin.kind {
                 VmOriginKind::Owned(def_id) => {
-                    api_classify::is_std_vec(*def_id) || api_classify::is_std_cstring(*def_id)
+                    other_api::is_std_vec(*def_id) || other_api::is_std_cstring(*def_id)
                 }
                 _ => false,
             };
@@ -630,7 +628,6 @@ fn check_view_alias<'z3, 'tcx>(
         }
     }
 
-    // Extract view length for from_raw_parts[_mut](ptr, len)
     let view_len_place = checkpoint
         .args
         .get(1)
@@ -661,7 +658,6 @@ fn check_view_alias<'z3, 'tcx>(
             alias_hazard::HazardCheck::Inconclusive => {}
         }
     }
-    // Also try the origin local directly for reference-type checks
     let origin_local_place = if origin_place.fields.is_empty() {
         PlaceKey::from_origin(
             origin_place.local().map(|l| l.as_usize()).unwrap_or(1),
@@ -681,10 +677,8 @@ fn check_view_alias<'z3, 'tcx>(
         alias_hazard::HazardCheck::Inconclusive => {}
     }
 
-    // Escape analysis
     let dest_escapes = alias_hazard::destination_flows_to_return(tcx, caller, destination);
     if dest_escapes {
-        // Try resolved origin first (traces through local copies to struct fields)
         let field_origin =
             resolve_escaped_field_origin(tcx, caller, &resolved_origin, &origin_place, checkpoint);
         if let Some(sfo) = field_origin {
@@ -744,7 +738,7 @@ fn check_view_alias<'z3, 'tcx>(
             // transfers exclusive ownership of its pointer, so producing a unique
             // view is safe even though the receiver is not a `&mut self`.
             if let rustc_middle::ty::TyKind::Adt(adt_def, _) = self_ty.kind()
-                && api_classify::is_std_nonnull(adt_def.did()) {
+                && other_api::is_std_nonnull(adt_def.did()) {
                     return VmAliasResult::Proved;
                 }
         }
@@ -808,14 +802,12 @@ fn find_struct_field_origin_for_param<'tcx>(
     let body = tcx.optimized_mir(caller);
     let (adt_def, _) = self_adt(tcx, caller)?;
 
-    // Try to resolve the checkpoint's first arg to determine which field
     let arg0 = checkpoint.args.first()?;
     let arg_place = match arg0 {
         Operand::Copy(p) | Operand::Move(p) => p,
         _ => return None,
     };
 
-    // If the arg already has projections, use them directly
     if !arg_place.projection.is_empty() && arg_place.local == Local::from_usize(1) {
         let fields: Vec<usize> = arg_place
             .projection
@@ -1008,7 +1000,6 @@ fn resolve_origin_place_mir(
     let tree = crate::verify::vm::alias_tree::AliasTree::build(tcx, caller);
     let (root_local, mut root_fields) = tree.resolve_local_to_root(local);
 
-    // Preserve field projections from the original place if the root is same local
     if root_local == local.as_usize() && root_fields.is_empty() && !place.fields.is_empty() {
         root_fields = place.fields.clone();
     }

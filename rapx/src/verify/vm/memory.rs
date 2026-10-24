@@ -478,7 +478,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         Some(total)
     }
 
-    // ── Per-byte state (`MemoryContent::byte_array`) ───────────────────
 
     /// The shared `UNINIT` sentinel (≥ 256, outside the `u8` range).
     fn uninit_byte(&self) -> Int<'z3> {
@@ -613,7 +612,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
-    // ── Per-allocation fields (`MemoryContent::values`) ──────────────────
 
     /// The value at a field offset *within an allocation* viewed as `view_ty`.
     ///

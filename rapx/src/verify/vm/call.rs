@@ -17,7 +17,7 @@ use z3::{SatResult, Solver};
 use crate::compat::{FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
-use crate::verify::api_classify;
+use crate::other_api;
 use crate::verify::call_summary;
 use super::state::{AllocId, MemoryContent, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
@@ -48,7 +48,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .collect();
         let callee = mir_utils::dep_callee_resolved_def_id(self.tcx, caller_def_id, func);
 
-        if api_classify::is_eq_call(callee) {
+        if other_api::is_eq_call(callee) {
             self.propagate_const_bytes_to_tracked(args);
         }
 
@@ -56,7 +56,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // semantics; bind them to `false` so their branchy panic bodies are not
         // inlined (which would otherwise recurse to the depth limit).
         if let Some(c) = callee
-            && api_classify::is_ub_check(self.tcx, c)
+            && other_api::is_ub_check(self.tcx, c)
         {
             let dest_ty = self.body().local_decls[destination].ty;
             self.set_local(
@@ -116,7 +116,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let before_inline = self.clone();
         self.inline.inline_depth += 1;
 
-        // ── Save caller context ──
         // Resolve each arg's referent local (for `&self`/`&mut self` reborrow
         // temps) *before* the caller's address map is saved away, so that
         // `exec_assign` can resolve `(*self).field = val` writes back to the
@@ -138,10 +137,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             std::mem::replace(&mut self.inline.arg_referents, inline_arg_referents);
         let saved_deferred_field_writes = std::mem::take(&mut self.inline.deferred_field_writes);
 
-        // ── Switch to callee context ──
         self.current_frame.current_def_id = callee_def_id;
 
-        // Bind args to callee locals (local_1..local_N are function params)
         for (i, arg_val) in arg_values.iter().enumerate() {
             let callee_local = Local::from_usize(i + 1);
             self.ensure_local_allocation(callee_local);
@@ -175,10 +172,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }
         }
 
-        // ── Execute callee MIR ──
         let pre_uninit: Vec<AllocId> = caller_referents.iter()
             .flatten()
-            .filter(|local| api_classify::is_maybe_uninit_ty(before_inline.body().local_decls[**local].ty))
+            .filter(|local| other_api::is_maybe_uninit_ty(before_inline.body().local_decls[**local].ty))
             .filter_map(|local| before_inline.current_frame.local_alloc.get(local).copied())
             .filter(|id| !before_inline.content(*id).facts.initialized)
             .collect();
@@ -221,7 +217,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return false;
         }
 
-        // ── Capture return value and its per-field values ──
         let return_val = self.local_value(Local::from_usize(0)).cloned();
         crate::rap_debug!(
             "exec_inline_call: callee={:?} return_val={:?}",
@@ -240,7 +235,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             })
             .collect();
 
-        // ── Restore caller context ──
         self.restore_frame(frame);
 
         // Apply deferred field writes (`(*self).field = val` through a
@@ -251,7 +245,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         self.inline.deferred_field_writes = saved_deferred_field_writes;
         self.replay_deferred_writes(writes);
 
-        // ── Write return value to caller destination ──
         let dest_ty = self.body().local_decls[dest].ty;
         match return_val {
             Some(mut val) => {
@@ -381,7 +374,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 && destination.local == p.local
                 && destination.projection.is_empty()
                 && let Some(callee) = mir_utils::dep_callee_def_id(func)
-                && api_classify::is_ub_check(self.tcx, callee)
+                && other_api::is_ub_check(self.tcx, callee)
             {
                 return Some(0);
             }
@@ -402,12 +395,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
             let bb_data = &self.body().basic_blocks[block];
 
-            // Execute statements
             for stmt in bb_data.statements.iter() {
                 crate::verify::vm::rules::exec_statement(self, stmt);
             }
 
-            // Process terminator
             let terminator = bb_data.terminator();
 
             match &terminator.kind {
@@ -415,7 +406,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     queue.push(*target);
                 }
                 TerminatorKind::Return => {
-                    // Return value captured in local_0
                 }
                 TerminatorKind::Assert {
                     target,
@@ -425,7 +415,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     queue.push(*target);
                 }
                 TerminatorKind::SwitchInt { discr, targets } => {
-                    // A constant discriminant folds to a single live edge.
                     if let Some(v) = self.switch_discr_const(self.body(), discr) {
                         let t = targets
                             .iter()
@@ -1041,7 +1030,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         match arg_val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
                 TyKind::Adt(adt_def, _) => {
-                    if api_classify::is_std_iter_or_itermut(adt_def.did()) {
+                    if other_api::is_std_iter_or_itermut(adt_def.did()) {
                         // Find the local holding the iterator by matching the
                         // reference's address term against known local addresses
                         // (`&mut _iter` has term `addr__iter`).  A hardcoded

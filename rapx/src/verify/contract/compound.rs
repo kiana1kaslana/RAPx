@@ -89,7 +89,6 @@ pub(crate) fn parse_compounds(source: &str) -> Vec<CompoundSpec> {
 
     let mut s = source.trim_start();
     loop {
-        // Skip blank lines and `//` comments; collect `///` doc lines.
         loop {
             if let Some(r) = s.strip_prefix("///") {
                 let end = r.find('\n').unwrap_or(r.len());
@@ -145,7 +144,6 @@ fn parse_one_compound_block(s: &str) -> (Option<CompoundSpec>, usize) {
     let close = open + 1 + rel_close;
     let params_str = &s[open + 1..close];
 
-    // Expect a `{` after the parameter list.
     let after = s[close + 1..].trim_start();
     if !after.starts_with('{') {
         return (None, 0);
@@ -153,7 +151,6 @@ fn parse_one_compound_block(s: &str) -> (Option<CompoundSpec>, usize) {
     let brace_open = s.len() - after.len();
     let body_start = brace_open + 1;
 
-    // Match braces to the closing `}` (the body may contain `if { } else { }`).
     let bytes = s.as_bytes();
     let mut depth = 1usize;
     let mut j = body_start;
@@ -360,7 +357,6 @@ fn expand_compound_body<'tcx>(
                             }
                         }
                     }
-                    // Accepts-anything placeholder: no constraints.
                     PropertyKind::Unknown => {}
                     // Fixed-arity tag: match a form by call arity, then check each
                     // positional parameter annotation against the declared role.

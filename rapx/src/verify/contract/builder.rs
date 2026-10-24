@@ -109,7 +109,6 @@ impl<'tcx> Property<'tcx> {
         }
     }
 
-    // ── Special-build constructors ───────────────────────────────
 
     fn build_size(tcx: TyCtxt<'tcx>, def_id: DefId, exprs: &[Expr]) -> Self {
         match exprs {
@@ -236,7 +235,6 @@ impl<'tcx> Property<'tcx> {
                 {
                     return Self::new_simple(PropertyKind::Unknown);
                 }
-                // Auto-detect array index for for_each
                 let for_each = super::place::detect_array_for_each(tcx, def_id, second_expr);
                 let mut prop = Self::new_atom(
                     PropertyKind::InBound,

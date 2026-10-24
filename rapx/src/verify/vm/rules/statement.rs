@@ -1,16 +1,31 @@
 //! Transfer functions for state-changing MIR statements.
 
-use rustc_middle::mir::{Local, Operand, Place, ProjectionElem, Rvalue};
+use rustc_middle::mir::{CopyNonOverlapping, Local, Operand, Place, ProjectionElem, Rvalue};
+#[cfg(rapx_const_ext)]
+use rustc_middle::ty::consts::ConstExt;
 use z3::ast::{Ast, Int};
 
 use super::super::state::{Provenance, VmState, VmValue};
-use crate::helpers::mir_utils;
 use super::eval_rvalue;
+use crate::helpers::mir_utils;
 
 pub(crate) fn exec_assume<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, operand: &Operand<'tcx>) {
     let value = state.value_of_operand(operand);
     let zero = Int::from_u64(state.z3_ctx, 0);
-    state.constraints.assertions.push(value.z3_term._eq(&zero).not());
+    state
+        .constraints
+        .assertions
+        .push(value.z3_term._eq(&zero).not());
+}
+
+pub(crate) fn exec_copy_nonoverlapping<'z3, 'tcx>(
+    state: &mut VmState<'z3, 'tcx>,
+    copy: &CopyNonOverlapping<'tcx>,
+) {
+    let source = state.value_of_operand(&copy.src);
+    let target = state.value_of_operand(&copy.dst);
+    let count = state.value_of_operand(&copy.count);
+    state.copy_memory_values(&source, &target, &count);
 }
 
 pub(crate) fn exec_assign<'z3, 'tcx>(
@@ -44,9 +59,7 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
 
     if place.projection.is_empty() {
         state.set_local(place.local, value);
-        if uninit_source
-            && let Some(id) = state.current_frame.local_alloc.get(&place.local)
-        {
+        if uninit_source && let Some(id) = state.current_frame.local_alloc.get(&place.local) {
             state.possible_uninit_allocs.insert(*id);
         }
         // On a whole-place move (`_3 = move _4`), the destination is a fresh
@@ -97,17 +110,14 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             // keyed by the reference local itself, so copying the pointee value
             // into a fresh local must carry those field values along (otherwise
             // `into_leaf(self)`'s `self.node` provenance is lost).
-            let only_field_deref = sp
-                .projection
-                .iter()
-                .all(|p| {
-                    matches!(
-                        p.kind(),
-                        ProjectionElem::Field(..)
-                            | ProjectionElem::Deref
-                            | ProjectionElem::UnwrapUnsafeBinder(..)
-                    )
-                });
+            let only_field_deref = sp.projection.iter().all(|p| {
+                matches!(
+                    p.kind(),
+                    ProjectionElem::Field(..)
+                        | ProjectionElem::Deref
+                        | ProjectionElem::UnwrapUnsafeBinder(..)
+                )
+            });
             if only_field_deref {
                 let keys: Vec<Vec<usize>> = state.field_paths(sp.local);
                 for k in keys {
@@ -135,7 +145,6 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             state.invalidate_owner_field(src);
         }
     } else if !has_deref {
-        // Field projection (no Deref): update the base local's field values.
         let field_indices: Vec<usize> = place
             .projection
             .iter()
@@ -145,7 +154,6 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             })
             .collect();
         if !field_indices.is_empty() {
-            // Track cumulative ptr offset for Iter/IterMut before moving value.
             let track_iter = field_indices == [0];
             state.set_field_value(place.local, field_indices, value);
             if track_iter {
@@ -201,19 +209,13 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
     }
 }
 
-pub(crate) fn exec_storage_live<'z3, 'tcx>(
-    state: &mut VmState<'z3, 'tcx>,
-    local: Local,
-) {
+pub(crate) fn exec_storage_live<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, local: Local) {
     state.ensure_local_allocation(local);
     let alloc_id = state.current_frame.local_alloc[&local];
     state.alloc_mut(alloc_id).facts.dead = false;
 }
 
-pub(crate) fn exec_storage_dead<'z3, 'tcx>(
-    state: &mut VmState<'z3, 'tcx>,
-    local: Local,
-) {
+pub(crate) fn exec_storage_dead<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, local: Local) {
     if let Some(alloc_id) = state.current_frame.local_alloc.get(&local).copied() {
         state.alloc_mut(alloc_id).facts.dead = true;
     }
@@ -248,14 +250,13 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let off = self.field_offset_in_bytes(cur_ty, field_idx.as_usize()) as usize;
                     byte_offset += off;
                     if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = cur_ty.kind()
-                        && !adt_def.is_enum() {
-                            let variant = adt_def.non_enum_variant();
-                            if let Some(field_def) = variant.fields.get(field_idx) {
-                                cur_ty = mir_utils::field_ty(
-                                    self.tcx, field_def, substs,
-                                );
-                            }
+                        && !adt_def.is_enum()
+                    {
+                        let variant = adt_def.non_enum_variant();
+                        if let Some(field_def) = variant.fields.get(field_idx) {
+                            cur_ty = mir_utils::field_ty(self.tcx, field_def, substs);
                         }
+                    }
                 }
                 rustc_middle::mir::ProjectionElem::Deref => {
                     if let rustc_middle::ty::TyKind::Ref(_, inner, _) = cur_ty.kind() {
@@ -293,11 +294,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// Track byte-level values for index-based stores (e.g. `buf[i] = 0u8`)
     /// that `record_projected_store` skips due to Index projections.
-    fn record_indexed_store(
-        &mut self,
-        place: &Place<'tcx>,
-        value: &VmValue<'z3, 'tcx>,
-    ) {
+    fn record_indexed_store(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
         if place.projection.len() == 1
             && let rustc_middle::mir::ProjectionElem::Index(index_local) = place.projection[0]
             && let rustc_middle::ty::TyKind::Array(elem_ty, _) =
@@ -311,9 +308,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 .and_then(|v| usize::try_from(v).ok());
             if let Some(index) = index {
                 if let Some(alloc_id) = self.current_frame.local_alloc.get(&place.local).copied() {
-                    self.content_mut(alloc_id).values.retain(|(ty, path), _| {
-                        *ty != array_ty || path.first() != Some(&index)
-                    });
+                    self.content_mut(alloc_id)
+                        .values
+                        .retain(|(ty, path), _| *ty != array_ty || path.first() != Some(&index));
                 }
                 if matches!(
                     value.ty.kind(),
@@ -324,14 +321,44 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 ) {
                     self.set_field_value(place.local, vec![index], value.clone());
                 }
-            } else if let Some(alloc_id) = self
-                .local_value(place.local)
-                .and_then(|v| v.provenance_alloc_id())
-                .or_else(|| self.current_frame.local_alloc.get(&place.local).copied())
-            {
-                self.content_mut(alloc_id)
-                    .values
-                    .retain(|(ty, path), _| *ty != array_ty || path.is_empty());
+            } else {
+                let index_term = self.local_value(index_local).map(|v| v.z3_term.clone());
+                let length = match array_ty.kind() {
+                    rustc_middle::ty::TyKind::Array(_, length) => {
+                        length.try_to_target_usize(self.tcx)
+                    }
+                    _ => None,
+                };
+                let elements = length.and_then(|length| {
+                    (0..length)
+                        .map(|element| self.field_value(place.local, &[element as usize]).cloned())
+                        .collect::<Option<Vec<_>>>()
+                });
+                if let (Some(index_term), Some(elements)) = (index_term, elements)
+                    && matches!(
+                        value.ty.kind(),
+                        rustc_middle::ty::TyKind::Int(_)
+                            | rustc_middle::ty::TyKind::Uint(_)
+                            | rustc_middle::ty::TyKind::Bool
+                            | rustc_middle::ty::TyKind::Char
+                    )
+                {
+                    for (element, old) in elements.into_iter().enumerate() {
+                        let selected = index_term._eq(&Int::from_u64(self.z3_ctx, element as u64));
+                        let updated = VmValue::new(
+                            selected.ite(&value.z3_term, &old.z3_term),
+                            value.ty,
+                        );
+                        self.set_field_value(place.local, vec![element], updated);
+                    }
+                } else {
+                    self.unsupported_mir = true;
+                    if let Some(alloc_id) = self.current_frame.local_alloc.get(&place.local).copied() {
+                        self.content_mut(alloc_id)
+                            .values
+                            .retain(|(ty, path), _| *ty != array_ty || path.is_empty());
+                    }
+                }
             }
         }
         let is_u8 = matches!(
@@ -354,12 +381,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return;
         }
         if let Some(addr) = self.address_of_place(place)
-            && let Some(ref prov) = addr.provenance {
-                let alloc_id = prov.alloc_id;
-                let byte_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
-                self.content_mut(alloc_id).facts.initialized = true;
-                self.record_byte_value(alloc_id, byte_offset, value.z3_term.clone());
-            }
+            && let Some(ref prov) = addr.provenance
+        {
+            let alloc_id = prov.alloc_id;
+            let byte_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
+            self.content_mut(alloc_id).facts.initialized = true;
+            self.record_byte_value(alloc_id, byte_offset, value.z3_term.clone());
+        }
     }
-
 }

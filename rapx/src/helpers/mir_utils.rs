@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use crate::compat::SkipNormWip;
 
 use crate::compat::FxHashMap;
-use crate::def_id;
+use crate::other_api;
 
 use super::def_use::PlaceKey;
 
@@ -42,7 +42,7 @@ pub(crate) fn pointee_ty<'tcx>(ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
         TyKind::RawPtr(ty, _) | TyKind::Ref(_, ty, _) => Some(*ty),
         // `NonNull<T>` is a raw-pointer wrapper; unwrap it so pointer-arith
         // effects (`NonNull::add`/`sub`/`offset`) keep their provenance.
-        TyKind::Adt(adt, args) if def_id::nonnull_types().contains(&adt.did()) => {
+        TyKind::Adt(adt, args) if other_api::nonnull_types().contains(&adt.did()) => {
             args.types().next()
         }
         _ => None,
@@ -61,7 +61,7 @@ pub(crate) fn dep_callee_def_id(func: &Operand<'_>) -> Option<DefId> {
 
 /// Whether `def_id` is `core::ptr::drop_in_place`.
 pub(crate) fn is_drop_in_place(def_id: DefId) -> bool {
-    def_id::drop_in_place() == Some(def_id)
+    other_api::drop_in_place() == Some(def_id)
 }
 
 /// Whether `def_id` is a diverging call target: a `panic*` lang item or the
@@ -1510,7 +1510,7 @@ pub fn collect_all_const_bytes_worklist<'tcx>(
                         continue;
                     }
                     let did = dep_callee_def_id(func);
-                    if did.is_some_and(|d| def_id::as_ptr_like_fns().contains(&d)) {
+                    if did.is_some_and(|d| other_api::as_ptr_like_fns().contains(&d)) {
                         for arg in args {
                             if let Some(bytes) =
                                 trace_const_bytes_from_operand(tcx, body, &arg.node)
@@ -1519,7 +1519,7 @@ pub fn collect_all_const_bytes_worklist<'tcx>(
                             }
                         }
                     }
-                    if did.is_some_and(|d| def_id::ptr_add_fns().contains(&d))
+                    if did.is_some_and(|d| other_api::ptr_add_fns().contains(&d))
                         && let Some(offset) =
                             args.get(1).and_then(|a| operand_scalar_int(&a.node))
                         && let Some(base) = args.first()
@@ -1531,7 +1531,7 @@ pub fn collect_all_const_bytes_worklist<'tcx>(
                         }
                     }
                     #[cfg(rapx_ge_99)]
-                    if did.is_some_and(|d| def_id::box_assume_init_into_vec_unsafe() == Some(d))
+                    if did.is_some_and(|d| other_api::box_assume_init_into_vec_unsafe() == Some(d))
                         && let Some(box_op) = args.first()
                         && let Operand::Copy(p) | Operand::Move(p) = &box_op.node
                         && p.projection.is_empty()
@@ -1595,7 +1595,7 @@ fn collect_as_ptr_const_bytes<'tcx>(
         if let Some(terminator) = &data.terminator
             && let TerminatorKind::Call { func, args, .. } = &terminator.kind
                 && dep_callee_def_id(func)
-                    .is_some_and(|d| def_id::as_ptr_like_fns().contains(&d))
+                    .is_some_and(|d| other_api::as_ptr_like_fns().contains(&d))
                 {
                     for arg in args {
                         if let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &arg.node) {
@@ -1643,7 +1643,7 @@ fn const_bytes_from_call_dest<'tcx>(
                     continue;
                 }
                 if dep_callee_def_id(func)
-                    .is_some_and(|d| def_id::as_ptr_like_fns().contains(&d))
+                    .is_some_and(|d| other_api::as_ptr_like_fns().contains(&d))
                 {
                     for arg in args {
                         if let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &arg.node) {

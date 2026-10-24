@@ -5,7 +5,7 @@
 //! by every checker family.
 
 use crate::helpers::mir_utils;
-use crate::def_id;
+use crate::other_api;
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::contract::{
     ContractExpr, ContractPlace, ContractProjection, NumericBinOp, PlaceBase, Property,
@@ -167,7 +167,6 @@ impl PropertyChecker {
             }
         }
 
-        // All projections were Field (or no projections)
         if let Some(val) = vm_state.field_value(base_local, &field_path) {
             return Some(val.clone());
         }
@@ -470,7 +469,6 @@ impl PropertyChecker {
             .get(count_arg)
             .and_then(|a| self.resolve_arg_term(vm_state, checkpoint, a))
             .unwrap_or_else(|| Int::from_u64(vm_state.z3_ctx, 1));
-        // Simplify the multiplication for concrete count and elem_size
         if let (Some(elem), Some(count)) = (
             elem_size_term.simplify().as_u64(),
             count_term.simplify().as_u64(),
@@ -932,11 +930,9 @@ impl PropertyChecker {
             return vm_state.value_of_operand(op);
         }
         let local = place.local;
-        // If this local is a parameter (arg), use it directly
         if local.as_usize() <= vm_state.body().arg_count {
             return vm_state.value_of_operand(op);
         }
-        // Trace through simple Use assignments
         for block in vm_state.body().basic_blocks.iter() {
             for stmt in &block.statements {
                 if let StatementKind::Assign(assign) = &stmt.kind {
@@ -982,7 +978,7 @@ impl PropertyChecker {
 /// size and alignment.
 pub(super) fn maybe_uninit_inner(ty: Ty<'_>) -> Option<Ty<'_>> {
     if let TyKind::Adt(adt_def, substs) = ty.kind()
-        && crate::verify::api_classify::is_maybe_uninit_type(adt_def.did())
+        && crate::other_api::is_maybe_uninit_type(adt_def.did())
         && let Some(inner) = substs.first().and_then(|s| s.as_type())
     {
         return Some(inner);
@@ -1001,11 +997,11 @@ pub(super) fn smart_pointer_pointee(ty: Ty<'_>) -> Option<Ty<'_>> {
         TyKind::RawPtr(e, _) | TyKind::Ref(_, e, _) => Some(*e),
         TyKind::Adt(adt, args) => {
             let did = adt.did();
-            if crate::verify::api_classify::is_std_box(did)
-                || crate::verify::api_classify::is_std_vec(did)
-                || crate::verify::api_classify::is_std_nonnull(did)
-                || crate::verify::api_classify::is_std_cstring(did)
-                || def_id::rc_types().contains(&did)
+            if crate::other_api::is_std_box(did)
+                || crate::other_api::is_std_vec(did)
+                || crate::other_api::is_std_nonnull(did)
+                || crate::other_api::is_std_cstring(did)
+                || other_api::rc_types().contains(&did)
             {
                 args.types().next()
             } else {
