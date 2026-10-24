@@ -14,7 +14,7 @@ use super::super::state::{
 };
 
 use crate::helpers::mir_utils;
-use crate::other_api;
+use crate::api_classify;
 
 pub(crate) fn eval_use<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,
@@ -201,7 +201,7 @@ pub(crate) fn eval_binary_op<'z3, 'tcx>(
     }
     let raw_term = state.eval_binary_op(op, &lhs.z3_term, &rhs.z3_term);
     let term = if op == BinOp::Sub
-        && other_api::is_integer_wrapping_sub_method(Some(state.current_frame.current_def_id))
+        && api_classify::is_integer_wrapping_sub_method(Some(state.current_frame.current_def_id))
     {
         if let Some((_, max, modulus, signed)) = state.integer_limits(lhs.ty) {
             let wrapped = raw_term.modulo(&modulus);
@@ -580,7 +580,7 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
         // `Box::assume_init`'s rebuild drops the heap provenance and a later
         // `Box::as_ptr` field read fails `NonNull`.
         let box_prov = if let rustc_middle::ty::TyKind::Adt(adt, _) = dest_ty.kind() {
-            if other_api::is_std_box(adt.did()) {
+            if api_classify::is_std_box(adt.did()) {
                 state
                     .container_ptr_field(dest_ty)
                     .and_then(|path| state.field_value(dest_local, &path))
@@ -633,7 +633,7 @@ pub(crate) fn eval_discriminant<'z3, 'tcx>(
     // to the stored value.
     if let Some(ref pv) = place_val
         && let rustc_middle::ty::TyKind::Adt(adt_def, _) = pv.ty.kind()
-        && other_api::is_std_ordering(adt_def.did())
+        && api_classify::is_std_ordering(adt_def.did())
         && adt_def.is_enum()
     {
         let one = Int::from_u64(state.z3_ctx, 1);

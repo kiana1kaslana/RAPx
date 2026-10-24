@@ -4,7 +4,7 @@ use rustc_middle::mir::{BinOp, Operand, UnOp};
 use z3::ast::{Ast, Bool, Int};
 
 use crate::helpers::mir_utils;
-use crate::other_api;
+use crate::api_classify;
 
 use super::state::{VmState, VmValue};
 
@@ -50,7 +50,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let is_gcd = body.basic_blocks.iter().any(|bb| {
             if let rustc_middle::mir::TerminatorKind::Call { func, .. } = &bb.terminator().kind
                 && let Some(did) = mir_utils::dep_callee_def_id(func) {
-                    return other_api::is_gcd(Some(did));
+                    return api_classify::is_gcd(Some(did));
                 }
             false
         });

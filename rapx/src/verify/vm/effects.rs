@@ -9,7 +9,7 @@ use super::state::{
     AllocKind, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue,
 };
 use crate::helpers::mir_utils;
-use crate::other_api;
+use crate::api_classify;
 use crate::verify::call_summary::{BoundedArithmeticOp, CallEffect, OverflowOp};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
@@ -494,7 +494,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         || matches!(
                             arg_val.ty.kind(),
                             rustc_middle::ty::TyKind::Adt(adt, _)
-                                if other_api::is_std_nonnull(adt.did())
+                                if api_classify::is_std_nonnull(adt.did())
                         );
                     val.facts.non_null = src_non_null;
                     // Preserve the tracked alignment so `as_ptr().deref()` can
@@ -1015,7 +1015,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     // For locally-created Vec-like types: create a heap data
                     // allocation on first mutation. (Param Vecs already have
                     // an external allocation set by init_parameters.)
-                    let is_vec = other_api::is_vec_push_or_reserve(callee);
+                    let is_vec = api_classify::is_vec_push_or_reserve(callee);
                     let is_external = self.alloc(prov.alloc_id).is_external();
                     if is_vec && !is_external {
                         let elem_ty = match arg_val.ty.kind() {
@@ -1175,7 +1175,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     // Materialize `{ptr, cap, len}` fields for a Vec destination
                     // (`from_raw_parts` sets cap == len).
                     if let rustc_middle::ty::TyKind::Adt(adt_def, _) = dest_ty.kind()
-                        && other_api::is_std_vec(adt_def.did())
+                        && api_classify::is_std_vec(adt_def.did())
                     {
                         let ptr_field = VmValue {
                             z3_term: vec_base,
@@ -1201,7 +1201,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // exposed.
                 let pointee = mir_utils::pointee_ty(dest_ty).or_else(|| {
                     if let rustc_middle::ty::TyKind::Adt(adt, substs) = dest_ty.kind() {
-                        if other_api::is_std_box(adt.did()) {
+                        if api_classify::is_std_box(adt.did()) {
                             substs.first().and_then(|s| s.as_type())
                         } else {
                             None
@@ -1378,7 +1378,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // length equals the source boxed slice's length (symbolic);
                 // cap == len (no spare capacity).
                 if let rustc_middle::ty::TyKind::Adt(adt_def, _) = dest_ty.kind()
-                    && other_api::is_std_vec(adt_def.did())
+                    && api_classify::is_std_vec(adt_def.did())
                 {
                     let ptr_field = VmValue {
                         z3_term: vec_base,
@@ -1446,7 +1446,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     // (`&raw **b`) to a `(_1.0).0` field read + transmute, so
                     // without this the re-derived pointer loses provenance.
                     if let rustc_middle::ty::TyKind::Adt(adt, _) = val.ty.kind()
-                        && other_api::is_std_box(adt.did())
+                        && api_classify::is_std_box(adt.did())
                     {
                         let nn_path = self
                             .container_ptr_field(val.ty)
@@ -1863,7 +1863,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             },
         );
         if let TyKind::Adt(adt_def, _) = dest_ty.kind()
-            && other_api::is_std_vec(adt_def.did())
+            && api_classify::is_std_vec(adt_def.did())
         {
             let ptr_field = VmValue {
                 z3_term: vec_base,

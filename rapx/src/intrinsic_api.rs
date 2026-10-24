@@ -1,6 +1,4 @@
-//! Compiler intrinsic identification and call classification by `DefId`.
-//! Intrinsic identities come from compiler metadata, independently of the
-//! standard-library API path table.
+//! Identity of compiler intrinsics by `DefId`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -30,147 +28,74 @@ pub fn init(tcx: TyCtxt<'_>) {
     });
 }
 
-fn matches_names(callee: Option<DefId>, names: &[&str]) -> bool {
+fn matches_name(callee: Option<DefId>, name: &str) -> bool {
     callee
         .and_then(|id| {
             IDS.get()
                 .expect("Intrinsic IDs have not been initialized")
                 .get(&id)
         })
-        .is_some_and(|name| names.contains(&name.as_str()))
+        .is_some_and(|intrinsic| intrinsic.as_str() == name)
 }
 
-pub fn get(name: &str) -> Option<DefId> {
+fn get(name: &str) -> Option<DefId> {
     IDS.get()
         .expect("Intrinsic IDs have not been initialized")
         .iter()
         .find_map(|(&id, intrinsic)| (intrinsic.as_str() == name).then_some(id))
 }
 
+pub fn copy_nonoverlapping_id() -> Option<DefId> {
+    get("copy_nonoverlapping")
+}
+
 pub fn is_intrinsic(tcx: TyCtxt<'_>, callee: DefId) -> bool {
     tcx.intrinsic(callee).is_some()
 }
 
-pub fn is_size_of(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["size_of"])
+macro_rules! intrinsic_apis {
+    ($($matcher:ident => $name:literal,)+) => {
+        $(
+            pub fn $matcher(callee: Option<DefId>) -> bool {
+                matches_name(callee, $name)
+            }
+        )+
+    };
 }
 
-pub fn is_align_of(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["align_of"])
-}
-
-pub fn is_copy(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["copy", "copy_nonoverlapping"])
-}
-
-pub fn is_ptr_offset_from(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["ptr_offset_from", "ptr_offset_from_unsigned"])
-}
-
-/// `intrinsics::arith_offset` is the *wrapping* pointer offset backing
-/// `wrapping_add`/`wrapping_offset`.  Unlike `intrinsics::offset` (which the
-/// MIR builder lowers to `BinOp::Offset`), it stays a `Call` to the intrinsic,
-/// so it must be classified here rather than reaching the `Offset` rvalue rule.
-pub fn is_arith_offset(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["arith_offset"])
-}
-
-pub fn is_pure_opaque(callee: Option<DefId>) -> bool {
-    matches_names(
-        callee,
-        &[
-            "float_to_int_unchecked",
-            "vtable_size",
-            "vtable_align",
-            "size_of_val",
-        ],
-    )
-}
-
-pub fn is_raw_eq(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["raw_eq"])
-}
-
-pub fn is_exact_div(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["exact_div"])
-}
-
-pub fn is_typed_swap_nonoverlapping(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["typed_swap_nonoverlapping"])
-}
-
-pub fn is_write_bytes(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["write_bytes"])
-}
-
-pub fn is_black_box(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["black_box"])
-}
-
-pub(crate) fn is_select_unpredictable(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["select_unpredictable"])
-}
-
-pub(crate) fn is_branch_hint(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["unlikely", "likely"])
-}
-
-pub(crate) fn is_with_overflow(callee: Option<DefId>) -> bool {
-    matches_names(
-        callee,
-        &[
-            "add_with_overflow",
-            "sub_with_overflow",
-            "mul_with_overflow",
-        ],
-    )
-}
-
-pub(crate) fn is_add_with_overflow(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["add_with_overflow"])
-}
-
-pub(crate) fn is_sub_with_overflow(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["sub_with_overflow"])
-}
-
-pub fn is_integer_min(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["integer_min"])
-}
-
-pub fn is_integer_max(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["integer_max"])
-}
-
-pub fn is_saturating_sub(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["saturating_sub"])
-}
-
-pub fn is_nonzero_preserving(callee: Option<DefId>) -> bool {
-    matches_names(
-        callee,
-        &[
-            "bswap",
-            "ctpop",
-            "bitreverse",
-            "rotate_left",
-            "rotate_right",
-        ],
-    )
-}
-
-pub fn is_saturating_add(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["saturating_add"])
-}
-
-pub fn is_unchecked_add(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["unchecked_add"])
-}
-
-pub fn is_unchecked_mul(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["unchecked_mul"])
-}
-
-pub fn is_wrapping_sub(callee: Option<DefId>) -> bool {
-    matches_names(callee, &["wrapping_sub"])
+intrinsic_apis! {
+    is_copy => "copy",
+    is_copy_nonoverlapping => "copy_nonoverlapping",
+    is_typed_swap_nonoverlapping => "typed_swap_nonoverlapping",
+    is_write_bytes => "write_bytes",
+    is_black_box => "black_box",
+    is_float_to_int_unchecked => "float_to_int_unchecked",
+    is_exact_div => "exact_div",
+    is_raw_eq => "raw_eq",
+    is_vtable_size => "vtable_size",
+    is_vtable_align => "vtable_align",
+    is_size_of_val => "size_of_val",
+    is_size_of => "size_of",
+    is_align_of => "align_of",
+    is_select_unpredictable => "select_unpredictable",
+    is_unlikely => "unlikely",
+    is_likely => "likely",
+    is_add_with_overflow => "add_with_overflow",
+    is_sub_with_overflow => "sub_with_overflow",
+    is_mul_with_overflow => "mul_with_overflow",
+    is_saturating_add => "saturating_add",
+    is_unchecked_add => "unchecked_add",
+    is_unchecked_mul => "unchecked_mul",
+    is_wrapping_sub => "wrapping_sub",
+    is_saturating_sub => "saturating_sub",
+    is_integer_min => "integer_min",
+    is_integer_max => "integer_max",
+    is_bswap => "bswap",
+    is_ctpop => "ctpop",
+    is_bitreverse => "bitreverse",
+    is_rotate_left => "rotate_left",
+    is_rotate_right => "rotate_right",
+    is_ptr_offset_from => "ptr_offset_from",
+    is_ptr_offset_from_unsigned => "ptr_offset_from_unsigned",
+    is_arith_offset => "arith_offset",
 }

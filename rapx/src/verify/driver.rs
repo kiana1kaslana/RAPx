@@ -190,7 +190,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         match property {
             Property::Atom(atom)
                 if atom.kind == PropertyKind::Alias
-                    && crate::other_api::is_manually_drop_drop(
+                    && crate::api_classify::is_manually_drop_drop(
                         view.checkpoint.callee,
                     ) =>
             {

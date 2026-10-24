@@ -191,7 +191,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 Some(CheckpointKind::RawPtrDeref)
                     | Some(CheckpointKind::StaticMutAccess)
                     | Some(CheckpointKind::UnsafeCall)
-            ) || crate::other_api::is_manually_drop_drop(
+            ) || crate::api_classify::is_manually_drop_drop(
                 bind_checkpoint.and_then(|c| c.callee),
             );
             if !skip_terminator {

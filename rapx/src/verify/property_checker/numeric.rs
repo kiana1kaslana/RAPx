@@ -6,7 +6,7 @@
 
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
-use crate::other_api;
+use crate::api_classify;
 use crate::verify::contract::{
     ContractExpr, NumericBinOp, PlaceBase, Property, PropertyArg, RelOp,
 };
@@ -474,7 +474,7 @@ impl PropertyChecker {
         for (_, val) in vm_state.all_local_values() {
             let is_iter = match val.ty.kind() {
                 TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                    TyKind::Adt(adt_def, _) => other_api::is_std_iter_or_itermut(adt_def.did()),
+                    TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
                     _ => false,
                 },
                 _ => false,
@@ -528,7 +528,7 @@ impl PropertyChecker {
         let local_val = vm_state.local_value(local)?;
         let is_iter = match local_val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                TyKind::Adt(adt_def, _) => other_api::is_std_iter_or_itermut(adt_def.did()),
+                TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
                 _ => false,
             },
             _ => false,

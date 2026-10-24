@@ -9,7 +9,7 @@ use crate::helpers::mir_utils;
 use super::alias_hazard::{self, AliasProducer, HazardKind};
 use crate::analysis::alias::FieldOrigin;
 use crate::verify::checkpoint::Checkpoint;
-use crate::other_api;
+use crate::api_classify;
 use crate::helpers::def_use::PlaceKey;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand, ProjectionElem, Rvalue, StatementKind};
@@ -411,7 +411,7 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
                     },
                     _ => None,
                 };
-                if nonnull_adt.is_some_and(|adt| other_api::is_std_nonnull(adt.did())) {
+                if nonnull_adt.is_some_and(|adt| api_classify::is_std_nonnull(adt.did())) {
                     return VmAliasResult::Proved;
                 }
             }
@@ -489,10 +489,10 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
     // exclusive view is derived from a raw pointer with no borrow information,
     // so it cannot be exclusive while the enclosing `&mut self` is still live.
     // An escaping `&` (as_ref) is only a *possible* hazard → Unknown.
-    if other_api::is_nonnull_as_ref_as_mut(Some(callee)) {
+    if api_classify::is_nonnull_as_ref_as_mut(Some(callee)) {
         let ret_ty = vm_state.body().local_decls[rustc_middle::mir::RETURN_PLACE].ty;
         if mir_utils::type_contains_reference(ret_ty) {
-            if other_api::is_nonnull_as_mut(Some(callee)) {
+            if api_classify::is_nonnull_as_mut(Some(callee)) {
                 return VmAliasResult::Failed(
                     "escaping `&mut` derived from a raw pointer without borrow information"
                         .into(),
@@ -618,7 +618,7 @@ fn check_view_alias<'z3, 'tcx>(
             // so MIR-level hazard scanning can detect reallocation hazards.
             let is_reallocatable = match &origin.kind {
                 VmOriginKind::Owned(def_id) => {
-                    other_api::is_std_vec(*def_id) || other_api::is_std_cstring(*def_id)
+                    api_classify::is_std_vec(*def_id) || api_classify::is_std_cstring(*def_id)
                 }
                 _ => false,
             };
@@ -738,7 +738,7 @@ fn check_view_alias<'z3, 'tcx>(
             // transfers exclusive ownership of its pointer, so producing a unique
             // view is safe even though the receiver is not a `&mut self`.
             if let rustc_middle::ty::TyKind::Adt(adt_def, _) = self_ty.kind()
-                && other_api::is_std_nonnull(adt_def.did()) {
+                && api_classify::is_std_nonnull(adt_def.did()) {
                     return VmAliasResult::Proved;
                 }
         }

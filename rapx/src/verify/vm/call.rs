@@ -17,7 +17,7 @@ use z3::{SatResult, Solver};
 use crate::compat::{FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
-use crate::other_api;
+use crate::api_classify;
 use crate::verify::call_summary;
 use super::state::{AllocId, MemoryContent, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
@@ -48,7 +48,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .collect();
         let callee = mir_utils::dep_callee_resolved_def_id(self.tcx, caller_def_id, func);
 
-        if other_api::is_eq_call(callee) {
+        if api_classify::is_eq_call(callee) {
             self.propagate_const_bytes_to_tracked(args);
         }
 
@@ -56,7 +56,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // semantics; bind them to `false` so their branchy panic bodies are not
         // inlined (which would otherwise recurse to the depth limit).
         if let Some(c) = callee
-            && other_api::is_ub_check(self.tcx, c)
+            && api_classify::is_ub_check(self.tcx, c)
         {
             let dest_ty = self.body().local_decls[destination].ty;
             self.set_local(
@@ -174,7 +174,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
         let pre_uninit: Vec<AllocId> = caller_referents.iter()
             .flatten()
-            .filter(|local| other_api::is_maybe_uninit_ty(before_inline.body().local_decls[**local].ty))
+            .filter(|local| api_classify::is_maybe_uninit_ty(before_inline.body().local_decls[**local].ty))
             .filter_map(|local| before_inline.current_frame.local_alloc.get(local).copied())
             .filter(|id| !before_inline.content(*id).facts.initialized)
             .collect();
@@ -374,7 +374,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 && destination.local == p.local
                 && destination.projection.is_empty()
                 && let Some(callee) = mir_utils::dep_callee_def_id(func)
-                && other_api::is_ub_check(self.tcx, callee)
+                && api_classify::is_ub_check(self.tcx, callee)
             {
                 return Some(0);
             }
@@ -1030,7 +1030,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         match arg_val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
                 TyKind::Adt(adt_def, _) => {
-                    if other_api::is_std_iter_or_itermut(adt_def.did()) {
+                    if api_classify::is_std_iter_or_itermut(adt_def.did()) {
                         // Find the local holding the iterator by matching the
                         // reference's address term against known local addresses
                         // (`&mut _iter` has term `addr__iter`).  A hardcoded

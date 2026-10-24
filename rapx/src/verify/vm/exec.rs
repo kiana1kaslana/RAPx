@@ -20,7 +20,7 @@ use super::state::{
 };
 
 use crate::helpers::mir_utils;
-use crate::other_api;
+use crate::api_classify;
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Execute all retained MIR items in path order.
@@ -304,7 +304,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let rustc_middle::ty::TyKind::Adt(adt_def, _) = val.ty.kind() else {
             return None;
         };
-        if !other_api::is_index_range(adt_def.did()) {
+        if !api_classify::is_index_range(adt_def.did()) {
             return None;
         }
         let alloc_id = val.provenance_alloc_id()?;

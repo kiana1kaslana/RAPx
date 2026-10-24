@@ -7,7 +7,7 @@
 
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
-use crate::other_api;
+use crate::api_classify;
 use crate::verify::contract::{ContractExpr, Property, PropertyArg, is_static_lifetime_ident};
 use crate::verify::report::{CheckResult, UnknownReason};
 use crate::verify::vm::state::{AllocId, OffsetKind, VmState, VmValue};
@@ -337,13 +337,13 @@ impl PropertyChecker {
             && (matches!(value.ty.kind(), TyKind::RawPtr(..))
                 || matches!(value.ty.kind(), TyKind::Ref(_, inner, _)
                     if matches!(inner.kind(), TyKind::Adt(adt, _)
-                        if other_api::is_maybe_uninit_type(adt.did()))))
+                        if api_classify::is_maybe_uninit_type(adt.did()))))
             && {
                 let a = vm_state.alloc(alloc_id);
                 !a.is_external()
                     && a.element_ty.as_ty().is_some_and(|ty| {
                         if let TyKind::Adt(adt, _) = ty.kind() {
-                            other_api::is_maybe_uninit_type(adt.did())
+                            api_classify::is_maybe_uninit_type(adt.did())
                         } else {
                             false
                         }
@@ -383,7 +383,7 @@ impl PropertyChecker {
             // / `String::new`) has no heap allocation behind the reference: the
             // container value is valid and there is nothing to free, so its
             // `ValidPtr`/`Allocated` precondition holds vacuously.
-            if crate::other_api::is_manually_drop_drop(checkpoint.callee) {
+            if crate::api_classify::is_manually_drop_drop(checkpoint.callee) {
                 return CheckResult::ProvedByRule;
             }
             // A null pointer (address term 0) is definitely not backed by any
@@ -729,7 +729,7 @@ impl PropertyChecker {
                 && Self::is_value_aligned(vm_state, &value)
                 && matches!(value.ty.kind(), TyKind::RawPtr(..))
                 && !vm_state.alloc(id).facts.dead
-                && crate::other_api::is_mem_copy_or_write(checkpoint.callee) {
+                && crate::api_classify::is_mem_copy_or_write(checkpoint.callee) {
                     return CheckResult::ProvedByRule;
                 }
             let size = vm_state.allocation_size(id).clone();
@@ -950,8 +950,8 @@ impl PropertyChecker {
                 let param_ty = body.local_decls[param_local].ty;
                 let guarantees = matches!(param_ty.kind(), TyKind::Ref(..))
                     || matches!(param_ty.kind(), TyKind::Adt(adt_def, _)
-                        if other_api::is_std_box(adt_def.did())
-                            || other_api::is_std_vec(adt_def.did()));
+                        if api_classify::is_std_box(adt_def.did())
+                            || api_classify::is_std_vec(adt_def.did()));
                 if !guarantees {
                     return false;
                 }

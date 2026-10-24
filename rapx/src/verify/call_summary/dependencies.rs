@@ -93,9 +93,9 @@ fn trace_local_to_callee_arg(
             // provenance (and thus the written-through arg) is carried by
             // their first (base/receiver) argument.
             let callee = helpers::dep_callee_def_id(func);
-            let traces_base = crate::other_api::is_as_ptr(callee)
-                || crate::other_api::is_pointer_add(callee)
-                || crate::other_api::is_pointer_sub(callee);
+            let traces_base = crate::api_classify::is_as_ptr(callee)
+                || crate::api_classify::is_pointer_add(callee)
+                || crate::api_classify::is_pointer_sub(callee);
             if !traces_base {
                 continue;
             }
@@ -266,7 +266,7 @@ fn write_args_on_path<'tcx>(
         };
 
         // `ptr::write`-style writes: trace the pointer arg to a callee arg.
-        if crate::other_api::is_ptr_write(helpers::dep_callee_def_id(func)) {
+        if crate::api_classify::is_ptr_write(helpers::dep_callee_def_id(func)) {
             if let Some(pointer_arg) = args
                 .first()
                 .and_then(|arg| trace_to_callee_arg(body, &arg.node))
@@ -276,7 +276,7 @@ fn write_args_on_path<'tcx>(
             continue;
         }
 
-        if crate::other_api::is_ptr_copy(helpers::dep_callee_def_id(func)) {
+        if crate::api_classify::is_ptr_copy(helpers::dep_callee_def_id(func)) {
             if let Some(destination_arg) = args
                 .get(1)
                 .and_then(|arg| trace_to_callee_arg(body, &arg.node))

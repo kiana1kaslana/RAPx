@@ -17,7 +17,7 @@ use super::state::{
 };
 
 use crate::helpers::mir_utils;
-use crate::other_api;
+use crate::api_classify;
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Assert a contract fact as VM state invariants.
@@ -467,7 +467,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     .map(|val| {
                         (matches!(val.ty.kind(), rustc_middle::ty::TyKind::RawPtr(..))
                             || matches!(val.ty.kind(), rustc_middle::ty::TyKind::Adt(adt, _)
-                                if other_api::is_std_nonnull(adt.did())
+                                if api_classify::is_std_nonnull(adt.did())
                                     || mir_utils::is_raw_ptr_wrapper(self.tcx, adt.did())))
                             && (elem_ty.is_primitive()
                                 || matches!(elem_ty.kind(), rustc_middle::ty::TyKind::Param(_)))
@@ -735,7 +735,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         use rustc_middle::ty::TyKind;
         match val.ty.kind() {
             TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                TyKind::Adt(adt_def, _) => other_api::is_std_iter_or_itermut(adt_def.did()),
+                TyKind::Adt(adt_def, _) => api_classify::is_std_iter_or_itermut(adt_def.did()),
                 _ => false,
             },
             _ => false,
@@ -1127,7 +1127,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // content carries no validity invariant, so there is nothing to mark
         // initialized — the `Init ⇒ Typed` subsumption records the element type.
         let is_maybe_uninit = Self::ty_arg(property, 1)
-            .map(other_api::is_maybe_uninit_ty)
+            .map(api_classify::is_maybe_uninit_ty)
             .unwrap_or(false);
         if is_maybe_uninit {
             return;

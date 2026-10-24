@@ -978,7 +978,7 @@ impl PropertyChecker {
 /// size and alignment.
 pub(super) fn maybe_uninit_inner(ty: Ty<'_>) -> Option<Ty<'_>> {
     if let TyKind::Adt(adt_def, substs) = ty.kind()
-        && crate::other_api::is_maybe_uninit_type(adt_def.did())
+        && crate::api_classify::is_maybe_uninit_type(adt_def.did())
         && let Some(inner) = substs.first().and_then(|s| s.as_type())
     {
         return Some(inner);
@@ -997,10 +997,10 @@ pub(super) fn smart_pointer_pointee(ty: Ty<'_>) -> Option<Ty<'_>> {
         TyKind::RawPtr(e, _) | TyKind::Ref(_, e, _) => Some(*e),
         TyKind::Adt(adt, args) => {
             let did = adt.did();
-            if crate::other_api::is_std_box(did)
-                || crate::other_api::is_std_vec(did)
-                || crate::other_api::is_std_nonnull(did)
-                || crate::other_api::is_std_cstring(did)
+            if crate::api_classify::is_std_box(did)
+                || crate::api_classify::is_std_vec(did)
+                || crate::api_classify::is_std_nonnull(did)
+                || crate::api_classify::is_std_cstring(did)
                 || other_api::rc_types().contains(&did)
             {
                 args.types().next()

@@ -6,7 +6,7 @@
 
 use crate::verify::checkpoint::Checkpoint;
 use crate::helpers::mir_utils;
-use crate::other_api;
+use crate::api_classify;
 use crate::verify::contract::{
     ContractExpr, NumericBinOp, PlaceBase, Property, PropertyArg, RelOp,
 };
@@ -68,7 +68,7 @@ impl PropertyChecker {
         }
         if value.is_pointer()
             && let TyKind::Adt(adt_def, _) = value.ty.kind()
-                && other_api::is_std_nonnull(adt_def.did()) {
+                && api_classify::is_std_nonnull(adt_def.did()) {
                     return CheckResult::ProvedByRule;
                 }
         // `byte_add(offset_of!(Container, field))` always keeps the pointer
@@ -114,7 +114,7 @@ impl PropertyChecker {
         // `sub` walks *backwards* (`[value - access, value)`), so this forward
         // form would mis-classify `end.sub(n)` as out of bounds; the `sub`-aware
         // byte-range proof below handles that direction.
-        if !other_api::is_pointer_sub(checkpoint.callee)
+        if !api_classify::is_pointer_sub(checkpoint.callee)
             && let (Some(len), Some(k)) = (
                 alloc.slice_len().cloned(),
                 value
@@ -182,7 +182,7 @@ impl PropertyChecker {
         // `sub` walks *backwards*: the accessed range is `[value - access, value)`,
         // so the lower bound is `value - access >= base` and the upper bound is
         // `value <= base + size`.  `add` (and everything else) walks forwards.
-        let (above_negated, below_negated) = if other_api::is_pointer_sub(checkpoint.callee) {
+        let (above_negated, below_negated) = if api_classify::is_pointer_sub(checkpoint.callee) {
             let walked = Int::sub(vm_state.z3_ctx, &[&value.z3_term, &access]);
             (value.z3_term.gt(&bound), walked.lt(&base))
         } else {
@@ -377,7 +377,7 @@ impl PropertyChecker {
             mir_utils::RangeKind::Other => {
                 // `core::ops::IndexRange` is a private `{ start, end }` struct
                 // (no lang item); its `end` lives at field 1 like `Range`.
-                if other_api::is_index_range(adt_def.did()) {
+                if api_classify::is_index_range(adt_def.did()) {
                     Some(rustc_abi::FieldIdx::from_usize(1))
                 } else {
                     None

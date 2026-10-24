@@ -3,6 +3,7 @@
 #[macro_use]
 pub mod utils;
 pub mod analysis;
+pub(crate) mod api_classify;
 pub mod check;
 pub mod cli;
 pub(crate) mod compat;
