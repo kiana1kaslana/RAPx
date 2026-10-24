@@ -1,0 +1,127 @@
+//! Direct MIR dispatch for symbolic execution rules.
+
+use rustc_middle::mir::{
+    BasicBlock, Place, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+};
+
+use super::super::state::{VmState, VmValue};
+use super::{rvalue, statement, terminator};
+use crate::verify::mir_support;
+
+pub(super) fn exec_statement<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, stmt: &Statement<'tcx>) {
+    let name = match &stmt.kind {
+        StatementKind::Assign(assign) => {
+            let (place, value) = &**assign;
+            statement::exec_assign(state, place, value);
+            "Assign"
+        }
+        StatementKind::StorageLive(local) => {
+            statement::exec_storage_live(state, *local);
+            "StorageLive"
+        }
+        StatementKind::StorageDead(local) => {
+            statement::exec_storage_dead(state, *local);
+            "StorageDead"
+        }
+        kind if mir_support::ignored_statement(kind) => "Ignored",
+        _ => {
+            state.unsupported_mir = true;
+            "Unsupported"
+        }
+    };
+    log::trace!("vm statement rule: {name}");
+}
+
+pub(super) fn exec_terminator<'z3, 'tcx>(
+    state: &mut VmState<'z3, 'tcx>,
+    term: &Terminator<'tcx>,
+    successor: Option<BasicBlock>,
+) {
+    let name = match &term.kind {
+        TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } => {
+            let caller_id = state.current_frame.current_def_id;
+            state.exec_call(func, args, destination.local, caller_id);
+            "Call"
+        }
+        TerminatorKind::SwitchInt { discr, targets } => {
+            terminator::exec_switch_int(state, discr, targets, successor);
+            "SwitchInt"
+        }
+        TerminatorKind::Assert { cond, expected, .. } => {
+            terminator::exec_assert(state, cond, *expected);
+            "Assert"
+        }
+        TerminatorKind::Drop { place, .. } => {
+            terminator::exec_drop(state, place);
+            "Drop"
+        }
+        kind if mir_support::ignored_terminator(kind) => "Ignored",
+        _ => {
+            state.unsupported_mir = true;
+            "Unsupported"
+        }
+    };
+    log::trace!("vm terminator rule: {name}");
+}
+
+pub(super) fn eval_rvalue<'z3, 'tcx>(
+    state: &mut VmState<'z3, 'tcx>,
+    place: &Place<'tcx>,
+    rv: &Rvalue<'tcx>,
+) -> VmValue<'z3, 'tcx> {
+    #[allow(unreachable_patterns)]
+    let (name, value) = match rv {
+        Rvalue::Use(operand, ..) => ("Use", rvalue::eval_use(state, place, operand)),
+        Rvalue::Ref(_, _, source) => ("Ref", rvalue::eval_ref(state, place, source)),
+        Rvalue::RawPtr(_, source) => ("RawPtr", rvalue::eval_raw_ptr(state, place, source)),
+        Rvalue::BinaryOp(op, pair) => ("BinaryOp", rvalue::eval_binary_op(state, place, *op, pair)),
+        Rvalue::UnaryOp(op, operand) => {
+            ("UnaryOp", rvalue::eval_unary_op(state, place, *op, operand))
+        }
+        Rvalue::Cast(_, operand, ty) => ("Cast", rvalue::eval_cast(state, operand, *ty)),
+        Rvalue::Aggregate(kind, operands) => (
+            "Aggregate",
+            rvalue::eval_aggregate(state, place, kind, operands),
+        ),
+        Rvalue::Discriminant(source) => (
+            "Discriminant",
+            rvalue::eval_discriminant(state, place, source),
+        ),
+        #[cfg(not(rapx_ge_99))]
+        Rvalue::ShallowInitBox(operand, _) => (
+            "ShallowInitBox",
+            rvalue::eval_shallow_init_box(state, place, operand),
+        ),
+        Rvalue::CopyForDeref(source) => (
+            "CopyForDeref",
+            rvalue::eval_copy_for_deref(state, place, source),
+        ),
+        Rvalue::Repeat(..) => ("Repeat", rvalue::eval_fresh_value(state, place, "repeat")),
+        Rvalue::ThreadLocalRef(..) => (
+            "ThreadLocalRef",
+            rvalue::eval_fresh_value(state, place, "thread_local"),
+        ),
+        #[cfg(not(rapx_ge_95))]
+        Rvalue::NullaryOp(op) => ("NullaryOp", rvalue::eval_nullary_op(state, place, op)),
+        Rvalue::WrapUnsafeBinder(..) => (
+            "WrapUnsafeBinder",
+            rvalue::eval_fresh_value(state, place, "wrap_unsafe_binder"),
+        ),
+        #[cfg(rapx_rvalue_has_reborrow)]
+        Rvalue::Reborrow(..) => ("Reborrow", rvalue::eval_reborrow(state, place)),
+        _ => {
+            state.unsupported_mir = true;
+            (
+                "Unsupported",
+                rvalue::eval_fresh_value(state, place, "unsupported_rvalue"),
+            )
+        }
+    };
+    log::trace!("vm rvalue rule: {name}");
+    value
+}

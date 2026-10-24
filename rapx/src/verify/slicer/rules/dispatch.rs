@@ -1,0 +1,156 @@
+//! Direct MIR dispatch for backward slicing rules.
+
+use rustc_hir::def_id::DefId;
+use rustc_middle::mir::{BasicBlock, Body, Statement, StatementKind, Terminator, TerminatorKind};
+
+use crate::analysis::dataflow::types::DataflowGraph;
+use crate::helpers::def_use::RelevantPlaces;
+use crate::verify::mir_support;
+
+use super::super::types::RelevantItem;
+use super::super::visitor::BackwardSlicer;
+use super::{statement, terminator};
+
+pub(super) struct StatementContext<'a, 'tcx> {
+    pub slicer: &'a BackwardSlicer<'tcx>,
+    pub def_id: DefId,
+    pub block: BasicBlock,
+    pub statement_index: usize,
+    pub statement: &'tcx Statement<'tcx>,
+    pub flow: &'a DataflowGraph,
+    pub relevant: &'a mut RelevantPlaces,
+    pub items: &'a mut Vec<RelevantItem<'tcx>>,
+    pub keep_invalidations: bool,
+    pub keep_owner: bool,
+}
+
+pub(super) struct TerminatorContext<'a, 'tcx> {
+    pub slicer: &'a BackwardSlicer<'tcx>,
+    pub def_id: DefId,
+    pub block: BasicBlock,
+    pub terminator: &'a Terminator<'tcx>,
+    pub flow: &'a DataflowGraph,
+    pub body: &'a Body<'tcx>,
+    pub relevant: &'a mut RelevantPlaces,
+    pub items: &'a mut Vec<RelevantItem<'tcx>>,
+    pub keep_invalidations: bool,
+    pub keep_owner: bool,
+    pub successor: Option<BasicBlock>,
+}
+
+pub(super) fn apply_statement(ctx: &mut StatementContext<'_, '_>) {
+    let name = match &ctx.statement.kind {
+        StatementKind::Assign(assign) => {
+            let (place, rvalue) = &**assign;
+            ctx.slicer.visit_assign_statement(
+                ctx.def_id,
+                ctx.block,
+                ctx.statement_index,
+                place,
+                rvalue,
+                ctx.flow,
+                ctx.relevant,
+                ctx.items,
+                ctx.keep_owner,
+            );
+            "Assign"
+        }
+        StatementKind::StorageDead(local) => {
+            statement::visit_storage_dead(
+                ctx.def_id,
+                ctx.block,
+                ctx.statement_index,
+                *local,
+                ctx.flow,
+                ctx.relevant,
+                ctx.items,
+                ctx.keep_invalidations,
+            );
+            "StorageDead"
+        }
+        StatementKind::StorageLive(..) => {
+            if ctx.keep_invalidations {
+                ctx.items.push(RelevantItem::Statement {
+                    def_id: ctx.def_id,
+                    block: ctx.block,
+                    statement_index: ctx.statement_index,
+                });
+            }
+            "StorageLive"
+        }
+        kind if mir_support::ignored_statement(kind) => "Ignored",
+        _ => {
+            ctx.items.push(RelevantItem::Statement {
+                def_id: ctx.def_id,
+                block: ctx.block,
+                statement_index: ctx.statement_index,
+            });
+            "Unsupported"
+        }
+    };
+    log::trace!("slicer statement rule: {name}");
+}
+
+pub(super) fn apply_terminator(ctx: &mut TerminatorContext<'_, '_>) {
+    let name = match &ctx.terminator.kind {
+        TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } => {
+            ctx.slicer.visit_call_terminator(
+                ctx.def_id,
+                ctx.block,
+                ctx.terminator,
+                func,
+                args,
+                destination,
+                ctx.flow,
+                ctx.body,
+                ctx.relevant,
+                ctx.items,
+                ctx.keep_invalidations,
+                ctx.keep_owner,
+            );
+            "Call"
+        }
+        TerminatorKind::SwitchInt { .. } => {
+            visit_non_call(ctx);
+            "SwitchInt"
+        }
+        TerminatorKind::Assert { .. } => {
+            visit_non_call(ctx);
+            "Assert"
+        }
+        TerminatorKind::Drop { .. } => {
+            visit_non_call(ctx);
+            "Drop"
+        }
+        kind if mir_support::ignored_terminator(kind) => {
+            visit_non_call(ctx);
+            "Ignored"
+        }
+        _ => {
+            ctx.items.push(RelevantItem::Terminator {
+                def_id: ctx.def_id,
+                block: ctx.block,
+                switch_succ: None,
+            });
+            "Unsupported"
+        }
+    };
+    log::trace!("slicer terminator rule: {name}");
+}
+
+fn visit_non_call(ctx: &mut TerminatorContext<'_, '_>) {
+    terminator::visit_non_call_terminator(
+        ctx.def_id,
+        ctx.block,
+        ctx.terminator,
+        ctx.relevant,
+        ctx.items,
+        ctx.keep_invalidations,
+        ctx.successor,
+    );
+}

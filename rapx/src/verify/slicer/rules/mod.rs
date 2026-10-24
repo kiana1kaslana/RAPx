@@ -9,7 +9,7 @@ use crate::analysis::dataflow::types::DataflowGraph;
 use crate::helpers::def_use::RelevantPlaces;
 
 mod call;
-mod registry;
+mod dispatch;
 mod statement;
 mod terminator;
 
@@ -27,7 +27,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
         keep_invalidations: bool,
         keep_owner: bool,
     ) {
-        registry::apply_statement(&mut registry::StatementContext {
+        dispatch::apply_statement(&mut dispatch::StatementContext {
             slicer: self,
             def_id,
             block,
@@ -55,7 +55,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
         keep_owner: bool,
         successor: Option<BasicBlock>,
     ) {
-        registry::apply_terminator(&mut registry::TerminatorContext {
+        dispatch::apply_terminator(&mut dispatch::TerminatorContext {
             slicer: self,
             def_id,
             block,
