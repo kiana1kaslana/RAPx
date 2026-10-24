@@ -6,16 +6,16 @@ use rustc_middle::mir::{
 
 use super::super::state::{VmState, VmValue};
 use super::{rvalue, statement, terminator};
-use crate::verify::mir_support;
+use crate::verify::mir_support::{self, StatementClass, TerminatorClass};
 
 struct StatementRule {
-    kind: StatementRuleKind,
+    kind: StatementClass,
     name: &'static str,
     apply: for<'z3, 'tcx> fn(&mut VmState<'z3, 'tcx>, &Statement<'tcx>) -> bool,
 }
 
 struct TerminatorRule {
-    kind: TerminatorRuleKind,
+    kind: TerminatorClass,
     name: &'static str,
     apply:
         for<'z3, 'tcx> fn(&mut VmState<'z3, 'tcx>, &Terminator<'tcx>, Option<BasicBlock>) -> bool,
@@ -29,25 +29,6 @@ struct RvalueRule {
         &Place<'tcx>,
         &Rvalue<'tcx>,
     ) -> Option<VmValue<'z3, 'tcx>>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StatementRuleKind {
-    Assign,
-    StorageLive,
-    StorageDead,
-    Ignored,
-    Unsupported,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TerminatorRuleKind {
-    Call,
-    SwitchInt,
-    Assert,
-    Drop,
-    Ignored,
-    Unsupported,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,7 +56,7 @@ enum RvalueRuleKind {
 
 const STATEMENT_RULES: &[StatementRule] = &[
     StatementRule {
-        kind: StatementRuleKind::Assign,
+        kind: StatementClass::Assign,
         name: "Assign",
         apply: |state, stmt| {
             let StatementKind::Assign(assign) = &stmt.kind else {
@@ -87,7 +68,7 @@ const STATEMENT_RULES: &[StatementRule] = &[
         },
     },
     StatementRule {
-        kind: StatementRuleKind::StorageLive,
+        kind: StatementClass::StorageLive,
         name: "StorageLive",
         apply: |state, stmt| {
             let StatementKind::StorageLive(local) = stmt.kind else {
@@ -98,7 +79,7 @@ const STATEMENT_RULES: &[StatementRule] = &[
         },
     },
     StatementRule {
-        kind: StatementRuleKind::StorageDead,
+        kind: StatementClass::StorageDead,
         name: "StorageDead",
         apply: |state, stmt| {
             let StatementKind::StorageDead(local) = stmt.kind else {
@@ -109,15 +90,14 @@ const STATEMENT_RULES: &[StatementRule] = &[
         },
     },
     StatementRule {
-        kind: StatementRuleKind::Ignored,
+        kind: StatementClass::Ignored,
         name: "Ignored",
-        apply: |_state, stmt| mir_support::ignored_statement(&stmt.kind),
+        apply: |_state, _stmt| true,
     },
     StatementRule {
-        kind: StatementRuleKind::Unsupported,
+        kind: StatementClass::Unsupported,
         name: "Unsupported",
-        apply: |state, stmt| {
-            debug_assert!(mir_support::unsupported_statement(&stmt.kind));
+        apply: |state, _stmt| {
             state.unsupported_mir = true;
             true
         },
@@ -126,7 +106,7 @@ const STATEMENT_RULES: &[StatementRule] = &[
 
 const TERMINATOR_RULES: &[TerminatorRule] = &[
     TerminatorRule {
-        kind: TerminatorRuleKind::Call,
+        kind: TerminatorClass::Call,
         name: "Call",
         apply: |state, term, _| {
             let TerminatorKind::Call {
@@ -144,7 +124,7 @@ const TERMINATOR_RULES: &[TerminatorRule] = &[
         },
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::SwitchInt,
+        kind: TerminatorClass::SwitchInt,
         name: "SwitchInt",
         apply: |state, term, successor| {
             let TerminatorKind::SwitchInt { discr, targets } = &term.kind else {
@@ -155,7 +135,7 @@ const TERMINATOR_RULES: &[TerminatorRule] = &[
         },
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Assert,
+        kind: TerminatorClass::Assert,
         name: "Assert",
         apply: |state, term, _| {
             let TerminatorKind::Assert { cond, expected, .. } = &term.kind else {
@@ -166,7 +146,7 @@ const TERMINATOR_RULES: &[TerminatorRule] = &[
         },
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Drop,
+        kind: TerminatorClass::Drop,
         name: "Drop",
         apply: |state, term, _| {
             let TerminatorKind::Drop { place, .. } = &term.kind else {
@@ -177,15 +157,14 @@ const TERMINATOR_RULES: &[TerminatorRule] = &[
         },
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Ignored,
+        kind: TerminatorClass::Ignored,
         name: "Ignored",
-        apply: |_state, term, _| mir_support::ignored_terminator(&term.kind),
+        apply: |_state, _term, _| true,
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Unsupported,
+        kind: TerminatorClass::Unsupported,
         name: "Unsupported",
-        apply: |state, term, _| {
-            debug_assert!(mir_support::unsupported_terminator(&term.kind));
+        apply: |state, _term, _| {
             state.unsupported_mir = true;
             true
         },
@@ -335,7 +314,7 @@ const RVALUE_RULES: &[RvalueRule] = &[
 ];
 
 pub(super) fn exec_statement<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, stmt: &Statement<'tcx>) {
-    let kind = statement_rule_kind(&stmt.kind);
+    let kind = mir_support::statement_class(&stmt.kind);
     let rule = STATEMENT_RULES
         .iter()
         .find(|rule| rule.kind == kind)
@@ -352,7 +331,7 @@ pub(super) fn exec_terminator<'z3, 'tcx>(
     term: &Terminator<'tcx>,
     successor: Option<BasicBlock>,
 ) {
-    let kind = terminator_rule_kind(&term.kind);
+    let kind = mir_support::terminator_class(&term.kind);
     let rule = TERMINATOR_RULES
         .iter()
         .find(|rule| rule.kind == kind)
@@ -377,27 +356,6 @@ pub(super) fn eval_rvalue<'z3, 'tcx>(
     let value = (rule.apply)(state, place, rv).expect("rvalue rule does not match its MIR kind");
     log::trace!("vm rvalue rule: {}", rule.name);
     value
-}
-
-fn statement_rule_kind(kind: &StatementKind<'_>) -> StatementRuleKind {
-    match kind {
-        StatementKind::Assign(..) => StatementRuleKind::Assign,
-        StatementKind::StorageLive(..) => StatementRuleKind::StorageLive,
-        StatementKind::StorageDead(..) => StatementRuleKind::StorageDead,
-        _ if mir_support::ignored_statement(kind) => StatementRuleKind::Ignored,
-        _ => StatementRuleKind::Unsupported,
-    }
-}
-
-fn terminator_rule_kind(kind: &TerminatorKind<'_>) -> TerminatorRuleKind {
-    match kind {
-        TerminatorKind::Call { .. } => TerminatorRuleKind::Call,
-        TerminatorKind::SwitchInt { .. } => TerminatorRuleKind::SwitchInt,
-        TerminatorKind::Assert { .. } => TerminatorRuleKind::Assert,
-        TerminatorKind::Drop { .. } => TerminatorRuleKind::Drop,
-        _ if mir_support::ignored_terminator(kind) => TerminatorRuleKind::Ignored,
-        _ => TerminatorRuleKind::Unsupported,
-    }
 }
 
 #[allow(unreachable_patterns)]

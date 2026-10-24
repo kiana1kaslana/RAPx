@@ -5,7 +5,7 @@ use rustc_middle::mir::{BasicBlock, Body, Statement, StatementKind, Terminator, 
 
 use crate::analysis::dataflow::types::DataflowGraph;
 use crate::helpers::def_use::RelevantPlaces;
-use crate::verify::mir_support;
+use crate::verify::mir_support::{self, StatementClass, TerminatorClass};
 
 use super::super::types::RelevantItem;
 use super::super::visitor::BackwardSlicer;
@@ -39,59 +39,40 @@ pub(super) struct TerminatorContext<'a, 'tcx> {
 }
 
 struct StatementRule {
-    kind: StatementRuleKind,
+    kind: StatementClass,
     name: &'static str,
     apply: for<'a, 'tcx> fn(&mut StatementContext<'a, 'tcx>) -> bool,
 }
 
 struct TerminatorRule {
-    kind: TerminatorRuleKind,
+    kind: TerminatorClass,
     name: &'static str,
     apply: for<'a, 'tcx> fn(&mut TerminatorContext<'a, 'tcx>) -> bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StatementRuleKind {
-    Assign,
-    StorageDead,
-    StorageLive,
-    Ignored,
-    Unsupported,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TerminatorRuleKind {
-    Call,
-    SwitchInt,
-    Assert,
-    Drop,
-    Ignored,
-    Unsupported,
-}
-
 const STATEMENT_RULES: &[StatementRule] = &[
     StatementRule {
-        kind: StatementRuleKind::Assign,
+        kind: StatementClass::Assign,
         name: "Assign",
         apply: assign,
     },
     StatementRule {
-        kind: StatementRuleKind::StorageDead,
+        kind: StatementClass::StorageDead,
         name: "StorageDead",
         apply: storage_dead,
     },
     StatementRule {
-        kind: StatementRuleKind::StorageLive,
+        kind: StatementClass::StorageLive,
         name: "StorageLive",
         apply: storage_live,
     },
     StatementRule {
-        kind: StatementRuleKind::Ignored,
+        kind: StatementClass::Ignored,
         name: "Ignored",
         apply: ignored_statement,
     },
     StatementRule {
-        kind: StatementRuleKind::Unsupported,
+        kind: StatementClass::Unsupported,
         name: "Unsupported",
         apply: unsupported_statement,
     },
@@ -99,39 +80,39 @@ const STATEMENT_RULES: &[StatementRule] = &[
 
 const TERMINATOR_RULES: &[TerminatorRule] = &[
     TerminatorRule {
-        kind: TerminatorRuleKind::Call,
+        kind: TerminatorClass::Call,
         name: "Call",
         apply: call,
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::SwitchInt,
+        kind: TerminatorClass::SwitchInt,
         name: "SwitchInt",
         apply: switch_int,
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Assert,
+        kind: TerminatorClass::Assert,
         name: "Assert",
         apply: assert,
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Drop,
+        kind: TerminatorClass::Drop,
         name: "Drop",
         apply: drop,
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Ignored,
+        kind: TerminatorClass::Ignored,
         name: "Ignored",
         apply: ignored_terminator,
     },
     TerminatorRule {
-        kind: TerminatorRuleKind::Unsupported,
+        kind: TerminatorClass::Unsupported,
         name: "Unsupported",
         apply: unsupported_terminator,
     },
 ];
 
 pub(super) fn apply_statement(ctx: &mut StatementContext<'_, '_>) {
-    let kind = statement_rule_kind(&ctx.statement.kind);
+    let kind = mir_support::statement_class(&ctx.statement.kind);
     let rule = STATEMENT_RULES
         .iter()
         .find(|rule| rule.kind == kind)
@@ -144,7 +125,7 @@ pub(super) fn apply_statement(ctx: &mut StatementContext<'_, '_>) {
 }
 
 pub(super) fn apply_terminator(ctx: &mut TerminatorContext<'_, '_>) {
-    let kind = terminator_rule_kind(&ctx.terminator.kind);
+    let kind = mir_support::terminator_class(&ctx.terminator.kind);
     let rule = TERMINATOR_RULES
         .iter()
         .find(|rule| rule.kind == kind)
@@ -154,27 +135,6 @@ pub(super) fn apply_terminator(ctx: &mut TerminatorContext<'_, '_>) {
         "terminator rule does not match its MIR kind"
     );
     log::trace!("slicer terminator rule: {}", rule.name);
-}
-
-fn statement_rule_kind(kind: &StatementKind<'_>) -> StatementRuleKind {
-    match kind {
-        StatementKind::Assign(..) => StatementRuleKind::Assign,
-        StatementKind::StorageDead(..) => StatementRuleKind::StorageDead,
-        StatementKind::StorageLive(..) => StatementRuleKind::StorageLive,
-        _ if mir_support::ignored_statement(kind) => StatementRuleKind::Ignored,
-        _ => StatementRuleKind::Unsupported,
-    }
-}
-
-fn terminator_rule_kind(kind: &TerminatorKind<'_>) -> TerminatorRuleKind {
-    match kind {
-        TerminatorKind::Call { .. } => TerminatorRuleKind::Call,
-        TerminatorKind::SwitchInt { .. } => TerminatorRuleKind::SwitchInt,
-        TerminatorKind::Assert { .. } => TerminatorRuleKind::Assert,
-        TerminatorKind::Drop { .. } => TerminatorRuleKind::Drop,
-        _ if mir_support::ignored_terminator(kind) => TerminatorRuleKind::Ignored,
-        _ => TerminatorRuleKind::Unsupported,
-    }
 }
 
 fn assign(ctx: &mut StatementContext<'_, '_>) -> bool {
@@ -227,12 +187,11 @@ fn storage_live(ctx: &mut StatementContext<'_, '_>) -> bool {
     true
 }
 
-fn ignored_statement(ctx: &mut StatementContext<'_, '_>) -> bool {
-    mir_support::ignored_statement(&ctx.statement.kind)
+fn ignored_statement(_ctx: &mut StatementContext<'_, '_>) -> bool {
+    true
 }
 
 fn unsupported_statement(ctx: &mut StatementContext<'_, '_>) -> bool {
-    debug_assert!(mir_support::unsupported_statement(&ctx.statement.kind));
     ctx.items.push(RelevantItem::Statement {
         def_id: ctx.def_id,
         block: ctx.block,
@@ -293,9 +252,6 @@ fn drop(ctx: &mut TerminatorContext<'_, '_>) -> bool {
 }
 
 fn ignored_terminator(ctx: &mut TerminatorContext<'_, '_>) -> bool {
-    if !mir_support::ignored_terminator(&ctx.terminator.kind) {
-        return false;
-    }
     visit_non_call(ctx);
     true
 }
@@ -313,7 +269,6 @@ fn visit_non_call(ctx: &mut TerminatorContext<'_, '_>) {
 }
 
 fn unsupported_terminator(ctx: &mut TerminatorContext<'_, '_>) -> bool {
-    debug_assert!(mir_support::unsupported_terminator(&ctx.terminator.kind));
     ctx.items.push(RelevantItem::Terminator {
         def_id: ctx.def_id,
         block: ctx.block,
