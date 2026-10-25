@@ -1,7 +1,7 @@
 //! Known `core`/`std`/`alloc` API identities, regardless of MIR availability.
 //!
 //! The path table resolves well-known items to [`DefId`]s. Classifiers in
-//! [`crate::api_classify`] combine those identities into operations.
+//! [`crate::verify::api_classify`] combine those identities into operations.
 //! The table owns global state initialized by the compiler callback.
 //!
 //! # How a lookup works
@@ -40,8 +40,9 @@ use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
 use rustc_public::{CrateDef, rustc_internal};
-use rustc_span::sym;
 use std::sync::OnceLock;
+
+use super::type_ids;
 
 static INIT: OnceLock<KnownItems> = OnceLock::new();
 
@@ -50,326 +51,30 @@ struct KnownItems {
     map: IndexMap<Box<str>, DefId>,
 }
 
-static TYPES: OnceLock<Types> = OnceLock::new();
-
-/// Resolved `DefId`s of well-known std *types* (ADTs), used by the ADT
-/// type-name classifiers ([`crate::api_classify::is_std_box`],
-/// [`crate::api_classify::is_std_vec`], …).  Each entry collects the
-/// std type's `DefId` (via lang/diagnostic item, or — for `NonNull`, which has
-/// neither — by name-scanning the std crates' `adts()`) *and* any same-named
-/// re-implementations in the local crate (the std-challenge suites re-implement
-/// `Vec`/`NonNull` under the same names).
-struct Types {
-    box_types: Vec<DefId>,
-    cstring_types: Vec<DefId>,
-    vec_types: Vec<DefId>,
-    nonnull_types: Vec<DefId>,
-    maybe_uninit_types: Vec<DefId>,
-    ascii_char_types: Vec<DefId>,
-    ordering_types: Vec<DefId>,
-    iter_types: Vec<DefId>,
-    rc_types: Vec<DefId>,
-    sync_primitive_types: Vec<DefId>,
-    index_range_types: Vec<DefId>,
-    /// `alloc::alloc::exchange_malloc` (`Box::new`'s lang item on toolchains
-    /// that lower `Box::new` to it) — resolved by name scan, since it has no
-    /// lang item on newer toolchains.
-    exchange_malloc: Option<DefId>,
-    /// Negative auto-trait types (`Cell`/`UnsafeCell`/`RefCell`/`Ref`/`RefMut`/
-    /// guards), keyed by short name — used by `ContainNoType` in Send/Sync obligations.
-    negative_types: IndexMap<Box<str>, Vec<DefId>>,
-}
-
-/// Short names of the std `!Send`/`!Sync` negative types resolved by name scan
-/// (those without a lang/diagnostic item).  `UnsafeCell` is resolved via its
-/// `#[lang = "unsafe_cell"]` item instead.
-const NEGATIVE_TYPE_NAMES: &[&str] = &[
-    "Cell",
-    "RefCell",
-    "Ref",
-    "RefMut",
-    "MutexGuard",
-    "RwLockWriteGuard",
-    "MappedMutexGuard",
-];
-
 pub fn init(tcx: TyCtxt) {
     INIT.get_or_init(|| init_inner(tcx));
-    TYPES.get_or_init(|| init_types(tcx));
     METHODS.get_or_init(|| init_methods(tcx));
 }
 
-fn init_types(tcx: TyCtxt) -> Types {
-    let mut types = Types {
-        box_types: Vec::new(),
-        cstring_types: Vec::new(),
-        vec_types: Vec::new(),
-        nonnull_types: Vec::new(),
-        maybe_uninit_types: Vec::new(),
-        ascii_char_types: Vec::new(),
-        ordering_types: Vec::new(),
-        iter_types: Vec::new(),
-        rc_types: Vec::new(),
-        sync_primitive_types: Vec::new(),
-        index_range_types: Vec::new(),
-        exchange_malloc: None,
-        negative_types: IndexMap::new(),
-    };
-
-    // Real std types via diagnostic/lang items (`NonNull` only before rustc
-    // 1.100, when it was still a diagnostic item).
-    types.box_types.extend(tcx.lang_items().owned_box());
-    types
-        .cstring_types
-        .extend(tcx.get_diagnostic_item(sym::cstring_type));
-    types.vec_types.extend(tcx.get_diagnostic_item(sym::Vec));
-    types.rc_types.extend(tcx.get_diagnostic_item(sym::Rc));
-    // `core::cmp::Ordering` is `#[lang = "Ordering"]`.
-    types
-        .ordering_types
-        .extend(tcx.lang_items().ordering_enum());
-    // `core::mem::MaybeUninit` is `#[lang = "maybe_uninit"]`.
-    types
-        .maybe_uninit_types
-        .extend(tcx.lang_items().maybe_uninit());
-    // `core::cell::UnsafeCell` is `#[lang = "unsafe_cell"]`.
-    if let Some(unsafe_cell) = tcx.lang_items().unsafe_cell_type() {
-        types
-            .negative_types
-            .entry("UnsafeCell".into())
-            .or_default()
-            .push(unsafe_cell);
-    }
-
-    // `core::slice::Iter` is `#[rustc_diagnostic_item = "SliceIter"]` on older
-    // toolchains (the item was dropped once `adts()` became available, so only
-    // referenced when `adts()` is absent). `slice::IterMut` has no diagnostic
-    // item, so resolve it from the self type of its `fn_defs()`-emitted methods.
-    #[cfg(not(rapx_has_public_adts))]
-    {
-        types
-            .iter_types
-            .extend(tcx.get_diagnostic_item(sym::SliceIter));
-        types
-            .nonnull_types
-            .extend(tcx.get_diagnostic_item(sym::NonNull));
-
-        for krate in rustc_public::external_crates()
-            .into_iter()
-            .filter(|k| ["core", "std", "alloc"].iter().any(|n| *n == k.name))
-        {
-            for fn_def in krate.fn_defs() {
-                let name = fn_def.name();
-                let did = rustc_internal::internal(tcx, fn_def.def_id());
-                if name.contains("::IterMut::") {
-                    if let Some(adt_did) = assoc_self_adt_did(tcx, did) {
-                        types.iter_types.push(adt_did);
-                    }
-                }
-                // `std::ascii::Char` has no diagnostic item on toolchains
-                // without `adts()`; resolve it from the self type of its
-                // methods (`core::ascii::Char::from_u8` etc.).
-                if name.contains("::Char::") {
-                    if let Some(adt_did) = assoc_self_adt_did(tcx, did) {
-                        if !types.ascii_char_types.contains(&adt_did) {
-                            types.ascii_char_types.push(adt_did);
-                        }
-                    }
-                }
-                // `alloc::alloc::exchange_malloc` (`Box::new`'s allocator on
-                // some toolchains) has no lang item on newer toolchains; resolve
-                // it by name so `Box::new`'s fresh allocation keeps provenance.
-                if name.contains("exchange_malloc") {
-                    types.exchange_malloc.get_or_insert(did);
-                }
-                // Synchronization primitives have no diagnostic/lang item, so
-                // resolve them from the self type of their methods (the
-                // `adts()`-less fallback path).
-                if is_sync_primitive_method(&name) {
-                    if let Some(adt_did) = assoc_self_adt_did(tcx, did) {
-                        if !types.sync_primitive_types.contains(&adt_did) {
-                            types.sync_primitive_types.push(adt_did);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Same-named re-implementations in the local crate (the std-challenge
-    // suites re-implement `NonNull`/`Iter`/`IterMut`). Scan local ADTs by name
-    // via `iter_local_def_id`, which works on every toolchain.
-    for local_did in tcx.iter_local_def_id() {
-        let did = local_did.to_def_id();
-        if !matches!(
-            tcx.def_kind(did),
-            rustc_hir::def::DefKind::Struct
-                | rustc_hir::def::DefKind::Enum
-                | rustc_hir::def::DefKind::Union
-        ) {
-            continue;
-        }
-        let name = tcx.def_path_str(did);
-        collect_type_by_name(&mut types, &name, did);
-    }
-
-    // External std ADTs with neither a lang nor a diagnostic item: `NonNull`
-    // on newer toolchains (it became `#[lang = "non_null"]`, which has no
-    // `LangItem` variant) and `slice::Iter`/`IterMut` (no diagnostic item).
-    // Resolve by name-scanning the std crates' `adts()`.
-    #[cfg(rapx_has_public_adts)]
-    {
-        for krate in rustc_public::external_crates()
-            .into_iter()
-            .filter(|k| ["core", "std", "alloc"].iter().any(|n| *n == k.name))
-        {
-            for adt in krate.adts() {
-                let name = adt.name();
-                let did = rustc_internal::internal(tcx, adt.def_id());
-                collect_type_by_name(&mut types, &name, did);
-            }
-        }
-    }
-
-    types
+pub fn is_len(callee: Option<DefId>) -> bool {
+    callee.is_some_and(|id| len_fns().contains(&id))
 }
 
-/// Collect `did` into the matching well-known type group by name.  Shared by the
-/// local-crate scan (`iter_local_def_id`) and the external std scan (`adts()`),
-/// which collect the *same* groups from different crates (std originals vs the
-/// std-challenge suites' re-implementations).
-fn collect_type_by_name(types: &mut Types, name: &str, did: DefId) {
-    if name.ends_with("::Vec") || name == "Vec" {
-        types.vec_types.push(did);
-    }
-    if name.ends_with("::Iter")
-        || name == "Iter"
-        || name.ends_with("::IterMut")
-        || name == "IterMut"
-    {
-        types.iter_types.push(did);
-    }
-    if name.ends_with("::NonNull") || name == "NonNull" {
-        types.nonnull_types.push(did);
-    }
-    if name.ends_with("::MaybeUninit") || name == "MaybeUninit" {
-        types.maybe_uninit_types.push(did);
-    }
-    if name.ends_with("::IndexRange") || name == "IndexRange" {
-        types.index_range_types.push(did);
-    }
-    if name.ends_with("::AsciiChar")
-        || name.ends_with("::Char")
-        || name == "AsciiChar"
-        || name == "Char"
-    {
-        types.ascii_char_types.push(did);
-    }
-    if name.ends_with("::Rc") || name == "Rc" {
-        types.rc_types.push(did);
-    }
-    let short = name.rsplit("::").next().unwrap_or(name);
-    if is_sync_primitive_short_name(short) {
-        types.sync_primitive_types.push(did);
-    }
-    if let Some(neg) = negative_type_name(short) {
-        types
-            .negative_types
-            .entry(neg.into())
-            .or_default()
-            .push(did);
-    }
+pub fn is_slice_get(callee: Option<DefId>) -> bool {
+    callee.is_some_and(|id| slice_get_fns().contains(&id))
 }
 
-/// Whether a type's short name denotes a synchronization primitive that guards
-/// its interior mutability (`Mutex`/`RwLock`/`OnceLock`/`OnceCell`/`Atomic*`).
-fn is_sync_primitive_short_name(short: &str) -> bool {
-    matches!(short, "Mutex" | "RwLock" | "OnceLock" | "OnceCell") || short.starts_with("Atomic")
-}
-
-/// The negative-type name for a short type name, if it is one of the std
-/// `!Send`/`!Sync` negative types.
-fn negative_type_name(short: &str) -> Option<&'static str> {
-    NEGATIVE_TYPE_NAMES.iter().copied().find(|&n| n == short)
-}
-
-/// Whether an `fn_def.name()` (e.g. `std::sync::Mutex::<T>::lock`) belongs to a
-/// synchronization primitive's inherent method.  Used to resolve the primitive's
-/// ADT from its methods' self type when `adts()` is unavailable.
-#[cfg(not(rapx_has_public_adts))]
-fn is_sync_primitive_method(name: &str) -> bool {
-    name.contains("::Mutex::")
-        || name.contains("::RwLock::")
-        || name.contains("::OnceLock::")
-        || name.contains("::OnceCell::")
-        || name.contains("::Atomic")
-}
-
-macro_rules! type_defs {
-    ($( $(#[$attr:meta])* $name:ident ,)+) => {
-        $(
-            $(#[$attr])*
-            pub fn $name() -> &'static [DefId] {
-                &TYPES
-                    .get()
-                    .expect("Type DefIds haven't been initialized.")
-                    .$name
-            }
-        )+
-    };
-}
-
-type_defs! {
-    /// `alloc::boxed::Box` (and any local `Box` re-implementation).
-    box_types,
-    /// `alloc::ffi::CString` (and any local `CString` re-implementation).
-    cstring_types,
-    /// `alloc::vec::Vec` (and any local `Vec` re-implementation).
-    vec_types,
-    /// `core::ptr::NonNull` (and any local `NonNull` re-implementation).
-    nonnull_types,
-    /// `core::mem::MaybeUninit` (and any local re-implementation).
-    maybe_uninit_types,
-    /// `core::ascii::Char` (`AsciiChar`, the `u8` newtype; and any local
-    /// re-implementation).
-    ascii_char_types,
-    /// `core::cmp::Ordering`.
-    ordering_types,
-    /// `core::slice::Iter` / `core::slice::IterMut` (the two-field `ptr`/`end`
-    /// slice iterators, plus any local re-implementation).
-    iter_types,
-    /// `alloc::rc::Rc` (and any local `Rc` re-implementation) — the non-atomic
-    /// reference-counted smart pointer, a `!Send`/`!Sync` negative type.
-    rc_types,
-    /// Synchronization primitives (`Mutex`/`RwLock`/`OnceLock`/`OnceCell`/`Atomic*`,
-    /// plus any local re-implementation) that guard their interior mutability, used
-    /// to discharge the `RefSend` auto-trait obligation.
-    sync_primitive_types,
-    /// `core::range::IndexRange` (and any local re-implementation).
-    index_range_types,
-}
-
-/// `alloc::alloc::exchange_malloc`, if present on this toolchain.
-pub fn exchange_malloc() -> Option<DefId> {
-    TYPES
-        .get()
-        .expect("Type DefIds haven't been initialized.")
-        .exchange_malloc
-}
-
-/// Resolve a negative-type name (as written in `std-trait-ensures.json`) to its
-/// resolved `DefId` set.  Unknown names resolve to an empty set (the checker
-/// then reports `Unknown`).
-pub fn negative_type_defs(name: &str) -> &'static [DefId] {
-    match name {
-        "Rc" => rc_types(),
-        "NonNull" => nonnull_types(),
-        _ => TYPES
-            .get()
-            .and_then(|t| t.negative_types.get(name))
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
+pub fn is_ub_check(tcx: TyCtxt<'_>, callee: DefId) -> bool {
+    if !matches!(tcx.crate_name(callee.krate).as_str(), "core" | "alloc" | "std") {
+        return false;
     }
+    let path = tcx.def_path_str(callee);
+    path.contains("ub_checks::check_language_ub")
+        || path.contains("::precondition_check")
+        || path.contains("::runtime_add_nowrap")
+        || path.contains("ub_checks::maybe_is_aligned")
+        || path.contains("ub_checks::is_valid_allocation_size")
+        || path.contains("ub_checks::maybe_is_nonoverlapping")
 }
 
 /// Resolved `DefId`s of std *methods* that are matched by *generic name* rather
@@ -400,6 +105,7 @@ struct Methods {
     slice_range_fns: Vec<DefId>,
     range_next: Vec<DefId>,
     iter_next: Vec<DefId>,
+    iterator_next_trait: Vec<DefId>,
     iter_len: Vec<DefId>,
     iter_is_empty: Vec<DefId>,
     as_ptr_like: Vec<DefId>,
@@ -410,6 +116,14 @@ struct Methods {
     null_ptr: Vec<DefId>,
     index_fns: Vec<DefId>,
     eq_fns: Vec<DefId>,
+    exchange_malloc: Option<DefId>,
+}
+
+pub fn exchange_malloc() -> Option<DefId> {
+    METHODS
+        .get()
+        .expect("Method IDs have not been initialized")
+        .exchange_malloc
 }
 
 fn init_methods(tcx: TyCtxt) -> Methods {
@@ -434,6 +148,7 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         slice_range_fns: Vec::new(),
         range_next: Vec::new(),
         iter_next: Vec::new(),
+        iterator_next_trait: Vec::new(),
         iter_len: Vec::new(),
         iter_is_empty: Vec::new(),
         as_ptr_like: Vec::new(),
@@ -444,6 +159,7 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         null_ptr: Vec::new(),
         index_fns: Vec::new(),
         eq_fns: Vec::new(),
+        exchange_malloc: None,
     };
 
     for krate in std::iter::once(rustc_public::local_crate())
@@ -453,6 +169,17 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         for fn_def in krate.fn_defs() {
             let name = fn_def.name();
             let did = rustc_internal::internal(tcx, fn_def.def_id());
+            if tcx.opt_associated_item(did).is_some_and(|item| {
+                item.name() == rustc_span::sym::next
+                    && item.trait_container(tcx).is_some_and(|trait_id| {
+                        tcx.is_diagnostic_item(rustc_span::Symbol::intern("Iterator"), trait_id)
+                    })
+            }) {
+                methods.iterator_next_trait.push(did);
+            }
+            if name.contains("exchange_malloc") {
+                methods.exchange_malloc.get_or_insert(did);
+            }
 
             // `Index::index` / `IndexMut::index_mut` (the `a[b]` indexing
             // sugar): matched by lang-item trait container, not by def_path.
@@ -562,54 +289,15 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             {
                 methods.range_next.push(did);
             }
-            // `Iter::next` / `IterMut::next` (and the `Iterator::next` trait
-            // method they forward to): the slice-iterator element accessor.
-            if name.ends_with("::next")
-                && (name.starts_with("Iter::")
-                    || name.starts_with("IterMut::")
-                    || name.contains("::Iter::")
-                    || name.contains("::IterMut::")
-                    || name.contains("::Iter<")
-                    || name.contains("::IterMut<")
-                    || name.contains("::Iterator::next"))
+            if is_slice_iter_method(tcx, did)
+                && let Some(item) = tcx.opt_associated_item(did)
             {
-                methods.iter_next.push(did);
-            }
-            // `Iter::len` / `IterMut::len` (the slice-iterator length query,
-            // computed from the ptr/end_or_len fields).
-            if name.ends_with("::len")
-                && (name.starts_with("Iter::")
-                    || name.starts_with("IterMut::")
-                    || name.contains("::Iter::")
-                    || name.contains("::IterMut::")
-                    || name.contains("::Iter<")
-                    || name.contains("::IterMut<")
-                    || name.ends_with("::Iter::len")
-                    || name.ends_with("::IterMut::len"))
-            {
-                methods.iter_len.push(did);
-            }
-            // `Iter::is_empty` / `IterMut::is_empty`.
-            if name.ends_with("::is_empty")
-                && (name.starts_with("Iter::")
-                    || name.starts_with("IterMut::")
-                    || name.contains("::Iter::")
-                    || name.contains("::IterMut::")
-                    || name.contains("::Iter<")
-                    || name.contains("::IterMut<")
-                    || name.ends_with("::Iter::is_empty")
-                    || name.ends_with("::IterMut::is_empty"))
-            {
-                methods.iter_is_empty.push(did);
-            }
-            // `as_ptr`/`as_mut_ptr`/`as_ref`/`as_mut` (and other `as_*` casts)
-            // that re-expose the pointee; used by const-byte tracing.
-            if name.contains("as_ptr") || name.contains("::as_") {
-                methods.as_ptr_like.push(did);
-            }
-            // Pointer `add` (any `::add` method).
-            if name.contains("::add") {
-                methods.ptr_add.push(did);
+                match item.name().as_str() {
+                    "next" => methods.iter_next.push(did),
+                    "len" => methods.iter_len.push(did),
+                    "is_empty" => methods.iter_is_empty.push(did),
+                    _ => {}
+                }
             }
             // `<Option<T> as Try>::branch` (the `?` operator on `Option`).
             // `branch` has no lang/diagnostic item; `Option` disambiguates it
@@ -621,23 +309,42 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             if name.ends_with("::gcd") {
                 methods.gcd.push(did);
             }
-            // Known non-null-returning pointer methods (`into_raw` / `Box::new`
-            // / `as_ptr` / `as_mut_ptr`), used by path analysis.
-            if name.contains("::into_raw")
-                || (name.contains("::new") && name.contains("Box"))
-                || name.contains("::as_mut_ptr")
-                || name.contains("::as_ptr")
-            {
-                methods.known_nonnull.push(did);
-            }
-            // Null-returning pointer methods (`null` / `null_mut`).
-            if name.contains("null_mut") || (name.contains("null") && name.contains("ptr::")) {
+            if matches!(name.as_str(), "std::ptr::null" | "std::ptr::null_mut"
+                | "core::ptr::null" | "core::ptr::null_mut"
+                | "ptr::null" | "ptr::null_mut") {
                 methods.null_ptr.push(did);
             }
         }
     }
 
+    methods.as_ptr_like = [
+        slice_as_ptr(), slice_as_mut_ptr(), str_as_ptr(), str_as_mut_ptr(),
+        vec_as_ptr(), vec_as_mut_ptr(), cstr_as_ptr(), nonnull_as_ptr(),
+        nonnull_slice_as_mut_ptr(), box_as_ptr(), box_as_mut_ptr(),
+        maybe_uninit_as_ptr(), maybe_uninit_as_mut_ptr(), arc_as_ptr(), rc_as_ptr(),
+        const_ptr_slice_as_ptr(), mut_ptr_slice_as_mut_ptr(),
+    ].into_iter().flatten().collect();
+    methods.ptr_add = [
+        const_ptr_byte_add(), mut_ptr_byte_add(), nonnull_byte_add(),
+    ].into_iter().flatten().collect();
+    methods.known_nonnull = [
+        slice_as_ptr(), slice_as_mut_ptr(), str_as_ptr(), str_as_mut_ptr(),
+        vec_as_ptr(), vec_as_mut_ptr(), cstr_as_ptr(), nonnull_as_ptr(),
+        nonnull_slice_as_mut_ptr(), box_as_ptr(), box_as_mut_ptr(),
+        maybe_uninit_as_ptr(), maybe_uninit_as_mut_ptr(), arc_as_ptr(), rc_as_ptr(),
+        box_into_raw(), cstring_into_raw(), arc_into_raw(), rc_into_raw(),
+    ].into_iter().flatten().collect();
+
     methods
+}
+
+fn is_slice_iter_method(tcx: TyCtxt<'_>, did: DefId) -> bool {
+    crate::helpers::name::get_struct_self_ty(tcx, did)
+        .and_then(|ty| match ty.kind() {
+            rustc_middle::ty::TyKind::Adt(adt, _) => Some(adt.did()),
+            _ => None,
+        })
+        .is_some_and(|adt| type_ids::iter_types().contains(&adt))
 }
 
 macro_rules! method_fns {
@@ -674,18 +381,6 @@ method_fns! {
     vec_ownership_transfer_fns => vec_ownership_transfer_fns,
 }
 
-/// The ADT `DefId` that `def_id`'s associated function belongs to (the impl's
-/// `self` type), used to resolve an ADT that has no lang/diagnostic item from
-/// one of its emitted methods (e.g. `slice::IterMut`).
-#[cfg(not(rapx_has_public_adts))]
-fn assoc_self_adt_did(tcx: TyCtxt, def_id: DefId) -> Option<DefId> {
-    let ty = crate::helpers::name::get_struct_self_ty(tcx, def_id)?;
-    match ty.kind() {
-        rustc_middle::ty::TyKind::Adt(adt, _) => Some(adt.did()),
-        _ => None,
-    }
-}
-
 method_fns! {
     checked_next_pow2_fns => checked_next_pow2,
     layout_align_fns => layout_align,
@@ -698,15 +393,16 @@ method_fns! {
     sliceindex_get_unchecked_fns => sliceindex_get_unchecked,
     slice_range_fns => slice_range_fns,
     range_next_fns => range_next,
-    /// `Iter::next` / `IterMut::next` (and the `Iterator::next` trait method).
+    /// Slice `Iter::next` / `IterMut::next`.
     iter_next_fns => iter_next,
+    iterator_next_trait_fns => iterator_next_trait,
     /// `Iter::len` / `IterMut::len`.
     iter_len_fns => iter_len,
     /// `Iter::is_empty` / `IterMut::is_empty`.
     iter_is_empty_fns => iter_is_empty,
-    /// `as_ptr`/`as_mut_ptr`/`as_ref`/`as_mut` (and other `as_*` casts).
+    /// Pointer accessors that retain the source bytes.
     as_ptr_like_fns => as_ptr_like,
-    /// Pointer `add` methods.
+    /// Byte-strided pointer `add` methods.
     ptr_add_fns => ptr_add,
     /// `<Option<T> as Try>::branch`.
     branch_fns => branch,

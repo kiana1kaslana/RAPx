@@ -4,7 +4,7 @@
 //! `assert_all` plus Euclidean-division (NIA) axioms injected for both the
 //! contract expression and the VM's computed terms.
 
-use crate::api_classify;
+use crate::verify::api_classify;
 use crate::helpers::def_use::PlaceKey;
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;

@@ -10,6 +10,29 @@
 // cascade and only the primary property is pinned).
 // ============================================================
 
+sound_tests! {
+    pointer_slot_origin_sound: "verify_units/pointer_slot_origin_1" => "sound_pointer_slot_roundtrip",
+    pointer_slot_origin_boxed: "verify_units/pointer_slot_origin_1" => "sound_boxed_pointer_slot_roundtrip",
+}
+
+unsound_weak_tests! {
+    pointer_slot_origin_overwrite: "verify_units/pointer_slot_origin_1" => "unsound_pointer_slot_overwrite" => "Allocated",
+    pointer_slot_origin_reassigned: "verify_units/pointer_slot_origin_1" => "unsound_pointer_array_reassigned" => "Allocated",
+    pointer_slot_origin_alias_overwrite: "verify_units/pointer_slot_origin_1" => "unsound_pointer_array_alias_overwrite" => "Allocated",
+}
+
+#[test]
+fn pointer_slot_origin_external_unknown() {
+    let output = run_with_args("verify_units/pointer_slot_origin_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "unknown_external_pointer_slot", "UNKNOWN");
+}
+
+#[test]
+fn pointer_slot_origin_invalid_invariant() {
+    let output = run_with_args("verify_units/pointer_slot_origin_1", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "InvalidBucket::new", "UNKNOWN");
+}
+
 // ================ Align Sound Cases =============
 sound_tests! {
     align_sound_01: "verify_units/align_sound_1"  => "sound_named_contract_binds_callsite_arg",
@@ -507,6 +530,10 @@ fn nonoverlap_sound_symbolic() {
 #[test]
 fn nonoverlap_indices() {
     let output = run_with_args("verify_units/nonoverlap_indices", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "sound_generic_array_reference", "SOUND");
+    assert_function_result(&output, "unsound_generic_array_reference_extra", "UNSOUND");
+    assert_function_result(&output, "sound_generic_array_value", "SOUND");
+    assert_function_result(&output, "unsound_generic_array_value_extra", "UNSOUND");
     assert_function_result(&output, "sound_distinct_indices", "SOUND");
     assert_function_result(&output, "unsound_duplicate_indices", "UNSOUND");
     assert_function_result(&output, "unsound_callee_assertion", "UNSOUND");
@@ -523,7 +550,9 @@ fn nonoverlap_indices() {
     assert_function_result(&output, "sound_adjacent_inclusive_ranges", "UNKNOWN");
     assert_function_result(&output, "unsound_touching_inclusive_ranges", "UNKNOWN");
     assert_function_result(&output, "sound_checked_generic_indices", "UNKNOWN");
-    assert_function_result(&output, "sound_checked_slice_iter_indices", "UNKNOWN");
+    assert_function_result(&output, "sound_checked_slice_iter_indices", "SOUND");
+    assert_function_result(&output, "sound_empty_inner_iterator", "SOUND");
+    assert_function_result(&output, "sound_enumerate_second_index", "SOUND");
     assert_function_result(&output, "sound_at_most_one_generic_index", "SOUND");
     assert_function_result(&output, "sound_range_next_indices", "SOUND");
     assert_function_result(&output, "sound_range_next_symbolic", "SOUND");

@@ -15,7 +15,7 @@ use super::state::{
     AllocId, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue,
 };
 
-use crate::api_classify;
+use crate::verify::api_classify;
 use crate::helpers::mir_utils;
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
@@ -126,7 +126,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             PropertyKind::Align => {
-                if let Some(val) = self.contract_target_value(property) {
+                if property.for_each().is_none()
+                    && let Some(val) = self.contract_target_value(property)
+                {
                     self.set_align_for_value(property, val);
                 }
                 self.record_for_each_align(property);
@@ -137,7 +139,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             PropertyKind::Owning => {
-                if let Some(val) = self.contract_target_value(property) {
+                if property.for_each().is_none()
+                    && let Some(val) = self.contract_target_value(property)
+                {
                     self.set_owning_for_value(val);
                 }
                 self.record_for_each_owning(property);
@@ -153,7 +157,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             PropertyKind::InBound => {
-                if let Some(val) = self.contract_target_value(property) {
+                if property.for_each().is_none()
+                    && let Some(val) = self.contract_target_value(property)
+                {
                     self.set_in_bounds_for_value(property, val);
                 }
                 if let Some(fe_place) = property.for_each() {
@@ -166,12 +172,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // downstream `ptr.add(n)`/`ptr.sub(n)` can discharge `InBound`
                 // against a concrete (or `i64::MAX`) size rather than the coarse
                 // `in_bounds` flag (which only covers `count == 1`).
-                if property.args().len() >= 3 {
+                if property.args().len() >= 3 && property.for_each().is_none() {
                     self.assert_allocated_fact(property);
                 }
             }
             PropertyKind::Allocated => {
-                self.assert_allocated_fact(property);
+                if property.for_each().is_none() {
+                    self.assert_allocated_fact(property);
+                }
                 self.record_for_each_allocated(property);
             }
             PropertyKind::Typed => {
@@ -195,7 +203,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     // `T/#1` vs the `T/#0` used to size the allocation),
                     // which must not clobber the original element type —
                     // doing so makes `len()` fall back to the byte size.
-                    if self.alloc(alloc_id).element_ty.is_generic() {
+                    if property.for_each().is_none()
+                        && self.alloc(alloc_id).element_ty.is_generic()
+                    {
                         self.alloc_mut(alloc_id).element_ty = ElementTy::Typed(expected_ty);
                     }
                 }
@@ -390,9 +400,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// - For a plain pointer *field* (e.g. `RawVecInner::ptr`), the allocation
     ///   is written back to the field via `set_contract_target_value`, and is
     ///   unbounded so field-subrange `InBound` checks auto-pass.
-    /// - For `ForEach`/`Downcast` targets (e.g. `buckets.iter()`), the
-    ///   container itself is not a pointer — keep the legacy whole-local
-    ///   behaviour.
+    /// - For `Downcast` targets, the legacy whole-local behaviour applies.
     fn assert_allocated_fact(&mut self, property: &Property<'tcx>) {
         let elem_ty = Self::ty_arg(property, 1);
         let count_term = property
@@ -662,7 +670,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             ContractExpr::Len(inner, method) => {
-                if method.is_some_and(|id| !api_classify::is_len(Some(id))) {
+                if method.is_some_and(|id| !crate::def_ids::other_api::is_len(Some(id))) {
                     return None;
                 }
                 let val = self.eval_contract_expr_simple_value(inner)?;

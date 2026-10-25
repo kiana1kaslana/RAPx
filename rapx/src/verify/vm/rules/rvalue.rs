@@ -14,7 +14,7 @@ use super::super::state::{
 };
 
 use crate::helpers::mir_utils;
-use crate::api_classify;
+use crate::verify::api_classify;
 
 pub(crate) fn eval_use<'z3, 'tcx>(
     state: &mut VmState<'z3, 'tcx>,

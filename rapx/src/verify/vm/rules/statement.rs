@@ -44,6 +44,11 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
     let uninit_source = source_place
         .and_then(|source| state.current_frame.local_alloc.get(&source.local))
         .is_some_and(|id| state.possible_uninit_allocs.contains(id));
+    if place.projection.is_empty()
+        && source_place.is_none_or(|source| source.local != place.local)
+    {
+        state.invalidate_pointer_array(place.local);
+    }
     let mut value = eval_rvalue(state, place, rvalue);
 
     let has_deref = place
@@ -191,7 +196,11 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
                 // struct-invariant re-proof see `self.len += 1`.)
                 if state.field_value(place.local, &field_indices).is_some() {
                     let is_iter_field = field_indices == [0];
-                    state.set_field_value(place.local, field_indices, value);
+                    let pointed = state.local_value(place.local).cloned();
+                    state.set_field_value(place.local, field_indices.clone(), value.clone());
+                    if let Some(pointed) = pointed {
+                        state.write_through_pointer(&pointed, field_indices, value);
+                    }
                     if is_iter_field {
                         state.track_iter_ptr_update(place.local);
                     }
@@ -295,6 +304,20 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Track byte-level values for index-based stores (e.g. `buf[i] = 0u8`)
     /// that `record_projected_store` skips due to Index projections.
     fn record_indexed_store(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
+        if let Some((alloc_id, index)) = self.pointer_index_target(place) {
+            let content = self.content_mut(alloc_id);
+            content.pointer_elements_modified = true;
+            let elements = &mut content.pointer_elements;
+            elements.retain(|(stored_index, _)| {
+                stored_index
+                    .simplify()
+                    .as_u64()
+                    .zip(index.simplify().as_u64())
+                    .is_some_and(|(stored, written)| stored != written)
+            });
+            elements.push((index, value.clone()));
+            return;
+        }
         if place.projection.len() == 1
             && let rustc_middle::mir::ProjectionElem::Index(index_local) = place.projection[0]
             && let rustc_middle::ty::TyKind::Array(elem_ty, _) =

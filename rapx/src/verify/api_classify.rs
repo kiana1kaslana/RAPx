@@ -9,16 +9,17 @@
 //!
 //! Every classifier takes a `DefId` — `fn(Option<DefId>) -> bool` for callee
 //! matching, or `fn(DefId) -> bool` for ADT *type* matching — and answers via
-//! exact identities from [`crate::api_ids::intrinsic_api`],
-//! [`crate::api_ids::nomir_api`], and [`crate::api_ids::other_api`]
-//! rather than substring-matching a `def_path_str`.
+//! exact identities from [`crate::def_ids::intrinsic_api`],
+//! [`crate::def_ids::nomir_api`], [`crate::def_ids::other_api`], and
+//! [`crate::def_ids::type_ids`]. Some standard-library method sets in
+//! `other_api` are collected by name patterns before being matched by `DefId`.
 
-use crate::api_ids::intrinsic_api;
-use crate::api_ids::nomir_api;
-use crate::api_ids::other_api;
+use crate::def_ids::intrinsic_api;
+use crate::def_ids::nomir_api;
+use crate::def_ids::other_api;
+use crate::def_ids::type_ids;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::Ty;
-use rustc_middle::ty::TyCtxt;
 
 /// Whether `callee` is `Some` and matches any resolved DefId in the slice.
 fn any_def(callee: Option<DefId>, defs: &[DefId]) -> bool {
@@ -146,26 +147,6 @@ pub fn is_as_ptr_valid(callee: Option<DefId>) -> bool {
 /// byte length, so the result aliases the argument.
 pub fn is_str_as_bytes(callee: Option<DefId>) -> bool {
     other_api::matches_any(callee, &[other_api::str_as_bytes()])
-}
-
-/// The whole `assert_unsafe_precondition!` machinery: the `check_language_ub`
-/// gate, the generated `precondition_check` body, and the
-/// `#[cfg(debug_assertions)]` check helpers (`runtime_add_nowrap`,
-/// `maybe_is_aligned*`, `is_valid_allocation_size`, `maybe_is_nonoverlapping`).
-///
-/// All of these are debug-only / ub-checks-gated and model release semantics
-/// (checks disabled), so they must be skipped rather than inlined: the gate
-/// folds to `false` (no check), and the body/helpers' divergence branches would
-/// otherwise leave pointer results uninitialized (e.g. `swap_unchecked`'s
-/// `ptr.add(b)` on the failed-check arm).
-pub fn is_ub_check(tcx: TyCtxt<'_>, callee: DefId) -> bool {
-    let s = tcx.def_path_str(callee);
-    s.contains("ub_checks::check_language_ub")
-        || s.contains("::precondition_check")
-        || s.contains("::runtime_add_nowrap")
-        || s.contains("ub_checks::maybe_is_aligned")
-        || s.contains("ub_checks::is_valid_allocation_size")
-        || s.contains("ub_checks::maybe_is_nonoverlapping")
 }
 
 // ── Pointer arithmetic ────────────────────────────────────────────
@@ -406,18 +387,11 @@ pub fn is_mem_copy_or_write(callee: Option<DefId>) -> bool {
 
 // ── Queries and unwrap ────────────────────────────────────────────
 
-/// Whether `callee` is a `len` query method. Matched by `DefId` via
-/// [`crate::api_ids::other_api::len_fns`], which resolves every `::len` `fn_def` in the std
-/// crates without matching same-named methods in the analyzed crate.
-pub fn is_len(callee: Option<DefId>) -> bool {
-    any_def(callee, other_api::len_fns())
-}
-
 // ── Slice / C-string ──────────────────────────────────────────────
 
 /// Whether `callee` is a `from_raw_parts` constructor (`slice`/`str`/`ptr`/
 /// `String`/`Vec`/`NonNull`). Matched by `DefId` via
-/// [`crate::api_ids::other_api::from_raw_parts_fns`] in the standard-library crates.
+/// [`crate::def_ids::other_api::from_raw_parts_fns`] in the standard-library crates.
 pub fn is_from_raw_parts(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::from_raw_parts_fns())
 }
@@ -483,7 +457,7 @@ pub fn is_exchange_malloc(callee: Option<DefId>) -> bool {
     callee.is_some_and(|c| other_api::exchange_malloc() == Some(c))
 }
 /// `Vec::with_capacity` — matched by `DefId` via
-/// [`crate::api_ids::other_api::with_capacity_fns`].
+/// [`crate::def_ids::other_api::with_capacity_fns`].
 pub fn is_vec_with_capacity(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::with_capacity_fns())
 }
@@ -624,22 +598,22 @@ pub fn is_benign_origin_use(callee: Option<DefId>) -> bool {
 // ── ADT type-name classifiers ─────────────────────────────────────
 // *Shape* recognizers used by the VM to model repr(transparent) wrappers and
 // fixed field layouts (`Vec` = ptr/cap/len, `slice::Iter` = ptr/end, …).
-// Matched by `DefId` (resolved in [`crate::api_ids::other_api`]).
+// Matched by `DefId` (resolved in [`crate::def_ids::type_ids`]).
 
 pub fn is_std_vec(def_id: DefId) -> bool {
-    other_api::vec_types().contains(&def_id)
+    type_ids::vec_types().contains(&def_id)
 }
 pub fn is_std_box(def_id: DefId) -> bool {
-    other_api::box_types().contains(&def_id)
+    type_ids::box_types().contains(&def_id)
 }
 pub fn is_std_cstring(def_id: DefId) -> bool {
-    other_api::cstring_types().contains(&def_id)
+    type_ids::cstring_types().contains(&def_id)
 }
 pub fn is_std_nonnull(def_id: DefId) -> bool {
-    other_api::nonnull_types().contains(&def_id)
+    type_ids::nonnull_types().contains(&def_id)
 }
 pub fn is_maybe_uninit_type(def_id: DefId) -> bool {
-    other_api::maybe_uninit_types().contains(&def_id)
+    type_ids::maybe_uninit_types().contains(&def_id)
 }
 
 /// Whether `ty` (peeling through `&` / `*mut` / `*const` / `[T]` / `[T; N]`) is
@@ -658,16 +632,16 @@ pub fn is_maybe_uninit_ty(ty: Ty<'_>) -> bool {
     }
 }
 pub fn is_std_iter_or_itermut(def_id: DefId) -> bool {
-    other_api::iter_types().contains(&def_id)
+    type_ids::iter_types().contains(&def_id)
 }
 pub fn is_std_ordering(def_id: DefId) -> bool {
-    other_api::ordering_types().contains(&def_id)
+    type_ids::ordering_types().contains(&def_id)
 }
 
 // ── Arithmetic / collection-operation classifiers ─────────────────
 // Matched by `DefId` via [`other_api::OP_FNS`] (resolved from `fn_defs()`).
 // These were previously name-based in the call-summary registry; see
-// [`crate::api_ids::other_api`] for the exact method-name patterns each group collects.
+// [`crate::def_ids::other_api`] for the exact method-name patterns each group collects.
 
 pub fn is_integer_wrapping_sub_method(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::integer_wrapping_sub_fns())
@@ -684,7 +658,7 @@ pub fn is_split_at(callee: Option<DefId>) -> bool {
 
 // ── Open-ended operation classifiers ──────────────────────────────
 // These match standard-library methods through the name-scanned `fn_defs()`
-// groups in [`crate::api_ids::other_api`].
+// groups in [`crate::def_ids::other_api`].
 
 pub fn is_align_to_local(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::align_to_local_fns())
@@ -697,12 +671,6 @@ pub fn is_strlen(callee: Option<DefId>) -> bool {
 }
 pub fn is_slice_get_unchecked(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::slice_get_unchecked_fns())
-}
-
-/// Whether `callee` is `<[T]>::get` / `<[T]>::get_mut` (the slice-side range
-/// getters returning `Option<&[T]>`).
-pub fn is_slice_get(callee: Option<DefId>) -> bool {
-    any_def(callee, other_api::slice_get_fns())
 }
 
 /// Whether `callee` is the `Index::index` / `IndexMut::index_mut` trait method
@@ -759,9 +727,9 @@ pub fn is_gcd(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::gcd_fns())
 }
 
-/// Whether `def_id` is `core::range::IndexRange` (or a local re-implementation).
+/// Whether `def_id` is `core::ops::index_range::IndexRange`.
 pub fn is_index_range(def_id: DefId) -> bool {
-    other_api::index_range_types().contains(&def_id)
+    type_ids::index_range_types().contains(&def_id)
 }
 
 /// Whether `callee` is `slice::range(range, bounds)` — the range normalizer that

@@ -4,7 +4,7 @@ use rustc_middle::mir::{BinOp, Operand, UnOp};
 use z3::ast::{Ast, Bool, Int};
 
 use crate::helpers::mir_utils;
-use crate::api_classify;
+use crate::verify::api_classify;
 
 use super::state::{VmState, VmValue};
 

@@ -667,7 +667,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                         // and their safety is enforced by the type system, so
                         // they never carry a JSON contract either.
                         let is_intrinsic =
-                            crate::api_ids::intrinsic_api::is_intrinsic(self.tcx, callee_def_id);
+                            crate::def_ids::intrinsic_api::is_intrinsic(self.tcx, callee_def_id);
                         let has_json_entry = is_std
                             && super::contract::json::get_std_contracts_from_json(
                                 self.tcx,

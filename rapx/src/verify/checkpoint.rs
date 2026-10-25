@@ -159,7 +159,7 @@ pub fn collect_unsafe_callsites<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> Vec<C
             if let StatementKind::Intrinsic(intrinsic) = &statement.kind {
                 let (callee, args) = match &**intrinsic {
                     NonDivergingIntrinsic::CopyNonOverlapping(copy) => (
-                        crate::api_ids::intrinsic_api::copy_nonoverlapping_id(),
+                        crate::def_ids::intrinsic_api::copy_nonoverlapping_id(),
                         vec![copy.src.clone(), copy.dst.clone(), copy.count.clone()],
                     ),
                     _ => (None, Vec::new()),

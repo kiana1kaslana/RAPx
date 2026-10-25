@@ -4,7 +4,7 @@
 //! `smt_check` "negate and prove" primitive, and size/byte-width utilities used
 //! by every checker family.
 
-use crate::api_ids::other_api;
+use crate::def_ids::type_ids;
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::contract::{
@@ -727,7 +727,7 @@ impl PropertyChecker {
                 {
                     return Some(result);
                 }
-                if method.is_some_and(|id| !crate::api_classify::is_len(Some(id))) {
+                if method.is_some_and(|id| !crate::def_ids::other_api::is_len(Some(id))) {
                     return None;
                 }
                 if let Some(ck) = checkpoint
@@ -1008,7 +1008,7 @@ impl PropertyChecker {
 /// size and alignment.
 pub(super) fn maybe_uninit_inner(ty: Ty<'_>) -> Option<Ty<'_>> {
     if let TyKind::Adt(adt_def, substs) = ty.kind()
-        && crate::api_classify::is_maybe_uninit_type(adt_def.did())
+        && crate::verify::api_classify::is_maybe_uninit_type(adt_def.did())
         && let Some(inner) = substs.first().and_then(|s| s.as_type())
     {
         return Some(inner);
@@ -1027,11 +1027,11 @@ pub(super) fn smart_pointer_pointee(ty: Ty<'_>) -> Option<Ty<'_>> {
         TyKind::RawPtr(e, _) | TyKind::Ref(_, e, _) => Some(*e),
         TyKind::Adt(adt, args) => {
             let did = adt.did();
-            if crate::api_classify::is_std_box(did)
-                || crate::api_classify::is_std_vec(did)
-                || crate::api_classify::is_std_nonnull(did)
-                || crate::api_classify::is_std_cstring(did)
-                || other_api::rc_types().contains(&did)
+            if crate::verify::api_classify::is_std_box(did)
+                || crate::verify::api_classify::is_std_vec(did)
+                || crate::verify::api_classify::is_std_nonnull(did)
+                || crate::verify::api_classify::is_std_cstring(did)
+                || type_ids::rc_types().contains(&did)
             {
                 args.types().next()
             } else {

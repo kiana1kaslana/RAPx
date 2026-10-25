@@ -10,7 +10,7 @@ use z3::{
 use crate::compat::FxHashMap;
 use crate::verify::checkpoint::Checkpoint;
 use crate::helpers::mir_utils::dep_callee_def_id;
-use crate::api_classify::is_as_ptr;
+use crate::verify::api_classify::is_as_ptr;
 use crate::verify::vm::state::{AllocId, VmState};
 use crate::verify::{
     contract::{ContractExpr, Property, PropertyArg},
@@ -169,7 +169,7 @@ impl PropertyChecker {
         //    (from_bytes_with_nul_unchecked, from_vec_with_nul_unchecked)
         //    and we can't verify all bytes, return Unknown.
         let is_strict =
-            crate::api_classify::is_cstr_unchecked_constructor(checkpoint.callee);
+            crate::verify::api_classify::is_cstr_unchecked_constructor(checkpoint.callee);
         if is_strict {
             CheckResult::Unknown(UnknownReason::Unimplemented)
         } else {

@@ -35,8 +35,8 @@ impl<'tcx> BackwardSlicer<'tcx> {
             // chain so `Allocated`/`Owning` can see the freed allocation and
             // detect a later use / second drop.
             let is_drop_call = mir_utils::dep_callee_def_id(func).is_some_and(|c| {
-                crate::api_classify::is_manually_drop_drop(Some(c))
-                    || crate::api_classify::is_std_drop(Some(c))
+                crate::verify::api_classify::is_manually_drop_drop(Some(c))
+                    || crate::verify::api_classify::is_std_drop(Some(c))
             });
             if is_drop_call {
                 items.push(RelevantItem::Terminator {

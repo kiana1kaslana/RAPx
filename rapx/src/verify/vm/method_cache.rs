@@ -5,7 +5,7 @@ use rustc_middle::{
 };
 use z3::ast::Int;
 
-use crate::{api_classify, compat::FxHashMap, helpers::mir_utils};
+use crate::{compat::FxHashMap, helpers::mir_utils, verify::api_classify};
 
 use super::state::{AllocId, VmState, VmValue};
 

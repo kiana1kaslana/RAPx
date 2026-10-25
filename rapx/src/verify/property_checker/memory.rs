@@ -7,7 +7,7 @@
 
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
-use crate::api_classify;
+use crate::verify::api_classify;
 use crate::verify::contract::{ContractExpr, Property, PropertyArg, is_static_lifetime_ident};
 use crate::verify::report::{CheckResult, UnknownReason};
 use crate::verify::vm::state::{AllocId, OffsetKind, VmState, VmValue};
@@ -187,6 +187,13 @@ impl PropertyChecker {
         let negated = value.z3_term.rem(&align_term)._eq(&zero).not();
         local.assert(&negated);
         let r = match local.check() {
+            z3::SatResult::Sat
+                if value.provenance.is_none()
+                    && value.facts.align_n.is_none()
+                    && value.z3_term.simplify().as_u64().is_none() =>
+            {
+                CheckResult::Unknown(UnknownReason::Unimplemented)
+            }
             z3::SatResult::Sat => CheckResult::Failed,
             z3::SatResult::Unsat => CheckResult::ProvedBySmt,
             z3::SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
@@ -383,7 +390,7 @@ impl PropertyChecker {
             // / `String::new`) has no heap allocation behind the reference: the
             // container value is valid and there is nothing to free, so its
             // `ValidPtr`/`Allocated` precondition holds vacuously.
-            if crate::api_classify::is_manually_drop_drop(checkpoint.callee) {
+            if crate::verify::api_classify::is_manually_drop_drop(checkpoint.callee) {
                 return CheckResult::ProvedByRule;
             }
             // A null pointer (address term 0) is definitely not backed by any
@@ -729,7 +736,7 @@ impl PropertyChecker {
                 && Self::is_value_aligned(vm_state, &value)
                 && matches!(value.ty.kind(), TyKind::RawPtr(..))
                 && !vm_state.alloc(id).facts.dead
-                && crate::api_classify::is_mem_copy_or_write(checkpoint.callee) {
+                && crate::verify::api_classify::is_mem_copy_or_write(checkpoint.callee) {
                     return CheckResult::ProvedByRule;
                 }
             let size = vm_state.allocation_size(id).clone();

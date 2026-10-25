@@ -9,7 +9,7 @@ use crate::analysis::{
     path::graph::PathGraph,
     path::{PathNode, PathTree},
 };
-use crate::api_ids::other_api::is_drop_fn;
+use crate::def_ids::other_api::is_drop_fn;
 use crate::limit::SAFEDROP_VISIT_LIMIT;
 use crate::utils::source::{get_filename, get_name};
 use rustc_middle::mir::{Operand, Place, TerminatorKind};

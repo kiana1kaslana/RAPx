@@ -9,7 +9,7 @@ use super::state::{
     AllocKind, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue,
 };
 use crate::helpers::mir_utils;
-use crate::api_classify;
+use crate::verify::api_classify;
 use crate::verify::call_summary::{BoundedArithmeticOp, CallEffect, OverflowOp};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
@@ -1519,25 +1519,24 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     return;
                 };
                 let array_term = args[0].z3_term.clone();
-                let (elem_ty, elem_size) = match args[0].ty.kind() {
+                let elem_ty = match args[0].ty.kind() {
                     TyKind::Ref(_, inner, _) => match inner.kind() {
-                        TyKind::Array(e, _) | TyKind::Slice(e) => (*e, self.size_of_ty(*e).max(1)),
-                        _ => (args[0].ty, 1),
+                        TyKind::Array(e, _) | TyKind::Slice(e) => *e,
+                        _ => args[0].ty,
                     },
-                    _ => (args[0].ty, 1),
+                    _ => args[0].ty,
                 };
                 let elem_align = self.align_sym(elem_ty);
+                let elem_size = self.size_sym(elem_ty);
                 let range_local = caller_arg_locals.get(1).copied().flatten();
                 let range_field = |idx: usize| -> Option<Int<'z3>> {
                     range_local.and_then(|l| self.field_value(l, &[idx]).map(|v| v.z3_term.clone()))
                 };
                 let zero = Int::from_u64(self.z3_ctx, 0);
                 let one = Int::from_u64(self.z3_ctx, 1);
-                let total_len = self
-                    .alloc(prov.alloc_id)
-                    .size
-                    .clone()
-                    .div(&Int::from_u64(self.z3_ctx, elem_size));
+                let total_len = self.slice_len_of_alloc(prov.alloc_id).unwrap_or_else(|| {
+                    self.alloc(prov.alloc_id).size.div(&elem_size)
+                });
                 let (start, len) = match range_kind {
                     Some(mir_utils::RangeKind::RangeTo) => (
                         zero.clone(),
@@ -1560,19 +1559,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     }
                     _ => (zero.clone(), total_len.clone()),
                 };
-                let elem_size_term = Int::from_u64(self.z3_ctx, elem_size);
-                let start_bytes = if elem_size == 1 {
-                    start.clone()
-                } else {
-                    Int::mul(self.z3_ctx, &[&start, &elem_size_term])
-                };
-                let size_bytes = if elem_size == 1 {
-                    len.clone()
-                } else {
-                    Int::mul(self.z3_ctx, &[&len, &elem_size_term])
-                };
+                let start_bytes = Int::mul(self.z3_ctx, &[&start, &elem_size]);
                 let dest_term = Int::add(self.z3_ctx, &[&array_term, &start_bytes]);
-                let (alloc_id, _) = self.allocate(size_bytes, elem_align, Some(elem_ty));
+                let (alloc_id, _) = self.allocate_slice(len, elem_size, elem_align, Some(elem_ty));
                 self.alloc_mut(alloc_id).parent = Some(prov.alloc_id);
                 self.set_local(
                     dest,

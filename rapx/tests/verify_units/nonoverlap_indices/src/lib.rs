@@ -22,6 +22,32 @@ unsafe fn use_generic_indices<const N: usize>(indices: [usize; N]) {
     let _ = indices;
 }
 
+#[rapx::requires(InBound(ptr, u32, count))]
+unsafe fn use_array_ptr(ptr: *const u32, count: usize) {
+    let _ = (ptr, count);
+}
+
+
+#[rapx::verify]
+pub fn sound_generic_array_reference<const N: usize>(values: &[u32; N]) {
+    unsafe { use_array_ptr(values.as_ptr(), N) }
+}
+
+#[rapx::verify]
+pub fn unsound_generic_array_reference_extra<const N: usize>(values: &[u32; N]) {
+    unsafe { use_array_ptr(values.as_ptr(), N + 1) }
+}
+
+#[rapx::verify]
+pub fn sound_generic_array_value<const N: usize>(values: [u32; N]) {
+    unsafe { use_array_ptr(values.as_ptr(), N) }
+}
+
+#[rapx::verify]
+pub fn unsound_generic_array_value_extra<const N: usize>(values: [u32; N]) {
+    unsafe { use_array_ptr(values.as_ptr(), N + 1) }
+}
+
 #[rapx::requires(NonOverlap(indices))]
 unsafe fn assert_disjoint_inside(indices: [usize; 2]) {
     assert!(indices[0] != indices[1]);
@@ -138,6 +164,23 @@ pub fn sound_checked_slice_iter_indices<const N: usize>(indices: [usize; N]) {
         }
     }
     unsafe { use_generic_indices(indices) }
+}
+
+#[rapx::verify]
+pub fn sound_empty_inner_iterator<const N: usize>(indices: [usize; N]) {
+    for _ in &indices[..0] {
+        unsafe { use_generic_indices(indices) }
+    }
+}
+
+#[rapx::verify]
+pub fn sound_enumerate_second_index() {
+    let indices = [0usize, 1];
+    let mut iter = indices.iter().enumerate();
+    let _ = iter.next();
+    if let Some((index, _)) = iter.next() {
+        unsafe { use_indices([0, index]) }
+    }
 }
 
 #[rapx::verify]

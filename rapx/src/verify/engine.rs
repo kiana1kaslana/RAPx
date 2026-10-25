@@ -456,8 +456,8 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 let all_single_arg = matching.iter().all(|&g| {
                                     tree.inline_binding(g).map(|b| b.arg_locals.len()) == Some(1)
                                 });
-                                let is_ptr_arith = crate::api_classify::is_pointer_add(Some(cur))
-                                    || crate::api_classify::is_pointer_sub(Some(cur));
+                                let is_ptr_arith = crate::verify::api_classify::is_pointer_add(Some(cur))
+                                    || crate::verify::api_classify::is_pointer_sub(Some(cur));
                                 if (all_single_arg || is_ptr_arith)
                                     && let Some(arg) = prev_arg
                                 {

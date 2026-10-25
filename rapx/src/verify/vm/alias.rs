@@ -9,7 +9,7 @@ use crate::helpers::mir_utils;
 use super::alias_hazard::{self, AliasProducer, HazardKind};
 use crate::analysis::alias::FieldOrigin;
 use crate::verify::checkpoint::Checkpoint;
-use crate::api_classify;
+use crate::verify::api_classify;
 use crate::helpers::def_use::PlaceKey;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand, ProjectionElem, Rvalue, StatementKind};

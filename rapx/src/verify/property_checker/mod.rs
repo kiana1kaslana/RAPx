@@ -241,6 +241,37 @@ impl PropertyChecker {
         if self.is_vacuously_true_for_nullable(vm_state, checkpoint, property) {
             return CheckResult::ProvedByRule;
         }
+        if let Property::Atom(atom) = property
+            && property.for_each().is_some()
+        {
+            let Some(alloc_id) = self
+                .target_value(vm_state, checkpoint, property)
+                .and_then(|value| value.provenance_alloc_id())
+            else {
+                return CheckResult::Unknown(UnknownReason::Unimplemented);
+            };
+            if vm_state.content(alloc_id).pointer_elements_modified {
+                return CheckResult::Unknown(UnknownReason::Unimplemented);
+            }
+            let facts = &vm_state.alloc(alloc_id).facts.for_each;
+            let expected_ty = property.args().get(1).and_then(|arg| match arg {
+                PropertyArg::Ty(ty) => Some(*ty),
+                _ => None,
+            });
+            let established = match atom.kind {
+                PropertyKind::Align => expected_ty.is_some() && facts.aligned_ty == expected_ty,
+                PropertyKind::Allocated => facts
+                    .allocated
+                    .as_ref()
+                    .is_some_and(|(ty, _)| Some(*ty) == expected_ty),
+                PropertyKind::Typed => expected_ty.is_some() && facts.target_ty == expected_ty,
+                PropertyKind::Owning => facts.owning,
+                _ => true,
+            };
+            if !established {
+                return CheckResult::Unknown(UnknownReason::Unimplemented);
+            }
+        }
         match property {
             Property::Or(_) => self.check_or(vm_state, checkpoint, property),
             Property::And(_) => self.check_and(vm_state, checkpoint, property),

@@ -7,7 +7,7 @@ use rustc_span::{kw, sym};
 use std::{collections::HashSet, fmt::Debug, hash::Hash};
 use syn::Expr;
 
-use crate::api_ids::other_api;
+use crate::def_ids::other_api;
 
 pub use super::mir_scan::get_fn_safety;
 pub use super::name::get_cleaned_def_path_name;

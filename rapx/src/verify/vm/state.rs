@@ -212,11 +212,8 @@ impl<'tcx> From<Option<Ty<'tcx>>> for ElementTy<'tcx> {
 /// Uniform facts about the *pointer elements* of a container, established by
 /// `x.iter()` for_each invariants.
 ///
-/// Each fact is a property every element pointer satisfies.  The facts are
-/// anchored to the container's allocation (not the container value) because a
-/// pointer loaded from the container resolves its provenance through this
-/// allocation, so the checker finds the fact via the loaded pointer's
-/// provenance.
+/// Each fact is a property every element pointer satisfies. The facts are
+/// anchored to the container allocation, separate from its storage layout.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ForEachFacts<'z3, 'tcx> {
     /// `Typed(iter(), T)`: every element pointer points at a valid `T`.
@@ -544,6 +541,9 @@ pub(crate) struct MemoryContent<'z3, 'tcx> {
     /// local's backing allocation and then read/write this layer.
     pub(crate) values: FxHashMap<(Ty<'tcx>, Vec<usize>), VmValue<'z3, 'tcx>>,
 
+    pub(crate) pointer_elements: Vec<(Int<'z3>, VmValue<'z3, 'tcx>)>,
+    pub(crate) pointer_elements_modified: bool,
+
     /// Content facts (`initialized`/`cstr_trusted`/`utf8_trusted`/
     /// `split_transmute_to`); value-level facts live on each [`VmValue::facts`].
     pub(crate) facts: ContentFacts<'tcx>,
@@ -776,6 +776,21 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         self.possible_uninit_allocs.remove(&alloc_id);
         let view_ty = self.body().local_decls[local].ty;
         self.store_value(alloc_id, view_ty, vec![], value);
+    }
+
+    pub(crate) fn invalidate_pointer_array(&mut self, local: Local) {
+        let view_ty = self.body().local_decls[local].ty;
+        if let rustc_middle::ty::TyKind::Array(element_ty, _) = view_ty.kind()
+            && matches!(element_ty.kind(), rustc_middle::ty::TyKind::RawPtr(..))
+            && let Some(&alloc_id) = self.current_frame.local_alloc.get(&local)
+        {
+            let content = self.content_mut(alloc_id);
+            content.pointer_elements.clear();
+            content.pointer_elements_modified = true;
+            content
+                .values
+                .retain(|(ty, path), _| *ty != view_ty || path.is_empty());
+        }
     }
 
     /// Mark a value as initialized (written), and sync its backing allocation's
@@ -1197,6 +1212,65 @@ impl std::fmt::Debug for VmState<'_, '_> {
 // ── Shared value extraction ──────────────────────────────────────
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
+    pub(crate) fn pointer_index_target(
+        &self,
+        place: &Place<'tcx>,
+    ) -> Option<(AllocId, Int<'z3>)> {
+        let element_ty = place.ty(self.body(), self.tcx).ty;
+        if !matches!(element_ty.kind(), rustc_middle::ty::TyKind::RawPtr(..)) {
+            return None;
+        }
+        let index = match place.projection.last()? {
+            ProjectionElem::Index(local) => self.local_value(*local)?.z3_term.clone(),
+            ProjectionElem::ConstantIndex {
+                offset,
+                from_end: false,
+                ..
+            } => Int::from_u64(self.z3_ctx, *offset),
+            _ => return None,
+        };
+        if place.projection[..place.projection.len() - 1]
+            .iter()
+            .any(|projection| {
+                !matches!(
+                    projection.kind(),
+                    ProjectionElem::Field(..)
+                        | ProjectionElem::Deref
+                        | ProjectionElem::Downcast(..)
+                )
+            })
+        {
+            return None;
+        }
+        let fields = place.projection[..place.projection.len() - 1]
+            .iter()
+            .filter_map(|projection| match projection.kind() {
+                ProjectionElem::Field(field, _) => Some(field.as_usize()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let alloc_id = if fields.is_empty() {
+            self.local_value(place.local)
+                .and_then(|value| value.provenance_alloc_id())
+                .or_else(|| self.current_frame.local_alloc.get(&place.local).copied())?
+        } else {
+            self.field_value(place.local, &fields)?
+                .provenance_alloc_id()?
+        };
+        let stored_ty = self.alloc(alloc_id).element_ty.as_ty()?;
+        let matches_element = stored_ty == element_ty
+            || matches!(stored_ty.kind(), rustc_middle::ty::TyKind::Array(ty, _) if *ty == element_ty);
+        matches_element.then_some((alloc_id, index))
+    }
+
+    fn stored_pointer_element(&self, place: &Place<'tcx>) -> Option<VmValue<'z3, 'tcx>> {
+        let (alloc_id, index) = self.pointer_index_target(place)?;
+        self.content(alloc_id)
+            .pointer_elements
+            .iter()
+            .find_map(|(stored_index, value)| (index == *stored_index).then(|| value.clone()))
+    }
+
     /// Extract a VmValue from a MIR operand.
     pub(crate) fn value_of_operand(&self, operand: &Operand<'tcx>) -> VmValue<'z3, 'tcx> {
         match operand {
@@ -1328,6 +1402,23 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return self.local_value(place.local).cloned();
         }
         let place_ty = place.ty(self.body(), self.tcx).ty;
+        let indexed_pointer = matches!(place_ty.kind(), rustc_middle::ty::TyKind::RawPtr(..))
+            && place.projection.last().is_some_and(|projection| {
+                matches!(
+                    projection.kind(),
+                    ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. }
+                )
+            });
+        if indexed_pointer {
+            if let Some(value) = self.stored_pointer_element(place) {
+                return Some(value);
+            }
+            if self.pointer_index_target(place).is_some_and(|(alloc_id, _)| {
+                !self.content(alloc_id).pointer_elements.is_empty()
+            }) {
+                return Some(self.unknown_value_for_place(place));
+            }
+        }
         if let Some(ProjectionElem::Index(index_local)) = place.projection.last()
             && place.projection[..place.projection.len() - 1]
                 .iter()
@@ -1347,6 +1438,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             if let Some(value) = self.field_value(place.local, &path) {
                 return Some(value.clone());
             }
+        }
+        if indexed_pointer {
+            return Some(self.unknown_value_for_place(place));
         }
         if place.projection.len() == 1
             && matches!(place.projection[0], ProjectionElem::Deref)

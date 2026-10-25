@@ -93,7 +93,7 @@ pub(crate) fn visit<'tcx>(
     // is available for the contract obligation.
     if !relevant.need_len.is_empty() {
         let callee = mir_utils::dep_callee_def_id(func);
-        if crate::api_classify::is_len(callee)
+        if crate::def_ids::other_api::is_len(callee)
             && let Some(first) = args.first() {
                 let arg_place = mir_utils::operand_place(&first.node);
                 if let Some(arg_key) = arg_place {

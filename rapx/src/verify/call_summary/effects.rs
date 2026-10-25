@@ -15,10 +15,10 @@ use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 use super::{
     BoundedArithmeticOp, CallDependencySummary, CallEffect, CallEffectSummary, OverflowOp,
 };
-use crate::api_ids::{intrinsic_api, nomir_api};
-use crate::api_ids::other_api;
+use crate::def_ids::{intrinsic_api, nomir_api};
+use crate::def_ids::other_api;
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
-use crate::api_classify;
+use crate::verify::api_classify;
 
 // ── Context for effect builders ────────────────────────────────────────
 

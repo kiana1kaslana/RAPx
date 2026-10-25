@@ -6,7 +6,7 @@ use z3::ast::Int;
 
 use crate::compat::FxHashMap;
 use crate::helpers::mir_utils;
-use crate::api_classify;
+use crate::verify::api_classify;
 
 use super::state::{AllocId, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
@@ -292,26 +292,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let elem_size = self.size_of_ty(*elem_ty);
         let step = (elem_size.max(1)) as usize;
         let align = self.align_sym(*elem_ty);
-        // Symbolic-aware element size: a generic `T` gets `sizeof_T` (≥ 1) so the
-        // allocation is `N·sizeof_T` bytes, not `N`.
         let elem_sym = self.size_sym(*elem_ty);
-        let n_term = match n {
-            Some(v) => Int::from_u64(self.z3_ctx, v as u64),
-            None => {
-                let const_text = format!("Ty({:?}, {:?})", self.tcx.types.usize, const_len);
-                let name = format!("const_{}", const_text.replace([':', '#', ' '], "_"));
-                Int::new_const(self.z3_ctx, name.as_str())
-            }
-        };
-        let (alloc_id, base) = if let Some(n) = n {
-            let total = Int::mul(self.z3_ctx, &[&Int::from_u64(self.z3_ctx, n as u64), &elem_sym]);
-            self.allocate(total, align.clone(), Some(*elem_ty))
-        } else {
-            // Generic N: unbounded external allocation
-            let max_size = Int::from_u64(self.z3_ctx, i64::MAX as u64);
-            self.allocate_external(max_size, align, Some(*elem_ty))
-        };
-        self.alloc_mut(alloc_id).set_slice_len(n_term);
+        let n_term = self.const_len_term(const_len);
+        let (alloc_id, base) = self.allocate_slice(n_term, elem_sym, align, Some(*elem_ty));
         self.content_mut(alloc_id).facts.initialized = true;
         self.current_frame.local_alloc.insert(local, alloc_id);
         invariants.init = true;
@@ -453,16 +436,18 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // Non-slice reference: allocate pointee.  A generic `T` yields
         // `sizeof_T`; a struct with a generic field is summed (`struct_size_sym`)
         // so a field reference can be discharged.
-        let pointee_align = self.align_sym(pointee_ty);
-        let pointee_size_term = self
-            .struct_size_sym(pointee_ty)
-            .unwrap_or_else(|| self.size_sym(pointee_ty));
-        let (pointee_alloc_id, pointee_base) =
-            self.allocate(pointee_size_term, pointee_align, Some(pointee_ty));
-        if let rustc_middle::ty::TyKind::Array(_, const_len) = pointee_ty.kind() {
+        let (pointee_alloc_id, pointee_base) = if let rustc_middle::ty::TyKind::Array(elem_ty, const_len) = pointee_ty.kind() {
             let n = self.const_len_term(const_len);
-            self.alloc_mut(pointee_alloc_id).set_slice_len(n);
-        }
+            let elem_size = self.size_sym(*elem_ty);
+            let elem_align = self.align_sym(*elem_ty);
+            self.allocate_slice(n, elem_size, elem_align, Some(*elem_ty))
+        } else {
+            let pointee_align = self.align_sym(pointee_ty);
+            let pointee_size_term = self
+                .struct_size_sym(pointee_ty)
+                .unwrap_or_else(|| self.size_sym(pointee_ty));
+            self.allocate(pointee_size_term, pointee_align, Some(pointee_ty))
+        };
         if !pointee_is_maybe_uninit {
             self.content_mut(pointee_alloc_id).facts.initialized = true;
         }

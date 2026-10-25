@@ -95,11 +95,11 @@ impl PropertyChecker {
                     // MaybeUninit<T> accessed via raw pointer from as_mut_ptr:
                     // treat as T for write ops where caller will initialize it.
                     if let TyKind::Adt(adt_def, substs) = elem_ty.kind()
-                        && crate::api_classify::is_maybe_uninit_type(adt_def.did())
+                        && crate::verify::api_classify::is_maybe_uninit_type(adt_def.did())
                             && matches!(value.ty.kind(), TyKind::RawPtr(..))
                             && let Some(inner) = substs.first().and_then(|s| s.as_type())
                                 && inner == expected_ty
-                                    && crate::api_classify::is_mem_copy_or_write(
+                                    && crate::verify::api_classify::is_mem_copy_or_write(
                                         checkpoint.callee,
                                     ) {
                                         return CheckResult::ProvedByRule;
@@ -234,7 +234,7 @@ impl PropertyChecker {
     }
 
     pub(super) fn ty_is_maybe_uninit(ty: Ty<'_>) -> bool {
-        crate::api_classify::is_maybe_uninit_ty(ty)
+        crate::verify::api_classify::is_maybe_uninit_ty(ty)
     }
 
     pub(super) fn check_size<'z3, 'tcx>(

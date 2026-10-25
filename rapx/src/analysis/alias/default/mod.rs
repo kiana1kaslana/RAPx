@@ -9,7 +9,7 @@ use super::{AliasAnalysis, AliasPair, FnAliasMap, FnAliasPairs};
 use crate::compat::FxHashMap;
 use crate::{
     analysis::{Analysis, path::default::PathAnalyzer},
-    api_ids::other_api::*,
+    def_ids::other_api::*,
     limit::ALIAS_VISIT_LIMIT,
     utils::source::*,
 };

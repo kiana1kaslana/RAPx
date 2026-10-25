@@ -6,7 +6,7 @@
 
 use crate::verify::checkpoint::Checkpoint;
 use crate::helpers::mir_utils;
-use crate::api_classify;
+use crate::verify::api_classify;
 use crate::verify::contract::{
     ContractExpr, NumericBinOp, PlaceBase, Property, PropertyArg, RelOp,
 };
@@ -511,8 +511,10 @@ impl PropertyChecker {
         else {
             let solver = Solver::new(vm_state.z3_ctx);
             vm_state.assert_all(&solver);
-            if solver.check() != SatResult::Sat {
-                return CheckResult::Unknown(UnknownReason::Unimplemented);
+            match solver.check() {
+                SatResult::Unsat => return CheckResult::ProvedBySmt,
+                SatResult::Unknown => return CheckResult::Unknown(UnknownReason::SmtTimeout),
+                SatResult::Sat => {}
             }
             let n = vm_state.const_len_term(len);
             solver.assert(&n.ge(&Int::from_u64(vm_state.z3_ctx, 2)));
@@ -579,8 +581,10 @@ impl PropertyChecker {
         };
         let solver = Solver::new(vm_state.z3_ctx);
         vm_state.assert_all(&solver);
-        if solver.check() == SatResult::Unsat {
-            return CheckResult::Unknown(UnknownReason::Unimplemented);
+        match solver.check() {
+            SatResult::Unsat => return CheckResult::ProvedBySmt,
+            SatResult::Unknown => return CheckResult::Unknown(UnknownReason::SmtTimeout),
+            SatResult::Sat => {}
         }
         for (i, (left_start, left_end)) in elements.iter().enumerate() {
             for (right_start, right_end) in elements.iter().skip(i + 1) {

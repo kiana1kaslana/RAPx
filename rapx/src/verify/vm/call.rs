@@ -17,7 +17,7 @@ use z3::{SatResult, Solver};
 use crate::compat::{FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
-use crate::api_classify;
+use crate::verify::api_classify;
 use crate::verify::call_summary;
 use super::state::{AllocId, MemoryContent, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
@@ -59,7 +59,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         // semantics; bind them to `false` so their branchy panic bodies are not
         // inlined (which would otherwise recurse to the depth limit).
         if let Some(c) = callee
-            && api_classify::is_ub_check(self.tcx, c)
+            && crate::def_ids::other_api::is_ub_check(self.tcx, c)
         {
             let dest_ty = self.body().local_decls[destination].ty;
             self.set_local(
@@ -75,13 +75,19 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
 
         // Registry summary, else the transparent-deref / unknown fallback.
-        let summary = crate::verify::call_summary::effects::lookup_effect(
-            self.tcx,
-            caller_def_id,
-            callee,
-            func,
-            destination,
-        ).or_else(|| call_summary::effects::effect_summary(self.tcx, func));
+        let summary = if callee.is_some_and(|id| {
+            crate::def_ids::other_api::iterator_next_trait_fns().contains(&id)
+        }) && arg_values.first().is_some_and(|value| self.is_slice_iter_next_receiver(value)) {
+            Some(vec![call_summary::CallEffect::ReturnIterNext])
+        } else {
+            crate::verify::call_summary::effects::lookup_effect(
+                self.tcx,
+                caller_def_id,
+                callee,
+                func,
+                destination,
+            ).or_else(|| call_summary::effects::effect_summary(self.tcx, func))
+        };
 
         if let Some(effects) = summary {
             for effect in &effects {
@@ -379,7 +385,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 && destination.local == p.local
                 && destination.projection.is_empty()
                 && let Some(callee) = mir_utils::dep_callee_def_id(func)
-                && api_classify::is_ub_check(self.tcx, callee)
+                && crate::def_ids::other_api::is_ub_check(self.tcx, callee)
             {
                 return Some(0);
             }
@@ -907,6 +913,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             self.inline.deferred_field_writes.push((local, path, value));
         } else if let Some(local) = self.find_local_by_address(&pointer.z3_term) {
             if path.is_empty() {
+                self.invalidate_pointer_array(local);
                 self.set_local(local, value);
             } else {
                 self.set_field_value(local, path, value);
@@ -926,6 +933,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             if let Some(referent) = outer_referent {
                 self.inline.deferred_field_writes.push((referent, path, value));
             } else if path.is_empty() {
+                self.invalidate_pointer_array(local);
                 self.set_local(local, value);
             } else {
                 self.set_field_value(local, path, value);
@@ -1059,6 +1067,33 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             },
             _ => None,
         }
+    }
+
+    fn is_slice_iter_next_receiver(&self, receiver: &VmValue<'z3, 'tcx>) -> bool {
+        let Some(local) = self.find_iter_self_local(receiver) else {
+            return false;
+        };
+        if self.iter_ptr_end(local).is_none() {
+            return false;
+        }
+        let Some(value) = self.local_value(local) else {
+            return false;
+        };
+        let ty = match value.ty.kind() {
+            TyKind::Ref(_, inner, _) => *inner,
+            _ => value.ty,
+        };
+        let TyKind::Adt(adt, args) = ty.kind() else {
+            return false;
+        };
+        if api_classify::is_std_iter_or_itermut(adt.did()) {
+            return true;
+        }
+        self.tcx.is_diagnostic_item(rustc_span::Symbol::intern("Enumerate"), adt.did())
+            && args.types().next().is_some_and(|inner| {
+                matches!(inner.kind(), TyKind::Adt(iter, _)
+                    if api_classify::is_std_iter_or_itermut(iter.did()))
+            })
     }
 
     /// Apply a `ReturnRange` effect: model `slice::range(range, bounds)`

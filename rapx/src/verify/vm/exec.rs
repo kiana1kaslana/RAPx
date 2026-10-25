@@ -20,7 +20,7 @@ use super::state::{
 };
 
 use crate::helpers::mir_utils;
-use crate::api_classify;
+use crate::verify::api_classify;
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Execute all retained MIR items in path order.
@@ -171,7 +171,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         for (callee_param, fields, fv) in arg_fields {
             self.set_field_value(Local::from_usize(callee_param), fields, fv);
         }
-
         self.caller_frames.push(frame);
     }
 

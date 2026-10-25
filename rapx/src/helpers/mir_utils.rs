@@ -33,7 +33,8 @@ use std::collections::HashSet;
 use crate::compat::SkipNormWip;
 
 use crate::compat::FxHashMap;
-use crate::api_ids::other_api;
+use crate::def_ids::other_api;
+use crate::def_ids::type_ids;
 
 use super::def_use::PlaceKey;
 
@@ -42,7 +43,7 @@ pub(crate) fn pointee_ty<'tcx>(ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
         TyKind::RawPtr(ty, _) | TyKind::Ref(_, ty, _) => Some(*ty),
         // `NonNull<T>` is a raw-pointer wrapper; unwrap it so pointer-arith
         // effects (`NonNull::add`/`sub`/`offset`) keep their provenance.
-        TyKind::Adt(adt, args) if other_api::nonnull_types().contains(&adt.did()) => {
+        TyKind::Adt(adt, args) if type_ids::nonnull_types().contains(&adt.did()) => {
             args.types().next()
         }
         _ => None,
