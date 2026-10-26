@@ -27,7 +27,7 @@
       "args": [
         "$self.buf.inner.ptr",
         "$elem",
-        "$self.buf.inner.cap"
+        "$self.buf.inner.cap.0"
       ]
     },
     {
@@ -39,7 +39,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "$self.len <= $self.buf.inner.cap"
+        "$self.len <= $self.buf.inner.cap.0"
       ]
     }
   ],
@@ -55,7 +55,7 @@
       "args": [
         "$self.vec.buf.inner.ptr",
         "u8",
-        "$self.vec.buf.inner.cap"
+        "$self.vec.buf.inner.cap.0"
       ]
     },
     {
@@ -67,7 +67,7 @@
     {
       "tag": "ValidNum",
       "args": [
-        "$self.vec.len <= $self.vec.buf.inner.cap"
+        "$self.vec.len <= $self.vec.buf.inner.cap.0"
       ]
     }
   ],

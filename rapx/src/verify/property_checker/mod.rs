@@ -209,6 +209,7 @@ impl PropertyChecker {
         vm_state: &VmState<'z3, 'tcx>,
         checkpoint: &Checkpoint<'tcx>,
         property: &Property<'tcx>,
+        structural: bool,
     ) -> CheckResult {
         if vm_state.path_infeasible {
             return CheckResult::ProvedByRule;
@@ -216,7 +217,19 @@ impl PropertyChecker {
         if vm_state.unsupported_mir {
             return CheckResult::Unknown(UnknownReason::UnsupportedMir);
         }
-        self.check_inner(vm_state, checkpoint, property)
+        let result = self.check_inner(vm_state, checkpoint, property);
+        if !structural || result.is_proved() {
+            return result;
+        }
+        let reachability = z3::Solver::new(vm_state.z3_ctx);
+        for assertion in &vm_state.constraints.assertions {
+            reachability.assert(assertion);
+        }
+        if reachability.check() == z3::SatResult::Unsat {
+            CheckResult::ProvedBySmt
+        } else {
+            result
+        }
     }
 
     fn check_inner<'z3, 'tcx>(

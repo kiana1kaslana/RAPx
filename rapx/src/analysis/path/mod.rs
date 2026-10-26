@@ -39,8 +39,8 @@ pub fn format_path_annotated(path: &[usize], graph: &PathGraph<'_>) -> String {
 /// # Invariants
 /// - All paths inserted into a given tree start with the same root block
 ///   (by construction, block 0 — the CFG entry).
-/// - A path is only stored if it passed reachability filtering
-///   (see [`PathGraph::check_transition`]).
+/// - Reachability is filtered during standard enumeration; verification can
+///   retain structural CFG paths and check feasibility in the symbolic VM.
 #[derive(Debug, Clone)]
 pub struct PathTree {
     root: Option<PathNode>,
@@ -61,6 +61,7 @@ pub struct PathTree {
     /// Set when enumeration stopped at a path or depth limit, so the tree
     /// holds only some of the paths.
     truncated: bool,
+    structural: bool,
 }
 
 /// A node in a [`PathTree`] trie.
@@ -100,6 +101,7 @@ impl PathTree {
             inline_parents: FxHashMap::default(),
             inlined_call_blocks: FxHashSet::default(),
             truncated: false,
+            structural: false,
         }
     }
 
@@ -109,6 +111,14 @@ impl PathTree {
 
     pub fn is_truncated(&self) -> bool {
         self.truncated
+    }
+
+    pub fn is_structural(&self) -> bool {
+        self.structural
+    }
+
+    pub fn mark_structural(&mut self) {
+        self.structural = true;
     }
 
     pub fn mark_truncated(&mut self) {
@@ -273,6 +283,7 @@ impl PathTree {
         sub.inline_parents = self.inline_parents.clone();
         sub.inlined_call_blocks = self.inlined_call_blocks.clone();
         sub.truncated = self.truncated;
+        sub.structural = self.structural;
         let _ = self.walk_prefixes(target_block, &mut |prefix| {
             sub.insert(prefix);
             true

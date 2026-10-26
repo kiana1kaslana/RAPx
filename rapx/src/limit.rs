@@ -64,6 +64,7 @@ pub(crate) const SCC_MAX_PATH_LEN: usize = 200;
 /// path-graph size. Cross-crate callees are exempt — they are inlined a single
 /// level and never recursed into, so their size is not bounded here.
 pub(crate) const LOCAL_INLINE_BLOCK_LIMIT: usize = 32;
+pub(crate) const HINTED_INLINE_BLOCK_LIMIT: usize = 128;
 
 /// Recursion depth bound for runtime inlining
 /// ([`crate::verify::vm::call::exec_inline_call`]). Recursive inlining unwinds
@@ -101,6 +102,8 @@ pub(crate) fn trait_impl_limit() -> usize {
 /// Lower it to speed up verification at the cost of loop sensitivity (bugs that
 /// only manifest after more iterations can be missed).
 pub(crate) const MAX_AUTO_REPEAT: usize = 8;
+
+pub(crate) const MAX_EXACT_RANGE_REPEAT: usize = 32;
 
 /// Fallback loop-carried distance used when a sink is loop-sensitive but the
 /// local transfer graph is too imprecise to calculate a better distance.

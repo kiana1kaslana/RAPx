@@ -69,6 +69,7 @@ fn run_with_args(dir: &str, args: &[&str]) -> String {
 
     let mut command = cargo_rapx_command();
     command.args(args);
+    command.env("CARGO_TERM_COLOR", "never");
     // CI can lower the path cap via `VERIFY_PATH_LIMIT` to speed up the
     // full regression suite (paths past the cap are treated as proved).
     if args.first() == Some(&"verify") {

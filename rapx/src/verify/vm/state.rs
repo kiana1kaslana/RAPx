@@ -10,7 +10,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::{
     mir::{Body, ConstValue, Local, Operand, Place, ProjectionElem},
-    ty::{Region, Ty, TyCtxt},
+    ty::{Region, Ty, TyCtxt, TyKind},
 };
 use z3::{
     Context, SatResult, Solver,
@@ -268,6 +268,7 @@ pub(crate) struct ContentFacts<'tcx> {
     /// Stays `false` for uninitialized memory (`Box::new_uninit`,
     /// `MaybeUninit::uninit`).
     pub initialized: bool,
+    pub written_pointee_ty: Option<Ty<'tcx>>,
 
     /// Whether this allocation was asserted valid C string via a `ValidCStr`
     /// contract fact / struct invariant (the "no interior NUL + terminal NUL"
@@ -546,6 +547,7 @@ pub(crate) struct MemoryContent<'z3, 'tcx> {
 
     pub(crate) indexed_elements: Vec<(Int<'z3>, VmValue<'z3, 'tcx>)>,
     pub(crate) indexed_elements_modified: bool,
+    pub(crate) copied_prefix: Option<(Ty<'tcx>, Int<'z3>)>,
 
     /// Content facts (`initialized`/`cstr_trusted`/`utf8_trusted`/
     /// `split_transmute_to`); value-level facts live on each [`VmValue::facts`].
@@ -781,6 +783,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let alloc_id = self.current_frame.local_alloc[&local];
         self.possible_uninit_allocs.remove(&alloc_id);
         let view_ty = self.body().local_decls[local].ty;
+        if matches!(view_ty.kind(), TyKind::Adt(def, _)
+            if crate::verify::api_classify::is_maybe_uninit_type(def.did()))
+        {
+            self.clear_write_evidence(alloc_id);
+        }
         self.store_value(alloc_id, view_ty, vec![], value);
     }
 

@@ -292,6 +292,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
         if concrete && value_size > 0 {
             self.content_mut(alloc_id).facts.initialized = true;
+            if byte_offset == 0
+                && self.alloc(alloc_id).element_ty.as_ty().is_some_and(|ty| {
+                    matches!(ty.kind(), rustc_middle::ty::TyKind::Adt(def, args)
+                        if crate::verify::api_classify::is_maybe_uninit_type(def.did())
+                        && args.first().and_then(|arg| arg.as_type()) == Some(value_ty))
+                })
+            {
+                self.content_mut(alloc_id).facts.written_pointee_ty = Some(value_ty);
+            }
 
             let is_u8_write = matches!(
                 value_ty.kind(),

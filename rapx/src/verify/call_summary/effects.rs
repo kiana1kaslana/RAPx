@@ -96,6 +96,7 @@ static REGISTRY: &[Entry] = &[
     ),
     ED!(intrinsic_api::is_raw_eq, eff_raw_eq),
     ED!(intrinsic_api::is_exact_div, eff_exact_div),
+    ED!(intrinsic_api::is_size_of_val, eff_size_of_val),
     ED!(api_classify::is_intrinsic_pure_opaque, eff_opaque_return),
     // ── Allocation and capacity effects ─────────────────────────────
     ED!(api_classify::is_vec_alloc_constructor, eff_new_allocation),
@@ -180,7 +181,7 @@ pub(crate) fn intrinsic_dependency_summary<'tcx>(
         return None;
     }
     let modeled = lookup_effect(tcx, caller, callee, func, destination);
-    let write_args = if let Some(effects) = modeled {
+    let write_args: Vec<usize> = if let Some(ref effects) = modeled {
         effects
             .iter()
             .flat_map(CallEffect::written_args)
@@ -204,9 +205,19 @@ pub(crate) fn intrinsic_dependency_summary<'tcx>(
             })
             .collect()
     };
+    let write_inputs = if let Some(ref effects) = modeled {
+        effects
+            .iter()
+            .flat_map(CallEffect::write_inputs)
+            .filter(|arg| *arg < arg_count)
+            .collect()
+    } else {
+        write_args.clone()
+    };
     Some(CallDependencySummary {
         return_depends_on_args: (0..arg_count).collect(),
         write_args,
+        write_inputs,
     })
 }
 
@@ -244,6 +255,10 @@ fn eff_return_arg_value(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 fn eff_opaque_return(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnOpaque]
+}
+
+fn eff_size_of_val(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnSizeOfVal { arg: 0 }]
 }
 
 fn eff_raw_eq(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

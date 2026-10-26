@@ -122,7 +122,9 @@ impl<'tcx> VerifyEngine<'tcx> {
 
             let vm_state = self.vm.run(&z3_ctx, self.tcx, wrapped);
 
-            let result = self.checker.check(&vm_state, checkpoint, &bound_property);
+            let result = self
+                .checker
+                .check(&vm_state, checkpoint, &bound_property, tree.is_structural());
             results.push((result, path_desc));
         }
 
@@ -724,7 +726,9 @@ impl<'tcx> VerifyEngine<'tcx> {
                 is_mut_ref: false,
                 statement_index: 0,
             };
-            let result = self.checker.check(&vm_state, &fake_checkpoint, invariant);
+            let result = self
+                .checker
+                .check(&vm_state, &fake_checkpoint, invariant, tree.is_structural());
             results.push((result, path_desc));
         }
 

@@ -124,12 +124,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         self.constraints.assertions.push(quot.ge(&zero));
         // Direct inequality: (lhs/rhs)*rhs <= lhs
         self.constraints.assertions.push(mul_term.le(lhs));
-        // Quotient strict bound: for rhs >= 2 and lhs >= 2,
-        // quot + 1 <= lhs (hence quot < lhs). E.g. X/2 < X for X>1.
         if rhs.as_u64().is_some_and(|r| r >= 2) {
             let one = Int::from_u64(self.z3_ctx, 1);
             let qp1 = Int::add(self.z3_ctx, &[quot, &one]);
-            self.constraints.assertions.push(qp1.le(lhs));
+            self.constraints.assertions.push(lhs.ge(&one).implies(&qp1.le(lhs)));
         } else {
             // For rhs >= 1: quot <= lhs
             if rhs.as_u64().is_some_and(|r| r >= 1) {

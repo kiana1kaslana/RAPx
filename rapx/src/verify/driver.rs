@@ -6,11 +6,11 @@
 //! struct invariants) and delegates the actual backward/forward/SMT work to
 //! the shared `VerifyEngine`.
 
-use crate::helpers::mir_utils;
 use crate::analysis::Analysis;
 use crate::analysis::path::PathTree;
 use crate::cli::VerifyMode;
 use crate::helpers::fn_info::{FnKind, get_cons, get_mutated_fields, get_muts, get_type};
+use crate::helpers::mir_utils;
 use crate::verify::contract::PropertyKind;
 use crate::verify::property_checker::{
     atomic_update_check, contain_no_type_check, field_invariant_check, no_internal_mut_check,
@@ -107,11 +107,10 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
 
             let unresolved_call = view.checkpoint.kind == CheckpointKind::UnsafeCall
                 && view.checkpoint.callee.is_none();
-            let unmodeled_intrinsic =
-                crate::verify::call_summary::effects::is_unmodeled_intrinsic(
-                    self.tcx,
-                    view.checkpoint.callee,
-                );
+            let unmodeled_intrinsic = crate::verify::call_summary::effects::is_unmodeled_intrinsic(
+                self.tcx,
+                view.checkpoint.callee,
+            );
             if unresolved_call || unmodeled_intrinsic {
                 view_results.push(PropertyCheckResult {
                     checkpoint: view.checkpoint.location(),
@@ -198,8 +197,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                         view.checkpoint.callee,
                     ) =>
             {
-                self.engine
-                    .check_drop_from_tree(view.tree, view.checkpoint)
+                self.engine.check_drop_from_tree(view.tree, view.checkpoint)
             }
             Property::Atom(_) => self.engine.check_callsite_from_tree(
                 view.tree,
@@ -320,14 +318,13 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         report
     }
 
-    /// Verify built-in type invariants (e.g. the synthesized slice invariant)
-    /// at every path endpoint. Assumes them at entry (as `ContractFact`s) and
-    /// re-proves them at the end of each path, so a mutation that breaks the
-    /// invariant is caught even without a user-written invariant annotation.
+    /// Verify built-in type invariants for targets with checkable unsafe
+    /// operations. Safe-only bodies rely on the soundness of safe callees.
+    /// Moved or dropped parameters have no exit-state invariant to check.
     pub(crate) fn verify_type_invariants(&self) -> VerificationReport<'tcx> {
         let mut report = VerificationReport::new(self.target.def_id);
         let invariants = &self.target.type_invariants;
-        if invariants.is_empty() {
+        if invariants.is_empty() || !self.target.has_checkable_checkpoint() {
             return report;
         }
 
@@ -390,6 +387,21 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                 );
 
                 for (path_index, (result, _path_desc)) in check_results.iter().enumerate() {
+                    if label == "type"
+                        && paths.get(path_index).is_some_and(|path| {
+                            type_invariant_subject(invariant).is_some_and(|local| {
+                                !type_invariant_subject_live(
+                                    self.tcx,
+                                    self.target.def_id,
+                                    &tree,
+                                    path,
+                                    local,
+                                )
+                            })
+                        })
+                    {
+                        continue;
+                    }
                     let path_description = paths
                         .get(path_index)
                         .map(|p| {
@@ -798,7 +810,7 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
                 && target.raw_ptr_deref_checks.is_empty()
                 && target.static_mut_checks.is_empty()
                 && target.struct_invariants.is_empty()
-                && target.type_invariants.is_empty();
+                && (target.type_invariants.is_empty() || !target.has_checkable_checkpoint());
 
             let entry = by_fn
                 .entry(target.def_id)
@@ -1438,6 +1450,134 @@ fn targets_return_value(property: &Property<'_>) -> bool {
     property
         .target_place()
         .is_some_and(|cp| matches!(cp.base, PlaceBase::Return))
+}
+
+fn type_invariant_subject(property: &Property<'_>) -> Option<rustc_middle::mir::Local> {
+    use crate::verify::contract::ContractExpr;
+
+    fn collect_expr(expr: &ContractExpr<'_>, roots: &mut FxHashSet<rustc_middle::mir::Local>) {
+        match expr {
+            ContractExpr::Place(place) => {
+                roots.insert(place.base.to_local());
+            }
+            ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => {
+                collect_expr(inner, roots);
+            }
+            ContractExpr::IndexAccess { slice, index } => {
+                collect_expr(slice, roots);
+                collect_expr(index, roots);
+            }
+            ContractExpr::Binary { lhs, rhs, .. } => {
+                collect_expr(lhs, roots);
+                collect_expr(rhs, roots);
+            }
+            ContractExpr::Unary { expr, .. } => collect_expr(expr, roots),
+            ContractExpr::If {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                collect_expr(&cond.lhs, roots);
+                collect_expr(&cond.rhs, roots);
+                collect_expr(then_expr, roots);
+                collect_expr(else_expr, roots);
+            }
+            _ => {}
+        }
+    }
+
+    let mut roots = FxHashSet::default();
+    for arg in property.args() {
+        match arg {
+            PropertyArg::Expr(expr) => collect_expr(expr, &mut roots),
+            PropertyArg::Predicates(predicates) => {
+                for predicate in predicates {
+                    collect_expr(&predicate.lhs, &mut roots);
+                    collect_expr(&predicate.rhs, &mut roots);
+                }
+            }
+            _ => {}
+        }
+    }
+    if roots.len() == 1 {
+        roots
+            .into_iter()
+            .next()
+            .filter(|local| local.as_usize() > 0)
+    } else {
+        None
+    }
+}
+
+fn type_invariant_subject_live(
+    tcx: TyCtxt<'_>,
+    def_id: DefId,
+    tree: &PathTree,
+    path: &[usize],
+    local: rustc_middle::mir::Local,
+) -> bool {
+    use rustc_middle::mir::{Operand, Rvalue, StatementKind, TerminatorKind};
+
+    let body = tcx.optimized_mir(def_id);
+    let mut live = true;
+    for &global_block in path {
+        let Some((block_def_id, local_block)) = tree.block_fn_of(global_block) else {
+            continue;
+        };
+        if block_def_id != def_id {
+            continue;
+        }
+        let block = &body.basic_blocks[BasicBlock::from_usize(local_block)];
+        for statement in &block.statements {
+            match &statement.kind {
+                StatementKind::Assign(assign) => {
+                    let (destination, value) = &**assign;
+                    let moved = match value {
+                        Rvalue::Use(Operand::Move(place), _) => {
+                            place.local == local && place.projection.is_empty()
+                        }
+                        Rvalue::Aggregate(_, operands) => operands.iter().any(|operand| {
+                            matches!(operand, Operand::Move(place) if place.local == local && place.projection.is_empty())
+                        }),
+                        _ => false,
+                    };
+                    if moved {
+                        live = false;
+                    }
+                    if destination.local == local && destination.projection.is_empty() {
+                        live = true;
+                    }
+                }
+                StatementKind::StorageDead(dead) | StatementKind::StorageLive(dead)
+                    if *dead == local =>
+                {
+                    live = false;
+                }
+                _ => {}
+            }
+        }
+        match &block.terminator().kind {
+            TerminatorKind::Call {
+                args, destination, ..
+            } => {
+                if args.iter().any(|arg| {
+                    matches!(&arg.node, Operand::Move(place) if place.local == local && place.projection.is_empty())
+                }) {
+                    live = false;
+                }
+                if destination.local == local && destination.projection.is_empty() {
+                    live = true;
+                }
+            }
+            TerminatorKind::Drop { place, .. }
+                if place.local == local && place.projection.is_empty() =>
+            {
+                live = false;
+            }
+            _ => {}
+        }
+    }
+    live
 }
 
 fn remap_constructor_contract<'tcx>(

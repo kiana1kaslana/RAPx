@@ -12,6 +12,16 @@ use z3::{Context, Sort, ast::{Array, Ast, Bool, Int}};
 use super::state::{AllocId, AllocKind, Allocation, MemoryContent, MemoryUnit, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
+    pub(crate) fn clear_write_evidence(&mut self, alloc_id: AllocId) {
+        let root = self.root_alloc(alloc_id);
+        for id in (0..self.units.len()).map(AllocId) {
+            if self.root_alloc(id) == root {
+                self.units[id.0].content.copied_prefix = None;
+                self.units[id.0].content.facts.written_pointee_ty = None;
+            }
+        }
+    }
+
     pub(crate) fn write_provenance_allocation(
         &mut self,
         pointer: &VmValue<'z3, 'tcx>,
@@ -35,6 +45,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return;
         }
         let content = self.content_mut(alloc_id);
+        content.copied_prefix = None;
         content.values.clear();
         content.indexed_elements.clear();
         content.indexed_elements_modified = true;
@@ -691,6 +702,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// Write `byte[i] = v`.
     pub(crate) fn byte_write(&mut self, alloc_id: AllocId, i: &Int<'z3>, v: &Int<'z3>) {
+        self.clear_write_evidence(alloc_id);
         let arr = self.units[alloc_id.0].content.byte_array.clone();
         let updated = match arr {
             Some(a) => a.store(i, v),

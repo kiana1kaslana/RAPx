@@ -92,12 +92,45 @@ impl<'tcx> PathExtractor<'tcx> {
             None => self.tcx.optimized_mir(self.def_id).clone(),
         };
         let mut graph = PathGraph::new_with_body(self.tcx, self.def_id, &body);
+        let caller_block_count = graph.cfg.blocks.len();
+        let caller_has_branch = graph.cfg.blocks.iter().any(|block| block.next.len() > 1);
         graph.inline_callees();
         graph.find_scc();
+        let mut structural = false;
         let mut tree = {
             let mut enumerator = PathEnumerator::new(&graph);
-            enumerator.enumerate_paths_repeat(self.allow_repeat)
+            if !caller_has_branch || graph.inlined_call_blocks.is_empty() {
+                enumerator.enumerate_paths_repeat(self.allow_repeat)
+            } else {
+                let mut caller_graph = PathGraph::new_with_body(self.tcx, self.def_id, &body);
+                caller_graph.find_scc();
+                if caller_graph
+                    .cfg
+                    .blocks
+                    .iter()
+                    .any(|block| !block.scc.nodes.is_empty())
+                {
+                    enumerator.enumerate_paths_repeat(self.allow_repeat)
+                } else {
+                    let caller_paths = PathEnumerator::new(&caller_graph)
+                        .enumerate_paths_repeat(self.allow_repeat);
+                    if caller_paths.len() <= 1 {
+                        enumerator.enumerate_paths_repeat(self.allow_repeat)
+                    } else {
+                        structural = true;
+                        PathEnumerator::new_context_insensitive(&graph)
+                            .enumerate_paths_caller_first(
+                                &caller_paths,
+                                caller_block_count,
+                                self.allow_repeat,
+                            )
+                    }
+                }
+            }
         };
+        if structural {
+            tree.mark_structural();
+        }
         tree.set_block_fn(
             graph
                 .cfg
@@ -149,7 +182,6 @@ impl Path {
         }
         format!("{:?}", indices)
     }
-
 }
 
 /// One step in a finite verification path.

@@ -71,8 +71,15 @@ fn collect_type_invariants<'tcx>(
     elem_ty: Option<Ty<'tcx>>,
     results: &mut Vec<Property<'tcx>>,
 ) {
+    let zst_vec = matches!(type_path, "alloc::vec::Vec" | "std::vec::Vec" | "vec::Vec")
+        && elem_ty
+            .and_then(|ty| crate::helpers::mir_utils::layout_of_ty(tcx, def_id, ty))
+            .is_some_and(|layout| layout.size.bytes() == 0);
     if let Some(entries) = db.get(type_path) {
         for prop_entry in entries {
+            if zst_vec && is_vec_capacity_bound(prop_entry) {
+                continue;
+            }
             results.extend(instantiate_type_invariant(
                 tcx, def_id, prop_entry, param_name, elem_ty,
             ));
@@ -84,12 +91,20 @@ fn collect_type_invariants<'tcx>(
             && let Some(entries) = db.get(&prefixed)
         {
             for prop_entry in entries {
+                if zst_vec && is_vec_capacity_bound(prop_entry) {
+                    continue;
+                }
                 results.extend(instantiate_type_invariant(
                     tcx, def_id, prop_entry, param_name, elem_ty,
                 ));
             }
         }
     }
+}
+
+fn is_vec_capacity_bound(entry: &crate::verify::contract::json::JsonProperty) -> bool {
+    entry.tag == "ValidNum"
+        && entry.args == ["$self.len <= $self.buf.inner.cap.0"]
 }
 
 /// Create properties from a type invariant entry, substituting the parameter

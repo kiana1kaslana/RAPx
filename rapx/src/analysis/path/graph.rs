@@ -6,6 +6,10 @@ use crate::graphs::{
     cfg::{CfgBlock, ControlFlowGraph},
     scc::{Scc, SccInfo},
 };
+#[cfg(rapx_has_attr_ir)]
+use rustc_attr_ir::InlineAttr;
+#[cfg(not(rapx_has_attr_ir))]
+use rustc_hir::attrs::InlineAttr;
 use rustc_middle::{
     mir::{
         AggregateKind, BasicBlock, BinOp, Body, Local, Operand, ProjectionElem, Rvalue,
@@ -16,9 +20,10 @@ use rustc_middle::{
 use rustc_span::def_id::DefId;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use crate::limit::{
-    LOCAL_INLINE_BLOCK_LIMIT, SCC_MAX_DEPTH, SCC_MAX_PATH_LEN, SCC_MAX_SEEN_PATHS,
+    HINTED_INLINE_BLOCK_LIMIT, LOCAL_INLINE_BLOCK_LIMIT, SCC_MAX_DEPTH, SCC_MAX_PATH_LEN, SCC_MAX_SEEN_PATHS,
     SCC_PATH_CACHE_LIMIT, WHOLE_CFG_PATH_DEPTH_LIMIT,
 };
 
@@ -688,9 +693,7 @@ impl<'tcx> PathGraph<'tcx> {
     ///
     /// Each callee is otherwise subject to the same shape constraints as
     /// before: cross-crate callees with MIR are always inlined, and a local
-    /// callee is inlined only when it is small (at most
-    /// [`LOCAL_INLINE_BLOCK_LIMIT`](crate::limit::LOCAL_INLINE_BLOCK_LIMIT) basic
-    /// blocks), so branch-free accessors
+    /// callee is inlined only within its basic-block limit, so branch-free accessors
     /// (`get`, `count_ones`, …) also land in the CFG and their field
     /// provenance is reconstructed element-by-element. Intrinsics
     /// have no MIR; callees with a builtin model are kept opaque because their
@@ -810,15 +813,15 @@ impl<'tcx> PathGraph<'tcx> {
                 {
                     continue;
                 }
-                // A local callee is inlined only when it is small (a transitive
-                // shape bound that keeps path enumeration tractable; see
-                // `LOCAL_INLINE_BLOCK_LIMIT`). Branch-free accessors are no
-                // longer excluded: their bodies land in the CFG and the backward
-                // slicer/VM reconstruct field provenance through the inlined
-                // call chain.
+                // A local callee is inlined only within its basic-block limit.
                 let small_local = !cross_crate && {
                     let body = tcx.optimized_mir(callee);
-                    body.basic_blocks.len() <= LOCAL_INLINE_BLOCK_LIMIT
+                    let block_limit = if matches!(tcx.codegen_fn_attrs(callee).inline, InlineAttr::Hint | InlineAttr::Always) {
+                        HINTED_INLINE_BLOCK_LIMIT
+                    } else {
+                        LOCAL_INLINE_BLOCK_LIMIT
+                    };
+                    body.basic_blocks.len() <= block_limit
                 };
                 if cross_crate || small_local {
                     pending.push((i, callee, instance));
@@ -2550,13 +2553,108 @@ pub struct SccKey {
 ///    When the same SCC is reached with the same constraint state, its
 ///    sub-paths are identical, so the re-entry is skipped.
 ///
-/// Constraint-based filtering runs incrementally during DFS via
-/// [`PathGraph::check_transition`], so only feasible paths are inserted
-/// into the resulting tree.
+/// Standard enumeration filters paths incrementally with
+/// [`PathGraph::check_transition`]. Verification can enumerate structural
+/// paths first and leave feasibility to the symbolic VM.
 pub struct PathEnumerator<'g, 'tcx> {
     graph: &'g PathGraph<'tcx>,
-    scc_paths: FxHashMap<SccKey, Vec<SccPath>>,
+    scc_paths: FxHashMap<SccKey, Rc<Vec<SccPath>>>,
     visited_sccs: FxHashSet<SccKey>,
+    context_insensitive: bool,
+}
+
+struct PathSearch {
+    caller_blocks: Vec<usize>,
+    caller_block_count: usize,
+    stack: Vec<PathSearchState>,
+    deferred_divergence: Option<Rc<PathPrefix>>,
+    truncated: bool,
+}
+
+struct PathSearchState {
+    current: Option<usize>,
+    scc_segments: Option<(Rc<Vec<SccPath>>, usize)>,
+    path: Rc<PathPrefix>,
+    caller_progress: usize,
+    depth: usize,
+    constraints: ConstraintSet,
+}
+
+struct PathPrefix {
+    block: usize,
+    parent: Option<Rc<PathPrefix>>,
+}
+
+impl PathPrefix {
+    fn to_vec(&self) -> Vec<usize> {
+        let mut path = Vec::new();
+        let mut current = Some(self);
+        while let Some(prefix) = current {
+            path.push(prefix.block);
+            current = prefix.parent.as_deref();
+        }
+        path.reverse();
+        path
+    }
+}
+
+enum SearchStep {
+    Path(Vec<usize>),
+    Pending,
+    Exhausted,
+}
+
+impl PathSearch {
+    fn new(caller_blocks: Vec<usize>, caller_block_count: usize) -> Self {
+        debug_assert_eq!(caller_blocks.first(), Some(&0));
+        Self {
+            caller_blocks,
+            caller_block_count,
+            stack: vec![PathSearchState {
+                current: Some(0),
+                scc_segments: None,
+                path: Rc::new(PathPrefix { block: 0, parent: None }),
+                caller_progress: 1,
+                depth: 0,
+                constraints: ConstraintSet::default(),
+            }],
+            deferred_divergence: None,
+            truncated: false,
+        }
+    }
+
+    fn extend(
+        &self,
+        path: &Rc<PathPrefix>,
+        caller_progress: usize,
+        block: usize,
+    ) -> Option<(Rc<PathPrefix>, usize)> {
+        let caller_progress = if block < self.caller_block_count {
+            if self.caller_blocks.get(caller_progress) != Some(&block) {
+                return None;
+            }
+            caller_progress + 1
+        } else {
+            caller_progress
+        };
+        Some((Rc::new(PathPrefix { block, parent: Some(path.clone()) }), caller_progress))
+    }
+
+    fn record_terminal(
+        &mut self,
+        path: Rc<PathPrefix>,
+        caller_progress: usize,
+    ) -> Option<Vec<usize>> {
+        if caller_progress == self.caller_blocks.len() {
+            return Some(path.to_vec());
+        }
+        if path.block >= self.caller_block_count
+            && self.deferred_divergence.is_none()
+        {
+            self.deferred_divergence = Some(path);
+        }
+        None
+    }
 }
 
 impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
@@ -2565,11 +2663,17 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
             graph,
             scc_paths: FxHashMap::default(),
             visited_sccs: FxHashSet::default(),
+            context_insensitive: false,
         }
     }
 
-    /// Enumerate all whole-CFG paths, pruning infeasible transitions via
-    /// incremental constraint-based filtering during DFS.
+    pub fn new_context_insensitive(graph: &'g PathGraph<'tcx>) -> Self {
+        let mut enumerator = Self::new(graph);
+        enumerator.context_insensitive = true;
+        enumerator
+    }
+
+    /// Enumerate whole-CFG paths, optionally filtering infeasible transitions.
     ///
     /// SCC regions are flattened into a bounded set of acyclic paths.
     pub fn enumerate_paths(&mut self) -> PathTree {
@@ -2601,6 +2705,222 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
         tree
     }
 
+    pub fn enumerate_paths_caller_first(
+        &mut self,
+        caller_paths: &PathTree,
+        caller_block_count: usize,
+        postfix_repeat: usize,
+    ) -> PathTree {
+        let mut result = PathTree::new();
+        let mut searches: Vec<_> = caller_paths
+            .to_vecs()
+            .into_iter()
+            .map(|path| PathSearch::new(path, caller_block_count))
+            .collect();
+        let mut seen = FxHashSet::default();
+        let budget = crate::limit::path_limit();
+        let mut work = 0usize;
+        let caller_depth = searches
+            .iter()
+            .map(|search| search.caller_blocks.len())
+            .max()
+            .unwrap_or(0);
+        let work_limit = budget.saturating_mul(caller_depth);
+
+        while result.len() < budget
+            && work < work_limit
+            && searches
+                .iter()
+                .any(|search| !search.stack.is_empty() || search.deferred_divergence.is_some())
+        {
+            for search in &mut searches {
+                if (search.stack.is_empty() && search.deferred_divergence.is_none())
+                    || result.len() >= budget
+                    || work >= work_limit
+                {
+                    continue;
+                }
+                let quantum = (work_limit - work).min(64);
+                match self.next_path(search, postfix_repeat, quantum, &mut work) {
+                    SearchStep::Path(path) if seen.insert(path.clone()) => {
+                        result.insert(&path);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if work >= work_limit
+            || caller_paths.is_truncated()
+            || searches.iter().any(|search| {
+                search.truncated || !search.stack.is_empty() || search.deferred_divergence.is_some()
+            })
+        {
+            result.mark_truncated();
+        }
+        result
+    }
+
+    fn next_path(
+        &mut self,
+        search: &mut PathSearch,
+        postfix_repeat: usize,
+        quantum: usize,
+        work: &mut usize,
+    ) -> SearchStep {
+        let mut steps = 0;
+        while let Some(state) = search.stack.pop() {
+            if steps >= quantum {
+                search.stack.push(state);
+                return SearchStep::Pending;
+            }
+            steps += 1;
+            *work += 1;
+            let Some(current) = state.current else {
+                if let Some(path) = search.record_terminal(state.path, state.caller_progress) {
+                    return SearchStep::Path(path);
+                }
+                continue;
+            };
+            if current >= self.graph.cfg.blocks.len() {
+                continue;
+            }
+            if state.depth > WHOLE_CFG_PATH_DEPTH_LIMIT {
+                search.truncated = true;
+                continue;
+            }
+
+            if let Some((segments, index)) = state.scc_segments {
+                if index + 1 < segments.len() {
+                    search.stack.push(PathSearchState {
+                        current: Some(current),
+                        scc_segments: Some((segments.clone(), index + 1)),
+                        path: state.path.clone(),
+                        caller_progress: state.caller_progress,
+                        depth: state.depth,
+                        constraints: state.constraints.clone(),
+                    });
+                }
+                let seg = &segments[index];
+                let segment_depth = seg.blocks.len().saturating_sub(1);
+                if state.depth.saturating_add(segment_depth) > WHOLE_CFG_PATH_DEPTH_LIMIT {
+                    search.truncated = true;
+                    continue;
+                }
+                let mut path = state.path;
+                let mut caller_progress = state.caller_progress;
+                let mut constraints = state.constraints;
+                let mut reachable = true;
+                for pair in seg.blocks.windows(2) {
+                    if !self.context_insensitive
+                        && !self.graph.check_transition(pair[0], pair[1], &mut constraints)
+                    {
+                        reachable = false;
+                        break;
+                    }
+                    let Some((next_path, next_progress)) =
+                        search.extend(&path, caller_progress, pair[1])
+                    else {
+                        reachable = false;
+                        break;
+                    };
+                    path = next_path;
+                    caller_progress = next_progress;
+                }
+                if !reachable {
+                    continue;
+                }
+                if seg.exit_successors.is_empty() {
+                    search.stack.push(PathSearchState {
+                        current: None,
+                        scc_segments: None,
+                        path,
+                        caller_progress,
+                        depth: state.depth + segment_depth,
+                        constraints,
+                    });
+                } else {
+                    let last = path.block;
+                    for next in seg.exit_successors.iter().copied().rev() {
+                        let mut next_constraints = constraints.clone();
+                        if !self.context_insensitive
+                            && !self.graph.check_transition(last, next, &mut next_constraints)
+                        {
+                            continue;
+                        }
+                        if let Some((next_path, next_progress)) =
+                            search.extend(&path, caller_progress, next)
+                        {
+                            search.stack.push(PathSearchState {
+                                current: Some(next),
+                                scc_segments: None,
+                                path: next_path,
+                                caller_progress: next_progress,
+                                depth: state.depth + segment_depth + 1,
+                                constraints: next_constraints,
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let scc_info = self.graph.cfg_block(current).scc.clone();
+            if current == scc_info.enter && !scc_info.nodes.is_empty() {
+                let scc = self.sort_scc_tree(&scc_info);
+                let segments = self.find_scc_paths_repeat(current, &scc, postfix_repeat);
+                if segments.is_empty() {
+                    if let Some(path) = search.record_terminal(state.path, state.caller_progress) {
+                        return SearchStep::Path(path);
+                    }
+                } else {
+                    search.stack.push(PathSearchState {
+                        current: Some(current),
+                        scc_segments: Some((segments, 0)),
+                        path: state.path,
+                        caller_progress: state.caller_progress,
+                        depth: state.depth,
+                        constraints: state.constraints,
+                    });
+                }
+                continue;
+            }
+
+            let successors: Vec<_> = self.graph.cfg_block(current).next.iter().copied().collect();
+            if successors.is_empty() {
+                if let Some(path) = search.record_terminal(state.path, state.caller_progress) {
+                    return SearchStep::Path(path);
+                }
+                continue;
+            }
+            for next in successors.into_iter().rev() {
+                let mut constraints = state.constraints.clone();
+                if !self.context_insensitive
+                    && !self.graph.check_transition(current, next, &mut constraints)
+                {
+                    continue;
+                }
+                if let Some((path, caller_progress)) =
+                    search.extend(&state.path, state.caller_progress, next)
+                {
+                    search.stack.push(PathSearchState {
+                        current: Some(next),
+                        scc_segments: None,
+                        path,
+                        caller_progress,
+                        depth: state.depth + 1,
+                        constraints,
+                    });
+                }
+            }
+        }
+        if let Some(path) = search.deferred_divergence.take() {
+            SearchStep::Path(path.to_vec())
+        } else {
+            SearchStep::Exhausted
+        }
+    }
+
     /// Enumerate all acyclic paths through `scc` starting at `start`,
     /// allowing each postfix segment to repeat up to `postfix_repeat`
     /// additional times.
@@ -2611,7 +2931,7 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
         start: usize,
         scc: &SccInfo,
         postfix_repeat: usize,
-    ) -> Vec<SccPath> {
+    ) -> Rc<Vec<SccPath>> {
         let cache_key = SccKey {
             entry: scc.enter,
             repeat: postfix_repeat,
@@ -2640,6 +2960,7 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
         if self.scc_paths.len() >= SCC_PATH_CACHE_LIMIT {
             self.scc_paths.clear();
         }
+        let out = Rc::new(out);
         self.scc_paths.insert(cache_key, out.clone());
 
         out
@@ -2710,7 +3031,7 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
             let child_scc = self.graph.cfg_block(cur).scc.clone();
             let child_paths = self.find_scc_paths_repeat(cur, &child_scc, postfix_repeat);
 
-            for child_path in &child_paths {
+            for child_path in child_paths.iter() {
                 let orig_len = path.len();
                 if child_path.blocks.len() > 1 {
                     path.extend(&child_path.blocks[1..]);
@@ -2764,13 +3085,6 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
         ConstraintHash::from_path(path, self.graph)
     }
 
-    /// Depth-first enumeration of all CFG paths from `current` to a terminator.
-    ///
-    /// SCC nodes are flattened via `find_scc_paths_repeat`; non-SCC blocks are followed
-    /// one by one.  No cycle detection is needed because the post-SCC CFG is a DAG.
-    /// Constraints are maintained incrementally — each transition is checked
-    /// via `PathGraph::check_transition` before recursing, and infeasible
-    /// branches are pruned early.
     fn collect_whole_cfg_paths(
         &mut self,
         current: usize,
@@ -2801,23 +3115,26 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
                 return;
             }
 
-            for seg in segments {
+            for seg in segments.iter() {
                 if tree.len() >= crate::limit::path_limit() {
                     tree.mark_truncated();
                     break;
                 }
 
+                let segment_depth = seg.blocks.len().saturating_sub(1);
+                if depth.saturating_add(segment_depth) > WHOLE_CFG_PATH_DEPTH_LIMIT {
+                    tree.mark_truncated();
+                    continue;
+                }
+
                 let orig_len = path.len();
                 let mut seg_constraints = cs.clone();
                 let mut reachable = true;
-
                 if seg.blocks.len() > 1 {
-                    for i in 0..seg.blocks.len() - 1 {
-                        if !self.graph.check_transition(
-                            seg.blocks[i],
-                            seg.blocks[i + 1],
-                            &mut seg_constraints,
-                        ) {
+                    for pair in seg.blocks.windows(2) {
+                        if !self.context_insensitive
+                            && !self.graph.check_transition(pair[0], pair[1], &mut seg_constraints)
+                        {
                             reachable = false;
                             break;
                         }
@@ -2826,30 +3143,30 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
                         path.extend_from_slice(&seg.blocks[1..]);
                     }
                 }
+                if !reachable {
+                    continue;
+                }
 
-                if reachable {
-                    if seg.exit_successors.is_empty() {
-                        tree.insert(path);
-                    } else {
-                        for &next in &seg.exit_successors {
-                            let mut next_constraints = seg_constraints.clone();
-                            let last = *path.last().unwrap();
-                            if self
-                                .graph
-                                .check_transition(last, next, &mut next_constraints)
-                            {
-                                path.push(next);
-                                self.collect_whole_cfg_paths(
-                                    next,
-                                    path,
-                                    tree,
-                                    depth + 1,
-                                    postfix_repeat,
-                                    &next_constraints,
-                                );
-                                path.pop();
-                            }
+                if seg.exit_successors.is_empty() {
+                    tree.insert(path);
+                } else {
+                    for &next in &seg.exit_successors {
+                        let mut next_constraints = seg_constraints.clone();
+                        if !self.context_insensitive
+                            && !self.graph.check_transition(*path.last().unwrap(), next, &mut next_constraints)
+                        {
+                            continue;
                         }
+                        path.push(next);
+                        self.collect_whole_cfg_paths(
+                            next,
+                            path,
+                            tree,
+                            depth + segment_depth + 1,
+                            postfix_repeat,
+                            &next_constraints,
+                        );
+                        path.pop();
                     }
                 }
 
@@ -2858,7 +3175,6 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
             return;
         }
 
-        // Non-SCC block: follow CFG successors.
         let successors: Vec<usize> = self.graph.cfg_block(current).next.iter().copied().collect();
         if successors.is_empty() {
             tree.insert(path);
@@ -2867,21 +3183,14 @@ impl<'g, 'tcx> PathEnumerator<'g, 'tcx> {
 
         for next in successors {
             let mut next_constraints = cs.clone();
-            if self
-                .graph
-                .check_transition(current, next, &mut next_constraints)
+            if !self.context_insensitive
+                && !self.graph.check_transition(current, next, &mut next_constraints)
             {
-                path.push(next);
-                self.collect_whole_cfg_paths(
-                    next,
-                    path,
-                    tree,
-                    depth + 1,
-                    postfix_repeat,
-                    &next_constraints,
-                );
-                path.pop();
+                continue;
             }
+            path.push(next);
+            self.collect_whole_cfg_paths(next, path, tree, depth + 1, postfix_repeat, &next_constraints);
+            path.pop();
         }
     }
 

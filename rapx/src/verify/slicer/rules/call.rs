@@ -84,7 +84,7 @@ pub(crate) fn visit<'tcx>(
     let summarized_write = !summary.write_args.is_empty();
     if summarized_write || arg_uses.intersects(relevant) {
         items.push(RelevantItem::Terminator { def_id, block, switch_succ: None });
-        relevant.extend(call_args_uses_at(args, &summary.write_args));
+        relevant.extend(call_args_uses_at(args, &summary.write_inputs));
     }
 
     // If the contract requires the length of a place (via `Len(place)`),

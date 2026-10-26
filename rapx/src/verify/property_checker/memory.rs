@@ -642,6 +642,20 @@ impl PropertyChecker {
             }
 
         let access = self.access_bytes(vm_state, property, 1, 2, checkpoint, &value);
+        let requested_ty = Self::ty_arg(property, 1).and_then(|ty| {
+            if !matches!(ty.kind(), TyKind::Param(_)) {
+                return Some(ty);
+            }
+            mir_utils::pointee_ty(value.ty).and_then(|pointee| {
+                match pointee.kind() {
+                    TyKind::Adt(def, args)
+                        if crate::verify::api_classify::is_maybe_uninit_type(def.did()) => {
+                        args.first().and_then(|arg| arg.as_type())
+                    }
+                    _ => Some(pointee),
+                }
+            }).or(Some(ty))
+        });
 
         if let Some(id) = value.provenance_alloc_id() {
             rap_debug!(
@@ -660,6 +674,35 @@ impl PropertyChecker {
                     return CheckResult::Failed;
                 }
             }
+            if let Some(prov) = &value.provenance
+                && prov.offset.simplify().as_u64() == Some(0)
+                && let Some((copied_ty, copied_count)) = &vm_state.content(id).copied_prefix
+                && requested_ty == Some(*copied_ty)
+                && property.args().get(2)
+                    .and_then(|arg| self.resolve_arg_term(vm_state, checkpoint, arg))
+                    .is_some_and(|count| vm_state.path_implies(&count.le(copied_count)))
+            {
+                return CheckResult::ProvedByRule;
+            }
+            let backing_maybe_uninit = vm_state.alloc(id)
+                .element_ty
+                .as_ty()
+                .is_some_and(Self::ty_is_maybe_uninit);
+            if backing_maybe_uninit
+                && let Some(prov) = &value.provenance
+                && prov.offset.simplify().as_u64() == Some(0)
+                && vm_state.content(id).facts.written_pointee_ty.is_some()
+                && vm_state.content(id).facts.written_pointee_ty
+                    == requested_ty.or_else(|| mir_utils::pointee_ty(value.ty))
+            {
+                let one = Int::from_u64(vm_state.z3_ctx, 1);
+                let count = property.args().get(2)
+                    .and_then(|arg| self.resolve_arg_term(vm_state, checkpoint, arg))
+                    .unwrap_or_else(|| one.clone());
+                if vm_state.path_implies(&count.le(&one)) {
+                    return CheckResult::ProvedByRule;
+                }
+            }
             if let Some(access_val) = access.as_u64()
                 && let Some(prov) = &value.provenance
                     && let Some(prov_off) = prov.offset.as_u64() {
@@ -670,7 +713,7 @@ impl PropertyChecker {
                             return CheckResult::ProvedByRule;
                         }
                     }
-            if vm_state.content(id).facts.initialized {
+            if vm_state.content(id).facts.initialized && !backing_maybe_uninit {
                 let size = vm_state.allocation_size(id);
                 if let (Some(access_val), Some(size_val)) = (access.as_u64(), size.as_u64()) {
                     // `size_val == 0` means the element type is generic
@@ -683,6 +726,7 @@ impl PropertyChecker {
                 return CheckResult::ProvedByRule;
             }
             if value.facts.init
+                && !backing_maybe_uninit
                 && value.facts.non_null
                 && Self::is_value_aligned(vm_state, &value)
                 && matches!(value.ty.kind(), TyKind::RawPtr(..))
@@ -694,7 +738,7 @@ impl PropertyChecker {
             if let Some(size_val) = size.as_u64() {
                 let size_usize = (size_val as usize).min(4096);
                 let all_init = (0..size_usize).all(|off| vm_state.is_byte_init(id, off));
-                if all_init && size_val > 0 {
+                if all_init && size_val > 0 && vm_state.path_implies(&access.le(&size)) {
                     return CheckResult::ProvedByRule;
                 }
             }

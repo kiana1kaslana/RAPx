@@ -182,7 +182,13 @@ impl PropertyChecker {
             .owning
             .as_ref()
             .is_some_and(|owner| owner == &value.z3_term);
-        if untrusted_raw_origin && !matches_owning_precondition {
+        let declared_field_owner = origin.as_ref().is_some_and(|origin| {
+            vm_state
+                .local_value(origin.local)
+                .is_some_and(|local| local.z3_term == value.z3_term)
+                && owning_field_source(vm_state.tcx, checkpoint.caller, origin.local)
+        });
+        if untrusted_raw_origin && !matches_owning_precondition && !declared_field_owner {
             let fresh_internal = origin.is_none() && internal_alloc && !local_alloc;
             let local_manually_drop =
                 crate::verify::api_classify::is_manually_drop_drop(checkpoint.callee)
@@ -204,4 +210,81 @@ impl PropertyChecker {
             CheckResult::ProvedByRule
         }
     }
+}
+
+fn owning_field_source(
+    tcx: rustc_middle::ty::TyCtxt<'_>,
+    caller: rustc_hir::def_id::DefId,
+    local: rustc_middle::mir::Local,
+) -> bool {
+    use rustc_middle::{
+        mir::{Operand, ProjectionElem, Rvalue, StatementKind},
+        ty::TyKind,
+    };
+
+    let body = tcx.optimized_mir(caller);
+    let mut source = None;
+    let mut written_fields = Vec::new();
+    for block in body.basic_blocks.iter() {
+        if let rustc_middle::mir::TerminatorKind::Call { destination, .. } =
+            &block.terminator().kind
+            && destination.local == local
+            && destination.projection.is_empty()
+        {
+            return false;
+        }
+        for statement in &block.statements {
+            let StatementKind::Assign(assign) = &statement.kind else {
+                continue;
+            };
+            let (destination, rvalue) = &**assign;
+            if let [ProjectionElem::Deref, ProjectionElem::Field(field, _)] =
+                destination.projection.as_ref()
+                && let TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) =
+                    body.local_decls[destination.local].ty.kind()
+                && let TyKind::Adt(adt, _) = inner.kind()
+            {
+                written_fields.push((adt.did(), field.as_usize()));
+            }
+            if destination.local != local || !destination.projection.is_empty() {
+                continue;
+            }
+            if source.is_some() {
+                return false;
+            }
+            let Rvalue::Use(Operand::Copy(place), _) = rvalue else {
+                return false;
+            };
+            let [ProjectionElem::Deref, ProjectionElem::Field(field, _)] =
+                place.projection.as_ref()
+            else {
+                return false;
+            };
+            let owner_ty = match body.local_decls[place.local].ty.kind() {
+                TyKind::RawPtr(inner, _) | TyKind::Ref(_, inner, _) => *inner,
+                _ => return false,
+            };
+            let TyKind::Adt(adt, _) = owner_ty.kind() else {
+                return false;
+            };
+            source = Some((adt.did(), field.as_usize()));
+        }
+    }
+    let Some((adt_id, field)) = source else {
+        return false;
+    };
+    if written_fields.contains(&(adt_id, field)) {
+        return false;
+    }
+    let invariants =
+        crate::verify::target::get_struct_invariants_from_annotation(tcx, adt_id, adt_id);
+    [crate::verify::contract::PropertyKind::Allocated, crate::verify::contract::PropertyKind::Typed, crate::verify::contract::PropertyKind::Owning]
+        .into_iter()
+        .all(|kind| invariants.iter().any(|property| {
+            property.kind() == Some(kind)
+                && property.target_place().is_some_and(|place| matches!(
+                    place.projections.first(),
+                    Some(crate::verify::contract::ContractProjection::Field { index, .. }) if *index == field
+                ))
+        }))
 }

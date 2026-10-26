@@ -32,14 +32,14 @@
 //! both hint kinds into the `PathEnumerator`'s `allow_repeat` budget and picks
 //! the maximum, so detector-specific details stay inside this module.
 
-use crate::helpers::mir_utils;
 use crate::analysis::path::graph::PathGraph;
 use crate::compat::{FxHashMap, FxHashSet};
+use crate::helpers::mir_utils;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{
-        BasicBlock, BinOp, Body, Local, Operand, Place, ProjectionElem, Rvalue, StatementKind,
-        TerminatorKind,
+        AggregateKind, BasicBlock, BinOp, Body, Local, Operand, Place, ProjectionElem, Rvalue,
+        StatementKind, TerminatorKind,
     },
     ty::{TyCtxt, TyKind, TypingEnv},
 };
@@ -54,7 +54,7 @@ use crate::verify::checkpoint::Checkpoint;
 
 use crate::limit::{
     DEFAULT_LOOP_CARRIED_BACKEDGES, DEFAULT_NUMERIC_WITNESS_ITERATION, MAX_AUTO_REPEAT,
-    MIN_DATAFLOW_REPEAT,
+    MAX_EXACT_RANGE_REPEAT, MIN_DATAFLOW_REPEAT,
 };
 
 /// User-selected policy for SCC postfix repetition.
@@ -83,6 +83,7 @@ impl RepeatPlan {
     fn from_hints(
         dataflow_hints: Vec<DataflowDistanceHint>,
         numeric_hints: Vec<NumericRangeHint>,
+        exact_range_repeat: usize,
     ) -> Self {
         let repeat = dataflow_hints
             .iter()
@@ -94,7 +95,8 @@ impl RepeatPlan {
             )
             .max()
             .unwrap_or(0)
-            .min(MAX_AUTO_REPEAT);
+            .min(MAX_AUTO_REPEAT)
+            .max(exact_range_repeat);
 
         Self { repeat }
     }
@@ -212,7 +214,20 @@ impl<'tcx> LoopSensitivityAnalyzer<'tcx> {
         let numeric_hints =
             self.numeric_range_hints(&sinks, &graph, &dependencies, &component_summaries);
 
-        RepeatPlan::from_hints(dataflow_hints, numeric_hints)
+        let exact_range_repeat = component_summaries
+            .iter()
+            .filter(|(component, _, _)| {
+                sinks.iter().any(|sink| {
+                    component_reaches_checkpoint(&graph, component, sink.checkpoint.block)
+                })
+            })
+            .filter_map(|(component, _, _)| {
+                exact_range_repeat(self.tcx, target.def_id, body, component, &dependencies)
+            })
+            .max()
+            .unwrap_or(0);
+
+        RepeatPlan::from_hints(dataflow_hints, numeric_hints, exact_range_repeat)
     }
 
     /// Compute loop-carried dataflow hints for every safety sink.
@@ -626,6 +641,89 @@ impl LoopNumericSummary {
             entry_lower_bounds,
         }
     }
+}
+
+/// Fully unfold a small constant `Range` whose iterator drives this SCC.
+fn exact_range_repeat<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    body: &Body<'tcx>,
+    component: &LoopComponent,
+    dependencies: &LocalDependencyIndex,
+) -> Option<usize> {
+    let mut iterator_roots = FxHashSet::default();
+    for block in &component.blocks {
+        let TerminatorKind::Call { func, args, .. } = &body.basic_blocks[BasicBlock::from(*block)]
+            .terminator()
+            .kind
+        else {
+            continue;
+        };
+        let Some(receiver) = args.first() else {
+            continue;
+        };
+        let receiver_is_range = mir_utils::extract_local(&receiver.node)
+            .and_then(
+                |local| match body.local_decls[local].ty.peel_refs().kind() {
+                    TyKind::Adt(adt, _) => Some(matches!(
+                        mir_utils::range_kind(tcx, adt.did()),
+                        mir_utils::RangeKind::Range
+                    )),
+                    _ => None,
+                },
+            )
+            .unwrap_or(false);
+        let callee = mir_utils::dep_callee_def_id(func);
+        let is_next = crate::verify::api_classify::is_range_next(callee)
+            || callee.is_some_and(|id| tcx.def_path_str(id).ends_with("Iterator::next"));
+        if !receiver_is_range || !is_next {
+            continue;
+        }
+        collect_operand_sources(&receiver.node, &mut iterator_roots);
+    }
+    if iterator_roots.is_empty() {
+        return None;
+    }
+    let iterator_sources = dependencies.closure_from(&iterator_roots);
+    let mut trip_count = None;
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        if component.blocks.contains(&block.as_usize()) {
+            continue;
+        }
+        for statement in &data.statements {
+            let StatementKind::Assign(assign) = &statement.kind else {
+                continue;
+            };
+            let (place, rvalue) = &**assign;
+            if !place.projection.is_empty() || !iterator_sources.contains(&place.local) {
+                continue;
+            }
+            let Rvalue::Aggregate(kind, operands) = rvalue else {
+                continue;
+            };
+            let AggregateKind::Adt(range_id, ..) = &**kind else {
+                continue;
+            };
+            if !matches!(
+                mir_utils::range_kind(tcx, *range_id),
+                mir_utils::RangeKind::Range
+            ) {
+                continue;
+            }
+            let mut fields = operands.iter();
+            let (Some(start), Some(end), None) = (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let start = operand_const_i128(tcx, def_id, start)?;
+            let end = operand_const_i128(tcx, def_id, end)?;
+            let count = usize::try_from(end.checked_sub(start)?).ok()?;
+            if count > MAX_EXACT_RANGE_REPEAT || trip_count.replace(count).is_some() {
+                return None;
+            }
+        }
+    }
+    trip_count
 }
 
 /// Collect locals directly redefined by statements or call destinations.

@@ -16,9 +16,10 @@ use crate::verify::api_classify::is_branch;
 pub(crate) struct CallDependencySummary {
     /// If the call destination is relevant, these call arguments are relevant.
     pub return_depends_on_args: Vec<usize>,
-    /// Arguments the callee writes; the backward slicer keeps them relevant so
-    /// the write effect is applied.
+    /// Arguments whose referents the callee writes.
     pub write_args: Vec<usize>,
+    /// Arguments the backward slicer needs to model those writes.
+    pub write_inputs: Vec<usize>,
 }
 
 impl CallDependencySummary {
@@ -27,6 +28,7 @@ impl CallDependencySummary {
         Self {
             return_depends_on_args: (0..arg_count).collect(),
             write_args: Vec::new(),
+            write_inputs: Vec::new(),
         }
     }
 }
@@ -44,6 +46,7 @@ pub(crate) enum CallEffect {
     /// facts, retyped to the destination — no pointer `non_null` forcing.
     ReturnArgValue { arg: usize },
     ReturnOpaque,
+    ReturnSizeOfVal { arg: usize },
     ReturnRawEq { left_arg: usize, right_arg: usize },
     ReturnExactDiv { lhs_arg: usize, rhs_arg: usize },
     /// `select_unpredictable(cond, x, y)` returns either `x` or `y`: the result
@@ -225,6 +228,18 @@ impl CallEffect {
             _ => Vec::new(),
         }
     }
+
+    fn write_inputs(&self) -> Vec<usize> {
+        match self {
+            Self::FillBytes { pointer_arg, byte_arg, count_arg } => {
+                vec![*pointer_arg, *byte_arg, *count_arg]
+            }
+            Self::CopyMemory { source_arg, destination_arg, count_arg } => {
+                vec![*source_arg, *destination_arg, *count_arg]
+            }
+            _ => self.written_args(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +276,7 @@ pub(crate) fn dependency_summary<'tcx>(
         {
             let mut summary = CallDependencySummary::fallback(arg_count);
             summary.write_args.push(0);
+            summary.write_inputs.push(0);
             return summary;
         }
         if let Some(summary) = effects::intrinsic_dependency_summary(
@@ -298,6 +314,7 @@ pub(crate) fn dependency_summary<'tcx>(
         if write_args.is_some() || return_deps.is_some() {
             return CallDependencySummary {
                 return_depends_on_args: return_deps.unwrap_or_default(),
+                write_inputs: write_args.clone().unwrap_or_default(),
                 write_args: write_args.unwrap_or_default(),
             };
         }

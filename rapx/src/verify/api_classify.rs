@@ -266,7 +266,6 @@ pub fn is_intrinsic_pure_opaque(callee: Option<DefId>) -> bool {
     intrinsic_api::is_float_to_int_unchecked(callee)
         || intrinsic_api::is_vtable_size(callee)
         || intrinsic_api::is_vtable_align(callee)
-        || intrinsic_api::is_size_of_val(callee)
 }
 
 // ── Layout constants ──────────────────────────────────────────────

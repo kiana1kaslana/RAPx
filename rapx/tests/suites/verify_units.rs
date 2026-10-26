@@ -123,11 +123,17 @@ unsound_tests! {
     allocated_unsound_04: "verify_units/allocated_unsound_04"  => "unsound_empty_slice_needs_one_element" => "Allocated",
     allocated_unsound_05: "verify_units/allocated_unsound_05"  => "unsound_branch_may_select_null" => "Allocated",
     allocated_unsound_06: "verify_units/allocated_unsound_06"  => "unsound_scc_overwrites_with_null" => "Allocated",
-    allocated_unsound_07: "verify_units/allocated_unsound_07"  => "unsound_vec_reallocates_old_pointer" => "Allocated",
     allocated_unsound_08: "verify_units/allocated_unsound_08"  => "unsound_slice_too_short_for_requested_len" => "Allocated",
     allocated_unsound_09: "verify_units/allocated_unsound_09"  => "unsound_intra_returns_dangling_pointer" => "Allocated",
     allocated_unsound_10: "verify_units/allocated_unsound_10" => "unsound_scc_selects_dead_temporary" => "Allocated",
     allocated_unsound_11: "verify_units/allocated_unsound_11" => "unsound_adjacent_stack_objects_do_not_merge" => "Allocated",
+}
+
+#[test]
+fn allocated_unsound_07() {
+    let output = run_with_args("verify_units/allocated_unsound_07", CMD_VERIFY_TARGETED);
+    assert_unproved_exclusive(&output, "unsound_vec_reallocates_old_pointer", &["Allocated"]);
+    assert!(output.matches("path [").count() >= 6, "{output}");
 }
 
 // NonNull
@@ -623,6 +629,26 @@ fn unsupported_mir_01() {
 }
 
 #[test]
+fn copy_uninit_unknown_01() {
+    let output = run_with_args("verify_units/copy_uninit_unknown_01", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "copy_uninit_into_slice", "UNKNOWN");
+    assert_contain(&output, "Init | Unknown (unsupported MIR)");
+}
+
+#[test]
+fn copy_multi_unsound_01() {
+    let output = run_with_args("verify_units/copy_multi_unsound_01", CMD_VERIFY_TARGETED);
+    assert_unproved_exclusive(&output, "copy_changes_second_element", &["ValidNum"]);
+}
+
+#[test]
+fn copy_scratch_prefix_01() {
+    let output = run_with_args("verify_units/copy_scratch_prefix_01", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "copy_symbolic_prefix", "SOUND");
+    assert_unproved_exclusive(&output, "copy_past_prefix", &["Init"]);
+}
+
+#[test]
 fn intrinsic_effects_01() {
     let output = run_with_args("verify_units/intrinsic_effects_01", CMD_VERIFY_TARGETED);
     assert_result_counts(&output, [6, 2, 2]);
@@ -657,6 +683,15 @@ fn rvalue_rare_sound_01() {
 fn inline_branch_unknown_01() {
     let output = run_with_args("verify_units/inline_branch_unknown_01", CMD_VERIFY_TARGETED);
     assert_result_counts(&output, [0, 0, 4]);
+}
+
+#[test]
+fn caller_path_priority_01() {
+    let output = run_with_args("verify_units/caller_path_priority_01", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "caller_branch_after_helper", "UNSOUND");
+    assert_function_result(&output, "sound_unreachable_branch", "SOUND");
+    assert_contain(&output, "ValidNum | Failed");
+    assert_eq!(output.matches("unsafe checkpoint: bb").count(), 3, "{output}");
 }
 
 // AsChunks

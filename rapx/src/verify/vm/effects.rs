@@ -6,7 +6,8 @@ use rustc_middle::ty::{Ty, TyKind};
 use z3::ast::{Ast, Bool, Int};
 
 use super::state::{
-    AllocKind, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue,
+    AllocId, AllocKind, ElementTy, OffsetKind, Provenance, ValueFacts, ValueSource, VmState,
+    VmValue,
 };
 use crate::helpers::mir_utils;
 use crate::verify::api_classify;
@@ -41,18 +42,40 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         .local_value(Local::from_usize(i + 1))
                         .is_some_and(|value| value.z3_term == target.z3_term)
             });
-        let object_target = target.provenance.as_ref().is_some_and(|prov| {
-            let alloc = self.alloc(prov.alloc_id);
-            matches!(&alloc.kind, AllocKind::Object)
-                && alloc.element_ty.as_ty() == Some(pointee_ty)
-                && prov.offset.simplify().as_u64() == Some(0)
+        let slice_target = target.provenance.as_ref().is_some_and(|prov| {
+            matches!(self.alloc(prov.alloc_id).kind, AllocKind::Slice { .. })
         });
-        if !local_target && !inline_target && !object_target {
+        let allocated_target = target.provenance.as_ref().is_some_and(|prov| {
+            let alloc = self.alloc(prov.alloc_id);
+            matches!(&alloc.kind, AllocKind::Object | AllocKind::Slice { .. })
+                && alloc.element_ty.as_ty() == Some(pointee_ty)
+                && (matches!(&alloc.kind, AllocKind::Slice { .. })
+                    || prov.offset.simplify().as_u64() == Some(0))
+        });
+        let scratch_target_ty = target.provenance.as_ref().and_then(|prov| {
+            let alloc = self.alloc(prov.alloc_id);
+            let ty = alloc.element_ty.as_ty()?;
+            match ty.kind() {
+                TyKind::Adt(def, args)
+                    if api_classify::is_maybe_uninit_type(def.did())
+                        && prov.offset.simplify().as_u64() == Some(0) => {
+                    args.first().and_then(|arg| arg.as_type())
+                }
+                _ => None,
+            }
+        });
+        let scratch_target = scratch_target_ty.is_some();
+        if !local_target && !inline_target && !allocated_target && !scratch_target {
+            self.unsupported_mir = true;
+            return;
+        }
+        if concrete_count != Some(1) && target.provenance.is_none() {
             self.unsupported_mir = true;
             return;
         }
         let source_value = self
             .find_local_by_address(&source.z3_term)
+            .filter(|local| self.body().local_decls[*local].ty == pointee_ty)
             .and_then(|local| self.local_value(local).cloned())
             .or_else(|| {
                 source
@@ -60,20 +83,76 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     .as_ref()
                     .and_then(|prov| self.load_value(prov.alloc_id, pointee_ty, &[]).cloned())
             });
-        let copied = if concrete_count == Some(1) {
+        let source_initialized = source
+            .provenance
+            .as_ref()
+            .is_some_and(|prov| {
+                let content = self.content(prov.alloc_id);
+                let maybe_uninit = self.alloc(prov.alloc_id).element_ty.as_ty().is_some_and(|ty| {
+                    matches!(ty.kind(), TyKind::Adt(def, _)
+                        if api_classify::is_maybe_uninit_type(def.did()))
+                });
+                (content.facts.initialized && !maybe_uninit)
+                    || (prov.offset.simplify().as_u64() == Some(0)
+                        && content.copied_prefix.as_ref().is_some_and(|(ty, copied_count)| {
+                            *ty == pointee_ty
+                                && self.path_implies(&count.z3_term.le(copied_count))
+                        }))
+            })
+            || source_value.as_ref().is_some_and(|value| {
+                value.facts.init && (source.provenance.is_none() || concrete_count == Some(1))
+            });
+        if (slice_target || scratch_target) && !source_initialized {
+            self.unsupported_mir = true;
+            return;
+        }
+        let mut copied = if concrete_count == Some(1) {
             source_value.unwrap_or_else(|| VmValue::new(self.fresh_int("copy_value"), pointee_ty))
         } else {
             VmValue::new(self.fresh_int("copy_value"), pointee_ty)
         };
+        copied.facts.init |= source_initialized;
+        if scratch_target {
+            let alloc_id = target.provenance.as_ref().unwrap().alloc_id;
+            self.forget_memory_values(alloc_id);
+            if concrete_count == Some(1) && scratch_target_ty == Some(pointee_ty) {
+                self.store_value(alloc_id, pointee_ty, Vec::new(), copied);
+                self.content_mut(alloc_id).facts.initialized = true;
+                self.content_mut(alloc_id).facts.written_pointee_ty = Some(pointee_ty);
+            } else {
+                self.content_mut(alloc_id).copied_prefix =
+                    Some((pointee_ty, count.z3_term.clone()));
+            }
+            return;
+        }
         if let Some(prov) = &target.provenance {
-            let content = self.content_mut(prov.alloc_id);
+            self.forget_memory_values(prov.alloc_id);
+        }
+        if concrete_count == Some(1) {
+            self.write_through_pointer(target, Vec::new(), copied);
+        }
+    }
+
+    fn forget_memory_values(&mut self, alloc_id: AllocId) {
+        let root = self.root_alloc(alloc_id);
+        let aliases: Vec<_> = (0..self.units.len())
+            .map(AllocId)
+            .filter(|id| self.root_alloc(*id) == root)
+            .collect();
+        for id in aliases {
+            self.alloc_mut(id).facts.for_each = Default::default();
+            let content = self.content_mut(id);
             content.values.clear();
+            content.indexed_elements.clear();
+            content.indexed_elements_modified = true;
+            content.copied_prefix = None;
+            content.facts.written_pointee_ty = None;
             content.byte_array = None;
             content.byte_written.clear();
             content.facts.cstr_trusted = false;
             content.facts.utf8_trusted = false;
+            content.facts.split_transmute_to = None;
         }
-        self.write_through_pointer(target, Vec::new(), copied);
     }
 
     /// Apply a single call effect to the VM state.
@@ -112,10 +191,26 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             CallEffect::ReturnOpaque => {
-                let ty = self.body().local_decls[dest].ty;
-                let term = self.fresh_int("intrinsic_result");
-                self.inline.opaque_intrinsic_terms.insert(term.clone());
-                self.set_local(dest, VmValue::new(term, ty));
+                self.set_opaque_intrinsic_result(dest);
+            }
+            CallEffect::ReturnSizeOfVal { arg } => {
+                let size = args.get(*arg).and_then(|value| {
+                    let pointee = mir_utils::pointee_ty(value.ty)?;
+                    match pointee.kind() {
+                        TyKind::Slice(elem) => {
+                            let len = self.slice_len_from_value(value)?;
+                            Some(Int::mul(self.z3_ctx, &[&len, &self.size_sym(*elem)]))
+                        }
+                        TyKind::Dynamic(..) => None,
+                        _ => Some(self.size_sym(pointee)),
+                    }
+                });
+                if let Some(size) = size {
+                    let ty = self.body().local_decls[dest].ty;
+                    self.set_local(dest, VmValue::new(size, ty));
+                } else {
+                    self.set_opaque_intrinsic_result(dest);
+                }
             }
             CallEffect::ReturnRawEq {
                 left_arg,
@@ -875,31 +970,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.unsupported_mir = true;
                     return;
                 };
-                let Some((left_local, right_local)) = self
-                    .find_local_by_address(&left.z3_term)
-                    .zip(self.find_local_by_address(&right.z3_term))
-                else {
+                if !self.swap_memory_values(left, right) {
                     self.unsupported_mir = true;
-                    return;
-                };
-                let left_ty = self.body().local_decls[left_local].ty;
-                if left_local == right_local
-                    || left_ty != self.body().local_decls[right_local].ty
-                    || !matches!(left_ty.kind(), TyKind::Int(_) | TyKind::Uint(_))
-                {
-                    self.unsupported_mir = true;
-                    return;
                 }
-                let Some((left_value, right_value)) = self
-                    .local_value(left_local)
-                    .cloned()
-                    .zip(self.local_value(right_local).cloned())
-                else {
-                    self.unsupported_mir = true;
-                    return;
-                };
-                self.set_local(left_local, right_value);
-                self.set_local(right_local, left_value);
             }
             CallEffect::FillBytes {
                 pointer_arg,
@@ -1026,6 +1099,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         .offset
                         .as_u64()
                         .or_else(|| prov.offset.simplify().as_u64());
+                    let written_pointee_ty = self.alloc(prov.alloc_id).element_ty.as_ty().and_then(|ty| {
+                        match ty.kind() {
+                            TyKind::Adt(def, args) if api_classify::is_maybe_uninit_type(def.did()) => {
+                                args.first().and_then(|arg| arg.as_type())
+                                    .filter(|inner| Some(*inner) == mir_utils::pointee_ty(arg_val.ty))
+                            }
+                            _ => None,
+                        }
+                    });
                     if let Some(off) = off_u64 {
                         if off == 0 {
                             self.content_mut(prov.alloc_id).facts.initialized = true;
@@ -1065,6 +1147,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                                 self.content_mut(prov.alloc_id).facts.initialized = true;
                             }
                         }
+                    }
+                    if off_u64 == Some(0) {
+                        self.content_mut(prov.alloc_id).facts.written_pointee_ty = written_pointee_ty;
                     }
                 }
             }
@@ -1751,6 +1836,60 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 self.store_value(alloc_id, range_view_ty, vec![0], advanced);
             }
         }
+    }
+
+    fn set_opaque_intrinsic_result(&mut self, dest: Local) {
+        let ty = self.body().local_decls[dest].ty;
+        let term = self.fresh_int("intrinsic_result");
+        self.inline.opaque_intrinsic_terms.insert(term.clone());
+        self.set_local(dest, VmValue::new(term, ty));
+    }
+
+    fn swap_memory_values(&mut self, left: &VmValue<'z3, 'tcx>, right: &VmValue<'z3, 'tcx>) -> bool {
+        if let Some((left_local, right_local)) = self
+            .find_local_by_address(&left.z3_term)
+            .zip(self.find_local_by_address(&right.z3_term))
+        {
+            let ty = self.body().local_decls[left_local].ty;
+            if left_local != right_local
+                && ty == self.body().local_decls[right_local].ty
+                && matches!(ty.kind(), TyKind::Int(_) | TyKind::Uint(_))
+                && let Some((left_value, right_value)) = self
+                    .local_value(left_local)
+                    .cloned()
+                    .zip(self.local_value(right_local).cloned())
+            {
+                self.set_local(left_local, right_value);
+                self.set_local(right_local, left_value);
+                return true;
+            }
+        }
+        let Some((left_prov, right_prov)) =
+            left.provenance.as_ref().zip(right.provenance.as_ref())
+        else {
+            return false;
+        };
+        let Some(ty) = mir_utils::pointee_ty(left.ty) else {
+            return false;
+        };
+        if mir_utils::pointee_ty(right.ty) != Some(ty) {
+            return false;
+        }
+        for id in [left_prov.alloc_id, right_prov.alloc_id] {
+            let root = self.root_alloc(id);
+            let alloc = self.alloc(id);
+            if alloc.element_ty.as_ty() != Some(ty)
+                && self.alloc(root).element_ty.as_ty() != Some(ty)
+            {
+                return false;
+            }
+            if !self.content(id).facts.initialized && !self.content(root).facts.initialized {
+                return false;
+            }
+        }
+        self.forget_memory_values(left_prov.alloc_id);
+        self.forget_memory_values(right_prov.alloc_id);
+        true
     }
 
     fn apply_vec_allocation(

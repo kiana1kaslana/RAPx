@@ -132,10 +132,8 @@ pub(crate) struct FunctionTarget<'tcx> {
     /// Built-in type invariants (e.g. the synthesized `NonNull`/`Init`/`Alive`
     /// slice invariant for `&[T]`/`&mut [T]` receivers and returns).
     ///
-    /// Like [`struct_invariants`](Self::struct_invariants), these are assumed
-    /// at entry (via `caller_requires`) and re-proved at return so a mutation
-    /// that breaks them (e.g. an out-of-bounds write) is caught even without a
-    /// user-written `#[rapx::invariant]`.
+    /// These are assumed at entry (via `caller_requires`) and checked at exit
+    /// when the body has a checkable unsafe operation and the value is live.
     pub type_invariants: Vec<Property<'tcx>>,
 
     /// Raw pointer dereference checks with their required safety properties.
@@ -160,6 +158,14 @@ pub(crate) struct FunctionTarget<'tcx> {
 }
 
 impl<'tcx> FunctionTarget<'tcx> {
+    pub(crate) fn has_checkable_checkpoint(&self) -> bool {
+        self.all_checkpoints().into_iter().any(|checkpoint| {
+            !self.properties_for_callsite(checkpoint).is_empty()
+                || (checkpoint.kind == crate::verify::checkpoint::CheckpointKind::UnsafeCall
+                    && checkpoint.callee.is_none())
+        })
+    }
+
     pub(crate) fn all_checkpoints(&self) -> Vec<&Checkpoint<'tcx>> {
         self.checkpoints
             .iter()

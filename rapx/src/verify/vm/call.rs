@@ -11,7 +11,7 @@
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{BasicBlock, Local, Operand, Terminator, TerminatorKind};
 use rustc_middle::ty::TyKind;
-use z3::ast::Int;
+use z3::ast::{Ast, Int};
 use z3::{SatResult, Solver};
 
 use crate::compat::{FxHashSet, Spanned};
@@ -566,6 +566,23 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         path: Vec<usize>,
         value: VmValue<'z3, 'tcx>,
     ) {
+        let full_inner_write = pointer.provenance.as_ref().and_then(|prov| {
+            let ty = self.alloc(prov.alloc_id).element_ty.as_ty()?;
+            match ty.kind() {
+                TyKind::Adt(def, args)
+                    if crate::verify::api_classify::is_maybe_uninit_type(def.did())
+                        && path.is_empty()
+                        && prov.offset.simplify().as_u64() == Some(0)
+                        && value.facts.init => {
+                    args.first().and_then(|arg| arg.as_type()).filter(|inner| *inner == value.ty)
+                        .map(|inner| (prov.alloc_id, inner))
+                }
+                _ => None,
+            }
+        });
+        if let Some(prov) = &pointer.provenance {
+            self.clear_write_evidence(prov.alloc_id);
+        }
         let caller_referent = self.inline.arg_referents.iter().enumerate().find_map(|(i, referent)| {
             let param = Local::from_usize(i + 1);
             self.local_value(param)
@@ -574,13 +591,22 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         });
         if let Some(local) = caller_referent {
             self.inline.deferred_field_writes.push((local, path, value));
+            if let Some((id, ty)) = full_inner_write {
+                self.content_mut(id).facts.written_pointee_ty = Some(ty);
+            }
             return;
         }
         if path.is_empty() && self.write_provenance_allocation(pointer, value.clone()) {
+            if let Some((id, ty)) = full_inner_write {
+                self.content_mut(id).facts.written_pointee_ty = Some(ty);
+            }
             return;
         }
         if let Some(local) = self.find_local_by_address(&pointer.z3_term) {
             self.write_local_path(local, path, value);
+            if let Some((id, ty)) = full_inner_write {
+                self.content_mut(id).facts.written_pointee_ty = Some(ty);
+            }
         } else if path.is_empty() {
             self.invalidate_provenance_allocation(pointer);
         }

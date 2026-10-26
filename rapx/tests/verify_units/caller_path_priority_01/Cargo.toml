@@ -1,0 +1,6 @@
+[package]
+name = "caller_path_priority_01"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
