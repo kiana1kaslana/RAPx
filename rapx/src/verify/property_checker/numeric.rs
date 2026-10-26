@@ -69,7 +69,7 @@ impl PropertyChecker {
                     let r = match solver.check() {
                         SatResult::Unsat => CheckResult::ProvedBySmt,
                         SatResult::Sat => CheckResult::Failed,
-                        _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                        _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
                     };
                     solver.pop(1);
                     return r;
@@ -83,7 +83,7 @@ impl PropertyChecker {
                 let r = match solver.check() {
                     SatResult::Unsat => CheckResult::ProvedBySmt,
                     SatResult::Sat => CheckResult::Failed,
-                    _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                    _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
                 };
                 solver.pop(1);
                 return r;

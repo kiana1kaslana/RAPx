@@ -59,7 +59,7 @@ fn check_unknown<'z3, 'tcx>(
     _checkpoint: &Checkpoint<'tcx>,
     _property: &Property<'tcx>,
 ) -> CheckResult {
-    CheckResult::Unknown(UnknownReason::Unimplemented)
+    CheckResult::Unknown(UnknownReason::UnsupportedProperty)
 }
 
 /// Every property rule, in dispatch order.
@@ -214,7 +214,7 @@ impl PropertyChecker {
             return CheckResult::ProvedByRule;
         }
         if vm_state.unsupported_mir {
-            return CheckResult::Unknown(UnknownReason::Unimplemented);
+            return CheckResult::Unknown(UnknownReason::UnsupportedMir);
         }
         self.check_inner(vm_state, checkpoint, property)
     }
@@ -268,6 +268,9 @@ impl PropertyChecker {
             Property::Or(_) => self.check_or(vm_state, checkpoint, property),
             Property::And(_) => self.check_and(vm_state, checkpoint, property),
             Property::Atom(atom) => {
+                if atom.kind == PropertyKind::Unknown {
+                    return CheckResult::Unknown(UnknownReason::MissingContract);
+                }
                 let target_arg = property.args().first().and_then(|arg| match arg {
                     PropertyArg::Expr(ContractExpr::Place(place)) => match place.base {
                         PlaceBase::Arg(index) => Some(index),
@@ -297,8 +300,14 @@ impl PropertyChecker {
                         &vm_state.inline.inline_truncated_terms,
                         UnknownReason::InlineDepthExceeded,
                     ),
-                    (&vm_state.inline.inline_branch_terms, UnknownReason::Unimplemented),
-                    (&vm_state.inline.opaque_intrinsic_terms, UnknownReason::Unimplemented),
+                    (
+                        &vm_state.inline.inline_branch_terms,
+                        UnknownReason::IncompleteInlineBranch,
+                    ),
+                    (
+                        &vm_state.inline.opaque_intrinsic_terms,
+                        UnknownReason::UnmodeledIntrinsic,
+                    ),
                 ] {
                     if self.atom_depends_on_inline_terms(vm_state, checkpoint, property, terms) {
                         return CheckResult::Unknown(reason);
@@ -307,7 +316,7 @@ impl PropertyChecker {
                 if vm_state.incomplete_inline_branch
                     && (checkpoint.callee.is_some() || !checkpoint.args.is_empty())
                 {
-                    return CheckResult::Unknown(UnknownReason::Unimplemented);
+                    return CheckResult::Unknown(UnknownReason::IncompleteInlineBranch);
                 }
                 let rule = PROPERTY_RULES
                     .iter()
@@ -316,7 +325,7 @@ impl PropertyChecker {
                 crate::rap_debug!("property rule: {}", rule.name);
                 let result = (rule.apply)(self, vm_state, checkpoint, property);
                 if vm_state.incomplete_inline_branch && result == CheckResult::Failed {
-                    CheckResult::Unknown(UnknownReason::Unimplemented)
+                    CheckResult::Unknown(UnknownReason::IncompleteInlineBranch)
                 } else {
                     result
                 }

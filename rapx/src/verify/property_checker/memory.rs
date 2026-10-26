@@ -183,7 +183,7 @@ impl PropertyChecker {
             }
             z3::SatResult::Sat => CheckResult::Failed,
             z3::SatResult::Unsat => CheckResult::ProvedBySmt,
-            z3::SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            z3::SatResult::Unknown => CheckResult::Unknown(UnknownReason::from_solver(&local)),
         };
         local.pop(1);
         if matches!(r, CheckResult::Failed) {
@@ -517,7 +517,7 @@ impl PropertyChecker {
             let r = match solver.check() {
                 SatResult::Unsat => CheckResult::ProvedBySmt,
                 SatResult::Sat => CheckResult::Failed,
-                _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
             };
             solver.pop(1);
             return r;
@@ -603,7 +603,7 @@ impl PropertyChecker {
         let r = match solver.check() {
             SatResult::Unsat => CheckResult::ProvedBySmt,
             SatResult::Sat => on_sat,
-            _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
         };
         solver.pop(1);
         r

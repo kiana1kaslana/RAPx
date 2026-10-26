@@ -603,13 +603,23 @@ unsound_tests! {
 fn unknown_unsound_01() {
     let output = run_with_args("verify_units/unknown_unsound_01", CMD_VERIFY_TARGETED);
     assert_contain(&output, "function: unsound_callsite_without_contract");
+    assert_contain(&output, "Unknown (missing safety contract)");
     assert_contain(&output, "result: UNKNOWN");
+}
+
+#[test]
+fn invariant_unknown_01() {
+    let output = run_with_args("verify_units/invariant_unknown_01", CMD_VERIFY_TARGETED);
+    assert_contain(&output, "Pinned | Unknown (unsupported property)");
+    assert_contain(&output, "result: UNKNOWN (1 unproved)");
 }
 
 #[test]
 fn unsupported_mir_01() {
     let output = run_with_args("verify_units/unsupported_mir_01", CMD_VERIFY_TARGETED);
     assert_result_counts(&output, [0, 1, 3]);
+    assert_contain(&output, "Unknown (unsupported MIR)");
+    assert_contain(&output, "Unknown (unresolved unsafe call)");
 }
 
 #[test]

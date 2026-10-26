@@ -9,35 +9,75 @@ use rustc_hir::def_id::DefId;
 use super::contract::Property;
 use crate::verify::checkpoint::CheckpointLocation;
 
+pub(crate) const PATH_LIMIT_DESCRIPTION: &str = "[not enumerated: path limit reached]";
+
 /// Why a [`CheckResult::Unknown`] could not be discharged.
 ///
-/// Carried by the `Unknown` variant so the report can distinguish a solver
-/// timeout (the common case under the fixed per-query budget) from a structural
-/// "no rule for this shape" gap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Carried by the `Unknown` variant so the report can identify incomplete proofs.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UnknownReason {
-    /// The SMT solver returned `unknown` — with the fixed per-query timeout
-    /// this is effectively a timeout on a query it could not decide in time.
-    SmtTimeout,
+    SmtUnknown(String),
     /// The inline recursion limit was reached, so the callee's body was not
     /// executed and the memory state is incomplete.
     InlineDepthExceeded,
-    /// The checker has no rule for this shape (unsupported property, unannotated
-    /// callee, unresolvable operand, undecidable generic, …).
+    UnsupportedMir,
+    IncompleteInlineBranch,
+    UnmodeledIntrinsic,
+    UnresolvedUnsafeCall,
+    MissingContract,
+    UnsupportedProperty,
+    /// A checker cannot resolve a value or supported property shape.
     Unimplemented,
+    Multiple(Vec<UnknownReason>),
 }
 
 impl UnknownReason {
-    /// Merge two reasons, keeping the more diagnostic one.
-    fn merge(self, other: UnknownReason) -> UnknownReason {
-        match (self, other) {
-            (UnknownReason::SmtTimeout, _) | (_, UnknownReason::SmtTimeout) => {
-                UnknownReason::SmtTimeout
+    pub(crate) fn from_solver(solver: &z3::Solver<'_>) -> Self {
+        Self::SmtUnknown(
+            solver
+                .get_reason_unknown()
+                .unwrap_or_else(|| "reason unavailable".to_string()),
+        )
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Self::SmtUnknown(reason) if reason == "timeout" => "timeout".to_string(),
+            Self::SmtUnknown(reason) => format!("SMT: {reason}"),
+            Self::InlineDepthExceeded => "inline depth".to_string(),
+            Self::UnsupportedMir => "unsupported MIR".to_string(),
+            Self::IncompleteInlineBranch => "incomplete inline branch".to_string(),
+            Self::UnmodeledIntrinsic => "unmodeled intrinsic".to_string(),
+            Self::UnresolvedUnsafeCall => "unresolved unsafe call".to_string(),
+            Self::MissingContract => "missing safety contract".to_string(),
+            Self::UnsupportedProperty => "unsupported property".to_string(),
+            Self::Unimplemented => "unresolved value or unsupported shape".to_string(),
+            Self::Multiple(reasons) => reasons
+                .iter()
+                .map(Self::description)
+                .collect::<Vec<_>>()
+                .join("; "),
+        }
+    }
+
+    pub(crate) fn merge(self, other: UnknownReason) -> UnknownReason {
+        let mut reasons = match self {
+            Self::Multiple(reasons) => reasons,
+            reason => vec![reason],
+        };
+        let others = match other {
+            Self::Multiple(reasons) => reasons,
+            reason => vec![reason],
+        };
+        for reason in others {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
             }
-            (UnknownReason::InlineDepthExceeded, _) | (_, UnknownReason::InlineDepthExceeded) => {
-                UnknownReason::InlineDepthExceeded
-            }
-            _ => UnknownReason::Unimplemented,
+        }
+        if reasons.len() == 1 {
+            reasons.pop().unwrap()
+        } else {
+            Self::Multiple(reasons)
         }
     }
 }
@@ -66,19 +106,12 @@ impl CheckResult {
         matches!(self, CheckResult::ProvedByRule | CheckResult::ProvedBySmt)
     }
 
-    /// The user-facing label for this result.  `ProvedByRule` and `ProvedBySmt`
-    /// both report as `"Proved"` — the rule/SMT distinction is an internal
-    /// audit signal, not part of the report.  An `Unknown` result is suffixed
-    /// with its reason when it is not the generic unimplemented case.
-    pub(crate) fn label(&self) -> &'static str {
+    /// The user-facing label for this result.
+    pub(crate) fn label(&self) -> String {
         match self {
-            CheckResult::ProvedByRule | CheckResult::ProvedBySmt => "Proved",
-            CheckResult::Failed => "Failed",
-            CheckResult::Unknown(UnknownReason::SmtTimeout) => "Unknown (timeout)",
-            CheckResult::Unknown(UnknownReason::InlineDepthExceeded) => {
-                "Unknown (inline depth)"
-            }
-            CheckResult::Unknown(UnknownReason::Unimplemented) => "Unknown",
+            CheckResult::ProvedByRule | CheckResult::ProvedBySmt => "Proved".to_string(),
+            CheckResult::Failed => "Failed".to_string(),
+            CheckResult::Unknown(reason) => format!("Unknown ({})", reason.description()),
         }
     }
 
@@ -191,5 +224,23 @@ impl<'tcx> VerificationReport<'tcx> {
         }
 
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CheckResult, UnknownReason};
+
+    #[test]
+    fn unknown_labels_preserve_solver_reason_and_multiple_causes() {
+        let timeout = CheckResult::Unknown(UnknownReason::SmtUnknown("timeout".into()));
+        assert_eq!(timeout.label(), "Unknown (timeout)");
+
+        let combined = UnknownReason::UnsupportedMir
+            .merge(UnknownReason::SmtUnknown("incomplete".into()));
+        assert_eq!(
+            CheckResult::Unknown(combined).label(),
+            "Unknown (unsupported MIR; SMT: incomplete)"
+        );
     }
 }

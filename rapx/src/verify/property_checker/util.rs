@@ -326,7 +326,7 @@ impl PropertyChecker {
         let r = match solver.check() {
             SatResult::Unsat => CheckResult::ProvedBySmt,
             SatResult::Sat => CheckResult::Failed,
-            SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            SatResult::Unknown => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
         };
         solver.pop(1);
         r
@@ -351,6 +351,7 @@ impl PropertyChecker {
         solver.assert(&elem_size._eq(&zero));
         solver.assert(goal_negated);
         let r_zst = solver.check();
+        let zst_reason = (r_zst == SatResult::Unknown).then(|| UnknownReason::from_solver(&solver));
         solver.pop(1);
 
         solver.push();
@@ -358,12 +359,18 @@ impl PropertyChecker {
         solver.assert(&elem_size.ge(&one));
         solver.assert(goal_negated);
         let r_non_zst = solver.check();
+        let non_zst_reason =
+            (r_non_zst == SatResult::Unknown).then(|| UnknownReason::from_solver(&solver));
         solver.pop(1);
 
         match (r_zst, r_non_zst) {
             (SatResult::Unsat, SatResult::Unsat) => CheckResult::ProvedBySmt,
             (SatResult::Sat, _) | (_, SatResult::Sat) => on_sat,
-            _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            _ => CheckResult::Unknown(match (zst_reason, non_zst_reason) {
+                (Some(left), Some(right)) => left.merge(right),
+                (Some(reason), None) | (None, Some(reason)) => reason,
+                (None, None) => unreachable!(),
+            }),
         }
     }
 

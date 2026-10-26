@@ -286,7 +286,9 @@ impl PropertyChecker {
                     return match solver.check() {
                         SatResult::Unsat => CheckResult::Failed,
                         SatResult::Sat => CheckResult::Unknown(UnknownReason::Unimplemented),
-                        SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                        SatResult::Unknown => {
+                            CheckResult::Unknown(UnknownReason::from_solver(&solver))
+                        }
                     };
                 }
                 if vm_state.size_of_ty(ty) as u128 == *c {

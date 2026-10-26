@@ -10,9 +10,7 @@ use crate::helpers::mir_utils;
 use crate::analysis::Analysis;
 use crate::analysis::path::PathTree;
 use crate::cli::VerifyMode;
-use crate::helpers::fn_info::{
-    FnKind, get_cons, get_mutated_fields, get_muts, get_type, returns_wrapped_self,
-};
+use crate::helpers::fn_info::{FnKind, get_cons, get_mutated_fields, get_muts, get_type};
 use crate::verify::contract::PropertyKind;
 use crate::verify::property_checker::{
     atomic_update_check, contain_no_type_check, field_invariant_check, no_internal_mut_check,
@@ -35,7 +33,9 @@ use super::{
     engine::VerifyEngine,
     loop_sensitivity::{LoopSensitivityAnalyzer, RepeatStrategy},
     path_extractor::PathExtractor,
-    report::{CheckResult, PropertyCheckResult, UnknownReason, VerificationReport},
+    report::{
+        CheckResult, PATH_LIMIT_DESCRIPTION, PropertyCheckResult, UnknownReason, VerificationReport,
+    },
     slicer::RelevantItem,
     target::{
         FunctionTarget, MarkerTraitKind, TraitEnsurance, TraitEnsuranceKind, VerifyTargetCollector,
@@ -119,7 +119,11 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                     path_index: 0,
                     property_index: 0,
                     property: Property::new(self.tcx, self.target.def_id, "Unknown", &[]),
-                    result: CheckResult::Unknown(UnknownReason::Unimplemented),
+                    result: CheckResult::Unknown(if unmodeled_intrinsic {
+                        UnknownReason::UnmodeledIntrinsic
+                    } else {
+                        UnknownReason::UnresolvedUnsafeCall
+                    }),
                     diagnostics: Some(if unmodeled_intrinsic {
                         "intrinsic effect is not modeled".to_string()
                     } else {
@@ -165,7 +169,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                         property: property.clone(),
                         result: CheckResult::ProvedByRule,
                         diagnostics: Some("path enumeration stopped at its limit".to_string()),
-                        path_description: "[not enumerated: path limit reached]".to_string(),
+                        path_description: PATH_LIMIT_DESCRIPTION.to_string(),
                         callee_name: view.checkpoint.callee_name(self.tcx),
                     });
                 }
@@ -292,10 +296,6 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         let is_constructor = get_type(self.tcx, self.target.def_id) == FnKind::Constructor;
         let caller_contracts = &self.target.caller_requires;
 
-        let fn_sig = self.tcx.fn_sig(self.target.def_id).skip_binder();
-        let output = fn_sig.output().skip_binder();
-        let returns_self = is_constructor || output.is_param(0);
-
         // Entry facts: the full `caller_requires` (explicit `#[rapx::requires]`
         // preconditions + the implicit struct invariants).  The preconditions
         // are needed to re-prove the invariant after a field mutation — e.g.
@@ -316,24 +316,6 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
             !is_constructor,
             "struct",
         ));
-
-        // For plain methods, and for "wrapped" constructors (`Result<Self>`,
-        // `Option<Self>`, `Box<Self>`), `Unknown` results are benign: methods
-        // don't construct the struct, and the `Err`/`None` paths of a wrapped
-        // constructor don't produce a `Self` to check. Keep `Unknown` only when
-        // some path actually `Failed`, so a genuine soundness gap still surfaces.
-        let wrapped_self = returns_wrapped_self(self.tcx, self.target.def_id);
-        if (!returns_self && !is_constructor) || (is_constructor && wrapped_self) {
-            let has_failed = report
-                .results
-                .iter()
-                .any(|r| matches!(r.result, CheckResult::Failed));
-            if !has_failed {
-                report
-                    .results
-                    .retain(|r| !matches!(r.result, CheckResult::Unknown(_)));
-            }
-        }
 
         report
     }
@@ -363,18 +345,6 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
             false,
             "type",
         ));
-
-        // A path that returns early without touching the receiver leaves the
-        // invariant `Unknown`; keep it only when some path actually `Failed`.
-        let has_failed = report
-            .results
-            .iter()
-            .any(|r| matches!(r.result, CheckResult::Failed));
-        if !has_failed {
-            report
-                .results
-                .retain(|r| !matches!(r.result, CheckResult::Unknown(_)));
-        }
 
         report
     }

@@ -442,7 +442,14 @@ pub(crate) fn emit_results_and_verdict<'tcx>(
     let (failed, unknown) = emit_results_counts_and_checkpoints(tcx, all_results);
 
     if failed == 0 && unknown == 0 {
-        rap_info!(green, "  result: SOUND");
+        if all_results
+            .iter()
+            .any(|result| result.path_description == super::report::PATH_LIMIT_DESCRIPTION)
+        {
+            rap_info!(green, "  result: SOUND (with path limit)");
+        } else {
+            rap_info!(green, "  result: SOUND");
+        }
     } else if failed > 0 {
         rap_warn!("  result: UNSOUND ({failed} failed, {unknown} unknown)");
     } else {

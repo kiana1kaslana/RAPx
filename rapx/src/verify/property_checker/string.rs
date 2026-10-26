@@ -30,21 +30,23 @@ impl PropertyChecker {
         solver.push();
         solver.assert(&valid);
         let r = solver.check();
+        let unknown_reason = (r == SatResult::Unknown).then(|| UnknownReason::from_solver(solver));
         solver.pop(1);
         if r == SatResult::Unsat {
             return CheckResult::Failed;
         }
         if r == SatResult::Unknown {
-            return CheckResult::Unknown(UnknownReason::SmtTimeout);
+            return CheckResult::Unknown(unknown_reason.unwrap());
         }
         solver.push();
         solver.assert(&valid.not());
         let r = solver.check();
+        let unknown_reason = (r == SatResult::Unknown).then(|| UnknownReason::from_solver(solver));
         solver.pop(1);
         match r {
             SatResult::Unsat => CheckResult::ProvedBySmt,
             SatResult::Sat => CheckResult::Unknown(UnknownReason::Unimplemented),
-            SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            SatResult::Unknown => CheckResult::Unknown(unknown_reason.unwrap()),
         }
     }
 

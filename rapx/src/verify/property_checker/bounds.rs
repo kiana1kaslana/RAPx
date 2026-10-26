@@ -121,7 +121,7 @@ impl PropertyChecker {
                 let r = match solver.check() {
                     SatResult::Unsat => CheckResult::ProvedBySmt,
                     SatResult::Sat => CheckResult::Failed,
-                    _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                    _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
                 };
                 solver.pop(1);
                 return r;
@@ -153,7 +153,7 @@ impl PropertyChecker {
             let r = match solver.check() {
                 SatResult::Unsat => CheckResult::ProvedBySmt,
                 SatResult::Sat => CheckResult::Failed,
-                _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
             };
             solver.pop(1);
             return r;
@@ -192,7 +192,7 @@ impl PropertyChecker {
                 CheckResult::Unknown(UnknownReason::Unimplemented)
             }
             SatResult::Sat => CheckResult::Failed,
-            _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
         };
         solver.pop(1);
         r
@@ -314,7 +314,7 @@ impl PropertyChecker {
         let r = match solver.check() {
             SatResult::Unsat => CheckResult::ProvedBySmt,
             SatResult::Sat => CheckResult::Failed,
-            _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
         };
         solver.pop(1);
         r
@@ -461,7 +461,7 @@ impl PropertyChecker {
         let r = match solver.check() {
             SatResult::Unsat => CheckResult::ProvedBySmt,
             SatResult::Sat => CheckResult::Failed,
-            _ => CheckResult::Unknown(UnknownReason::SmtTimeout),
+            _ => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
         };
         solver.pop(1);
         r
@@ -486,7 +486,9 @@ impl PropertyChecker {
             vm_state.assert_all(&solver);
             match solver.check() {
                 SatResult::Unsat => return CheckResult::ProvedBySmt,
-                SatResult::Unknown => return CheckResult::Unknown(UnknownReason::SmtTimeout),
+                SatResult::Unknown => {
+                    return CheckResult::Unknown(UnknownReason::from_solver(&solver));
+                }
                 SatResult::Sat => {}
             }
             let n = vm_state.const_len_term(len);
@@ -494,7 +496,7 @@ impl PropertyChecker {
             return match solver.check() {
                 SatResult::Unsat => CheckResult::ProvedBySmt,
                 SatResult::Sat => CheckResult::Unknown(UnknownReason::Unimplemented),
-                SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                SatResult::Unknown => CheckResult::Unknown(UnknownReason::from_solver(&solver)),
             };
         };
         if n < 2 {
@@ -556,7 +558,9 @@ impl PropertyChecker {
         vm_state.assert_all(&solver);
         match solver.check() {
             SatResult::Unsat => return CheckResult::ProvedBySmt,
-            SatResult::Unknown => return CheckResult::Unknown(UnknownReason::SmtTimeout),
+            SatResult::Unknown => {
+                return CheckResult::Unknown(UnknownReason::from_solver(&solver));
+            }
             SatResult::Sat => {}
         }
         for (i, (left_start, left_end)) in elements.iter().enumerate() {
@@ -580,7 +584,9 @@ impl PropertyChecker {
                 match result {
                     SatResult::Unsat => {}
                     SatResult::Sat => return CheckResult::Failed,
-                    SatResult::Unknown => return CheckResult::Unknown(UnknownReason::SmtTimeout),
+                    SatResult::Unknown => {
+                        return CheckResult::Unknown(UnknownReason::from_solver(&solver));
+                    }
                 }
             }
         }
