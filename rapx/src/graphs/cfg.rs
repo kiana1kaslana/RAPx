@@ -1,4 +1,4 @@
-use crate::compat::{FxHashMap, FxHashSet};
+use crate::compat::FxHashSet;
 use crate::graphs::scc::{Scc, SccExit, SccInfo};
 use rustc_middle::{
     mir::{BasicBlock, Body, Terminator},
@@ -9,7 +9,6 @@ use rustc_span::def_id::DefId;
 /// Reusable CFG block structure shared by analyses built over MIR.
 ///
 /// Each `CfgBlock` corresponds to a MIR basic block and stores:
-/// - its block index,
 /// - whether it is a cleanup block,
 /// - its outgoing CFG edges,
 /// - and SCC metadata for loop/cycle-aware traversal.
@@ -18,13 +17,6 @@ use rustc_span::def_id::DefId;
 /// [`ControlFlowGraph::terminator`] to retrieve it on demand from MIR.
 #[derive(Debug, Clone)]
 pub struct CfgBlock {
-    /// Index of this block in the CFG block list (global, unique across an
-    /// inlined multi-function CFG).
-    pub index: usize,
-    /// The function whose MIR contains this block.
-    pub def_id: DefId,
-    /// This block's index within `def_id`'s MIR basic blocks.
-    pub local_index: usize,
     /// Whether this block belongs to MIR cleanup/unwind control flow.
     pub is_cleanup: bool,
     /// Outgoing successor block indices.
@@ -37,12 +29,9 @@ pub struct CfgBlock {
 }
 
 impl CfgBlock {
-    /// Create a new CFG block for `def_id` at MIR basic block `index`.
-    pub fn new(def_id: DefId, index: usize, is_cleanup: bool) -> Self {
+    /// Create a new CFG block at MIR basic block `index`.
+    pub fn new(index: usize, is_cleanup: bool) -> Self {
         Self {
-            index,
-            def_id,
-            local_index: index,
             is_cleanup,
             next: FxHashSet::default(),
             scc: SccInfo::new(index),
@@ -66,15 +55,8 @@ pub struct ControlFlowGraph<'tcx> {
     pub tcx: TyCtxt<'tcx>,
     /// All CFG blocks for the current body.
     pub blocks: Vec<CfgBlock>,
-    /// Monomorphized MIR bodies for inlined generic callees, keyed by DefId.
-    ///
-    /// A generic callee like `slice::get::<Range<usize>>` has a body whose
-    /// trait-method calls (`SliceIndex::get`) only resolve once the concrete
-    /// type argument is substituted in. Its inlined blocks are therefore backed
-    /// by a monomorphized body fetched via [`Instance::instantiate_mir`], and
-    /// [`ControlFlowGraph::terminator`] prefers this map over the generic
-    /// `optimized_mir` when present.
-    monomorphized: FxHashMap<DefId, Body<'tcx>>,
+    /// MIR body supplied for a monomorphized instance.
+    body_override: Option<Body<'tcx>>,
 }
 
 impl<'tcx> ControlFlowGraph<'tcx> {
@@ -84,14 +66,19 @@ impl<'tcx> ControlFlowGraph<'tcx> {
             def_id,
             tcx,
             blocks,
-            monomorphized: FxHashMap::default(),
+            body_override: None,
         }
     }
 
-    /// Register a monomorphized body for the blocks added to this CFG by
-    /// inlining `def_id` with concrete generic arguments.
-    pub fn set_monomorphized(&mut self, def_id: DefId, body: Body<'tcx>) {
-        self.monomorphized.insert(def_id, body);
+    /// Use a monomorphized body for this function's blocks.
+    pub fn set_body_override(&mut self, body: Body<'tcx>) {
+        self.body_override = Some(body);
+    }
+
+    pub fn body(&self) -> &Body<'tcx> {
+        self.body_override
+            .as_ref()
+            .unwrap_or_else(|| self.tcx.optimized_mir(self.def_id))
     }
 
     /// Get an immutable reference to a block by index.
@@ -109,13 +96,10 @@ impl<'tcx> ControlFlowGraph<'tcx> {
     /// Returns `None` only for blocks whose terminator has not yet been
     /// elaborated (which is unusual for optimized MIR).
     pub fn terminator(&self, index: usize) -> Option<&Terminator<'tcx>> {
-        let block = self.blocks.get(index)?;
-        let body = self
-            .monomorphized
-            .get(&block.def_id)
-            .unwrap_or_else(|| self.tcx.optimized_mir(block.def_id));
+        self.blocks.get(index)?;
+        let body = self.body();
         body.basic_blocks
-            .get(BasicBlock::from(block.local_index))
+            .get(BasicBlock::from(index))
             .and_then(|bb| bb.terminator.as_ref())
     }
 }

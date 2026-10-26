@@ -55,7 +55,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         &mut self,
         callee: DefId,
         arg_locals: &[usize],
-        arg_consts: &[(usize, crate::analysis::path::graph::InlineConstArg)],
+        arg_consts: &[(usize, crate::analysis::path::CallConstArg)],
         arg_field_offsets: &[usize],
     ) {
         let method_call = arg_locals.first().and_then(|arg| {
@@ -141,11 +141,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             let local = Local::from_usize(*param);
             let ty = self.body().local_decls[local].ty;
             let (term, source) = match val {
-                crate::analysis::path::graph::InlineConstArg::Literal(value) => (
+                crate::analysis::path::CallConstArg::Literal(value) => (
                     Int::from_u64(self.z3_ctx, *value),
                     ValueSource::CallsiteConst,
                 ),
-                crate::analysis::path::graph::InlineConstArg::Symbol(text) => {
+                crate::analysis::path::CallConstArg::Symbol(text) => {
                     (self.symbolic_const_term_text(text), ValueSource::None)
                 }
             };

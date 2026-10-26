@@ -780,6 +780,22 @@ impl PropertyChecker {
                 }
                 vm_state.len_from_value(&val)
             }
+            ContractExpr::MethodCall { receiver, method, args } => {
+                let value = self.eval_contract_expr_to_value(vm_state, checkpoint, receiver)?;
+                let local = match &**receiver {
+                    ContractExpr::Place(cp) => match cp.base {
+                        PlaceBase::Arg(index) => checkpoint
+                            .and_then(|ck| ck.args.get(index))
+                            .and_then(|operand| operand.place())
+                            .map(|place| place.local),
+                        PlaceBase::Local(index) => Some(Local::from_usize(index)),
+                        PlaceBase::Return => Some(Local::from_usize(0)),
+                    },
+                    _ => None,
+                };
+                let args = args.iter().map(|arg| self.eval_contract_expr(vm_state, checkpoint, arg)).collect::<Option<Vec<_>>>()?;
+                vm_state.eval_contract_method(*method, value, local, args)
+            }
             ContractExpr::IsEmpty(inner, method) => {
                 let method = (*method)?;
                 let receiver = self.eval_contract_expr_to_value(vm_state, checkpoint, inner)?;

@@ -254,7 +254,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 // are split around the inner callee.
                 if def_id != caller
                     && frames.last().map(|f| f.0) != Some(def_id)
-                    && let Some(binding) = tree.inline_binding(node.block - local_index)
+                    && let Some(binding) = tree.call_binding(node.block - local_index)
                 {
                     let dest = Local::from_usize(binding.dest_local);
                     let mut callee_relevant = RelevantPlaces::new();
@@ -272,7 +272,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 // Skip the `Call` terminator when this block's call was inlined:
                 // the callee's statements are already sliced via the path, so
                 // treating the call as atomic would double-count it.
-                if !tree.is_inlined_call(node.block) {
+                if !tree.is_expanded_call(node.block) || tree.call_binding(child.block).is_none() {
                     // The successor this path takes out of `node` (only used for
                     // `SwitchInt`, whose branch is resolved here rather than by
                     // the forward VM). `child.block` is a global index; map back
@@ -325,7 +325,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 // Leaving an inlined callee entry: remap the callee's parameter
                 // locals back to the caller's argument locals so the caller's
                 // argument-producing statements stay relevant.
-                if let Some(binding) = tree.inline_binding(node.block) {
+                if let Some(binding) = tree.call_binding(node.block) {
                     let (_, frame_arg_locals, parked) = frames
                         .pop()
                         .unwrap_or((def_id, binding.arg_locals.clone(), RelevantPlaces::new()));

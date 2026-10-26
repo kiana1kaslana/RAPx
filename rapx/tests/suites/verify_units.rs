@@ -694,6 +694,14 @@ fn caller_path_priority_01() {
     assert_eq!(output.matches("unsafe checkpoint: bb").count(), 3, "{output}");
 }
 
+#[test]
+fn contract_method_call_01() {
+    let output = run_with_args("verify_units/contract_method_call_01", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "Capacity::sound_len", "SOUND");
+    assert_function_result(&output, "Capacity::sound_nonzero", "SOUND");
+    assert_function_result(&output, "Capacity::unsound_zero", "UNSOUND");
+}
+
 // AsChunks
 sound_tests_multi! {
     as_chunks_sound: "verify_units/as_chunks_sound_01" => [

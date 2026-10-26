@@ -63,8 +63,8 @@ pub(crate) const SCC_MAX_PATH_LEN: usize = 200;
 /// recurses into the callee's own calls, so every inlined body multiplies the
 /// path-graph size. Cross-crate callees are exempt — they are inlined a single
 /// level and never recursed into, so their size is not bounded here.
-pub(crate) const LOCAL_INLINE_BLOCK_LIMIT: usize = 32;
-pub(crate) const HINTED_INLINE_BLOCK_LIMIT: usize = 128;
+pub(crate) const LOCAL_CALLEE_BLOCK_LIMIT: usize = 32;
+pub(crate) const HINTED_CALLEE_BLOCK_LIMIT: usize = 128;
 
 /// Recursion depth bound for runtime inlining
 /// ([`crate::verify::vm::call::exec_inline_call`]). Recursive inlining unwinds

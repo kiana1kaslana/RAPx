@@ -43,6 +43,8 @@ use rustc_middle::{
     },
     ty::{TyCtxt, TyKind, TypingEnv},
 };
+#[cfg(rapx_const_ext)]
+use rustc_middle::ty::consts::ConstExt;
 
 use super::{
     contract::{ContractExpr, NumericPredicate, Property, PropertyArg, PropertyKind, RelOp},
@@ -226,6 +228,12 @@ impl<'tcx> LoopSensitivityAnalyzer<'tcx> {
             })
             .max()
             .unwrap_or(0);
+        let exact_range_repeat = exact_range_repeat.max(inclusive_range_repeat(
+            self.tcx,
+            body,
+            &sinks,
+            &dependencies,
+        ));
 
         RepeatPlan::from_hints(dataflow_hints, numeric_hints, exact_range_repeat)
     }
@@ -389,6 +397,44 @@ impl<'tcx> LoopSensitivityAnalyzer<'tcx> {
     }
 }
 
+fn inclusive_range_repeat<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    sinks: &[SafetySink<'_, '_>],
+    dependencies: &LocalDependencyIndex,
+) -> usize {
+    if !sinks.iter().any(|sink| matches!(sink.property.kind(), Some(PropertyKind::InBound))) {
+        return 0;
+    }
+    let mut bound_roots = FxHashSet::default();
+    for block in body.basic_blocks.iter() {
+        let TerminatorKind::Call { destination, args, .. } = &block.terminator().kind else {
+            continue;
+        };
+        let TyKind::Adt(adt, _) = body.local_decls[destination.local].ty.kind() else {
+            continue;
+        };
+        if matches!(mir_utils::range_kind(tcx, adt.did()), mir_utils::RangeKind::RangeInclusive)
+            && let Some(end) = args.get(1)
+        {
+            collect_operand_sources(&end.node, &mut bound_roots);
+        }
+    }
+    if bound_roots.is_empty() {
+        return 0;
+    }
+    let sources = dependencies.closure_from(&bound_roots);
+    sources.iter()
+        .filter_map(|local| match body.local_decls[*local].ty.kind() {
+            TyKind::Array(_, len) => len.try_to_target_usize(tcx),
+            _ => None,
+        })
+        .filter_map(|len| usize::try_from(len).ok())
+        .filter(|len| *len <= MAX_EXACT_RANGE_REPEAT)
+        .max()
+        .map_or(MAX_AUTO_REPEAT, |len| len.saturating_add(1))
+}
+
 /// Collect the atom leaves of a (possibly compound) property tree.
 fn collect_atoms<'a, 'tcx>(property: &'a Property<'tcx>, out: &mut Vec<&'a Property<'tcx>>) {
     match property {
@@ -421,9 +467,9 @@ struct LoopComponent {
 /// loop-carried state and therefore do not need extra postfix repetition.
 fn loop_components(graph: &PathGraph<'_>) -> Vec<LoopComponent> {
     let mut components = Vec::new();
-    for block in &graph.cfg.blocks {
+    for (index, block) in graph.cfg.blocks.iter().enumerate() {
         let scc = &block.scc;
-        if block.index != scc.enter || scc.nodes.is_empty() {
+        if index != scc.enter || scc.nodes.is_empty() {
             continue;
         }
         let mut blocks = scc.nodes.clone();
@@ -784,11 +830,11 @@ fn collect_entry_lower_bounds(
 ) -> FxHashMap<Local, i128> {
     let mut bounds: FxHashMap<Local, i128> = FxHashMap::default();
 
-    for block in &graph.cfg.blocks {
-        if component.blocks.contains(&block.index) {
+    for index in 0..graph.cfg.blocks.len() {
+        if component.blocks.contains(&index) {
             continue;
         }
-        let Some(terminator) = graph.cfg.terminator(block.index) else {
+        let Some(terminator) = graph.cfg.terminator(index) else {
             continue;
         };
         let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {

@@ -25,6 +25,26 @@ pub(crate) fn parse_contract_expr<'tcx>(
     sp: &str,
 ) -> ContractExpr<'tcx> {
     if let Expr::MethodCall(expr_method) = expr
+        && let Some(method) = resolve_self_method(
+            tcx,
+            def_id,
+            &expr_method.receiver,
+            &expr_method.method.to_string(),
+        )
+        && method.is_local()
+        && crate::def_ids::other_api::slice_len() != Some(method)
+    {
+        return ContractExpr::MethodCall {
+            receiver: Box::new(parse_contract_expr(tcx, def_id, &expr_method.receiver, sp)),
+            method,
+            args: expr_method
+                .args
+                .iter()
+                .map(|arg| parse_contract_expr(tcx, def_id, arg, sp))
+                .collect(),
+        };
+    }
+    if let Expr::MethodCall(expr_method) = expr
         && expr_method.method == "len"
         && expr_method.args.is_empty()
     {
@@ -353,7 +373,37 @@ fn parse_numeric_predicate<'tcx>(
     expr: &Expr,
 ) -> Option<NumericPredicate<'tcx>> {
     let text = expr.to_token_stream().to_string();
-    super::pest::parse_predicate_pest(tcx, def_id, &text)
+    let has_method_operand = matches!(expr, Expr::Binary(binary)
+        if matches!(&*binary.left, Expr::MethodCall(_))
+            || matches!(&*binary.right, Expr::MethodCall(_)));
+    if !has_method_operand {
+        if let Some(predicate) = super::pest::parse_predicate_pest(tcx, def_id, &text) {
+            return Some(predicate);
+        }
+    }
+    let Expr::Binary(binary) = expr else {
+        return None;
+    };
+    let op = match binary.op {
+        syn::BinOp::Le(_) => RelOp::Le,
+        syn::BinOp::Lt(_) => RelOp::Lt,
+        syn::BinOp::Ge(_) => RelOp::Ge,
+        syn::BinOp::Gt(_) => RelOp::Gt,
+        syn::BinOp::Eq(_) => RelOp::Eq,
+        syn::BinOp::Ne(_) => RelOp::Ne,
+        _ => return None,
+    };
+    let parse_operand = |operand: &Expr| {
+        if matches!(operand, Expr::MethodCall(_)) {
+            parse_contract_expr(tcx, def_id, operand, "predicate")
+        } else {
+            super::pest::parse_expr_pest(tcx, def_id, &operand.to_token_stream().to_string())
+        }
+    };
+    let lhs = parse_operand(&binary.left);
+    let rhs = parse_operand(&binary.right);
+    (!matches!(lhs, ContractExpr::Unknown) && !matches!(rhs, ContractExpr::Unknown))
+        .then(|| NumericPredicate::new(lhs, op, rhs))
 }
 
 pub(crate) fn expr_to_pest<'tcx>(

@@ -667,6 +667,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
                 self.len_from_value(&val)
             }
+            ContractExpr::MethodCall { receiver, method, args } => {
+                let value = self.eval_contract_expr_simple_value(receiver)?;
+                let local = match &**receiver {
+                    ContractExpr::Place(cp) => Some(cp.base.to_local()),
+                    _ => None,
+                };
+                let args = args.iter().map(|arg| self.eval_contract_expr_simple(arg)).collect::<Option<Vec<_>>>()?;
+                self.eval_contract_method(*method, value, local, args)
+            }
             ContractExpr::Binary { op, lhs, rhs } => {
                 let l = self.eval_contract_expr_simple(lhs)?;
                 let r = self.eval_contract_expr_simple(rhs)?;

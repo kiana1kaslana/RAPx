@@ -6,7 +6,21 @@ use rustc_hir::def_id::DefId;
 use std::fmt::{self, Display};
 
 use crate::compat::{FxHashMap, FxHashSet};
-use graph::{InlineBinding, PathGraph};
+use graph::PathGraph;
+
+#[derive(Clone, Debug)]
+pub struct CallBinding {
+    pub arg_locals: Vec<usize>,
+    pub arg_consts: Vec<(usize, CallConstArg)>,
+    pub arg_field_offsets: Vec<usize>,
+    pub dest_local: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum CallConstArg {
+    Literal(u64),
+    Symbol(String),
+}
 
 /// Format a path slice with cleanup-block annotations.
 ///
@@ -45,19 +59,14 @@ pub fn format_path_annotated(path: &[usize], graph: &PathGraph<'_>) -> String {
 pub struct PathTree {
     root: Option<PathNode>,
     len: usize,
-    /// Per-global-block function ownership: `(def_id, local_index)`. Empty for
-    /// single-function trees; populated after CFG inlining so consumers can
-    /// resolve each block's owning function and its MIR block index.
+    /// Per-block function ownership for composed verification paths.
     block_fn: Vec<(DefId, usize)>,
-    /// Argument/return bindings for inlined callee entry blocks.
-    inline_bindings: FxHashMap<usize, InlineBinding>,
-    /// Per-inlined-callee parent: entry block (global index) → the `DefId` of
-    /// the function that called it. Lets the boundary injector distinguish a
-    /// *nested* callee (its body is split around a further-inlined callee) from
-    /// a *sibling* call when both appear as consecutive non-caller def_ids.
-    inline_parents: FxHashMap<usize, DefId>,
-    /// Caller blocks whose `Call` terminator was inlined.
-    inlined_call_blocks: FxHashSet<usize>,
+    /// Argument and return bindings for callee entry blocks.
+    call_bindings: FxHashMap<usize, CallBinding>,
+    /// Parent function of each callee entry block.
+    call_parents: FxHashMap<usize, DefId>,
+    /// Caller blocks whose callee paths were composed into the tree.
+    expanded_call_blocks: FxHashSet<usize>,
     /// Set when enumeration stopped at a path or depth limit, so the tree
     /// holds only some of the paths.
     truncated: bool,
@@ -97,9 +106,9 @@ impl PathTree {
             root: None,
             len: 0,
             block_fn: Vec::new(),
-            inline_bindings: FxHashMap::default(),
-            inline_parents: FxHashMap::default(),
-            inlined_call_blocks: FxHashSet::default(),
+            call_bindings: FxHashMap::default(),
+            call_parents: FxHashMap::default(),
+            expanded_call_blocks: FxHashSet::default(),
             truncated: false,
             structural: false,
         }
@@ -133,19 +142,18 @@ impl PathTree {
         self.root.as_ref()
     }
 
-    /// Set the per-global-block function ownership map `(def_id, local_index)`
-    /// and the inlined callee argument bindings.
-    pub fn set_block_fn(
+    /// Set function ownership and callsite metadata for composed paths.
+    pub fn set_block_metadata(
         &mut self,
         map: Vec<(DefId, usize)>,
-        bindings: FxHashMap<usize, InlineBinding>,
+        bindings: FxHashMap<usize, CallBinding>,
         parents: FxHashMap<usize, DefId>,
-        inlined_calls: FxHashSet<usize>,
+        expanded_calls: FxHashSet<usize>,
     ) {
         self.block_fn = map;
-        self.inline_bindings = bindings;
-        self.inline_parents = parents;
-        self.inlined_call_blocks = inlined_calls;
+        self.call_bindings = bindings;
+        self.call_parents = parents;
+        self.expanded_call_blocks = expanded_calls;
     }
 
     /// Resolve `block` to `(def_id, local_index)`, or `None` for single-function
@@ -159,19 +167,19 @@ impl PathTree {
         &self.block_fn
     }
 
-    /// Argument/return binding for an inlined callee entry block.
-    pub fn inline_binding(&self, block: usize) -> Option<&InlineBinding> {
-        self.inline_bindings.get(&block)
+    /// Argument and return binding for a callee entry block.
+    pub fn call_binding(&self, block: usize) -> Option<&CallBinding> {
+        self.call_bindings.get(&block)
     }
 
-    /// The `DefId` of the function that called an inlined callee entry block.
-    pub fn inline_parent(&self, block: usize) -> Option<DefId> {
-        self.inline_parents.get(&block).copied()
+    /// Parent function of a callee entry block.
+    pub fn call_parent(&self, block: usize) -> Option<DefId> {
+        self.call_parents.get(&block).copied()
     }
 
-    /// Whether `block` (a caller block) had its `Call` terminator inlined.
-    pub fn is_inlined_call(&self, block: usize) -> bool {
-        self.inlined_call_blocks.contains(&block)
+    /// Whether the call at `block` has callee paths in this tree.
+    pub fn is_expanded_call(&self, block: usize) -> bool {
+        self.expanded_call_blocks.contains(&block)
     }
 
     /// Insert a path into the tree. Returns `true` if the path was
@@ -279,9 +287,9 @@ impl PathTree {
     pub fn subtree_to(&self, target_block: usize) -> PathTree {
         let mut sub = PathTree::new();
         sub.block_fn = self.block_fn.clone();
-        sub.inline_bindings = self.inline_bindings.clone();
-        sub.inline_parents = self.inline_parents.clone();
-        sub.inlined_call_blocks = self.inlined_call_blocks.clone();
+        sub.call_bindings = self.call_bindings.clone();
+        sub.call_parents = self.call_parents.clone();
+        sub.expanded_call_blocks = self.expanded_call_blocks.clone();
         sub.truncated = self.truncated;
         sub.structural = self.structural;
         let _ = self.walk_prefixes(target_block, &mut |prefix| {

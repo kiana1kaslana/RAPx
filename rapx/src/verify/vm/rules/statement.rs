@@ -461,9 +461,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             && let Some(ref prov) = addr.provenance
         {
             let alloc_id = prov.alloc_id;
-            let byte_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
             self.content_mut(alloc_id).facts.initialized = true;
-            self.record_byte_value(alloc_id, byte_offset, value.z3_term.clone());
+            self.byte_write(alloc_id, &prov.offset, &value.z3_term);
         }
     }
 }

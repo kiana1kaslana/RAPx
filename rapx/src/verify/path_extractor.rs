@@ -1,25 +1,20 @@
 //! Path extraction for verification targets.
 //!
-//! This module builds finite, acyclic paths from a function CFG to each unsafe checkpoint
-//! so that the verifier can reason about pointer properties along concrete execution
-//! traces without unrolling loops or recursive cycles.
+//! This module builds finite paths from a function CFG to each unsafe checkpoint.
 //!
 //! # Path reachability
 //!
-//! Each path is validated against a `PathGraph` (an SCC-aware path enumeration
-//! structure) to ensure the computed block sequence is actually reachable. Paths
-//! that fail this check are silently discarded.
+//! Each function's path is checked against its own SCC-aware `PathGraph`.
+//! The symbolic VM checks reachability after caller and callee paths are composed.
 //!
 //! # Path limit
 //!
-//! To prevent exponential blow-up, path enumeration is capped at
-//! [`crate::limit::path_limit`] (the `--path-limit` CLI value, or
-//! [`crate::limit::PATH_LIMIT`]). Enumeration stops producing new paths once
-//! the limit is reached and the tree is marked truncated.
+//! Path enumeration and composition are bounded by [`crate::limit::path_limit`].
+//! The tree is marked truncated when the budget is exhausted.
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
-    mir::BasicBlock,
+    mir::{BasicBlock, TerminatorKind},
     ty::{EarlyBinder, Instance, TyCtxt, TypingEnv},
 };
 
@@ -27,16 +22,19 @@ use crate::analysis::path::{
     PathTree,
     graph::{PathEnumerator, PathGraph},
 };
+use crate::compat::{FxHashMap, FxHashSet};
+use std::collections::VecDeque;
+use std::rc::Rc;
+use super::call_index::CallSiteIndex;
 
 use crate::verify::checkpoint::CheckpointLocation;
 
 /// Enumerates finite, acyclic verification paths from function entry to each
 /// unsafe checkpoint in one function body.
 ///
-/// `run` builds a [`PathGraph`], inlines callees, finds SCCs, then enumerates
-/// acyclic paths with `allow_repeat` extra loop iterations.  The resulting
-/// [`PathTree`] holds all whole-CFG paths; checkpoints and struct invariants
-/// slice their own prefixes from it via `walk_prefixes`/`subtree_to`.
+/// `run` enumerates each function independently, then composes selected callee
+/// paths at callsites. Checkpoints and struct invariants slice prefixes from
+/// the resulting [`PathTree`] via `walk_prefixes`/`subtree_to`.
 ///
 /// Enumeration is capped at [`crate::limit::path_limit`] to avoid exponential
 /// blow-up.
@@ -50,6 +48,7 @@ pub(crate) struct PathExtractor<'tcx> {
     /// An optional monomorphized instance; when set, `run` verifies the
     /// instance's instantiated body instead of `optimized_mir(def_id)`.
     instance: Option<Instance<'tcx>>,
+    coverage_targets: FxHashSet<usize>,
 }
 
 impl<'tcx> PathExtractor<'tcx> {
@@ -72,77 +71,176 @@ impl<'tcx> PathExtractor<'tcx> {
             def_id,
             allow_repeat,
             instance,
+            coverage_targets: FxHashSet::default(),
         }
+    }
+
+    pub(crate) fn with_checkpoints(mut self, checkpoints: &[CheckpointLocation]) -> Self {
+        self.coverage_targets.extend(checkpoints.iter().filter_map(|location| {
+            (location.caller == self.def_id).then_some(location.block.as_usize())
+        }));
+        self
     }
 
     /// Run path extraction, consuming the extractor.
     ///
-    /// Returns the whole-CFG [`PathTree`], with inlined callees and the
-    /// block-function metadata attached.
+    /// Returns a composed [`PathTree`] with block-function metadata attached.
     pub(crate) fn run(self) -> PathTree {
-        let body = match self.instance {
-            Some(inst) => {
-                let mir = self.tcx.optimized_mir(self.def_id);
-                inst.instantiate_mir_and_normalize_erasing_regions(
-                    self.tcx,
-                    TypingEnv::post_analysis(self.tcx, self.def_id),
-                    EarlyBinder::bind(self.tcx, mir.clone()),
-                )
-            }
-            None => self.tcx.optimized_mir(self.def_id).clone(),
+        let body = self.instance.map(|inst| {
+            let mir = self.tcx.optimized_mir(self.def_id);
+            inst.instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                TypingEnv::post_analysis(self.tcx, self.def_id),
+                EarlyBinder::bind(self.tcx, mir.clone()),
+            )
+        });
+        let mut caller_graph = match &body {
+            Some(body) => PathGraph::new_with_body(self.tcx, self.def_id, body),
+            None => PathGraph::new(self.tcx, self.def_id),
         };
-        let mut graph = PathGraph::new_with_body(self.tcx, self.def_id, &body);
-        let caller_block_count = graph.cfg.blocks.len();
-        let caller_has_branch = graph.cfg.blocks.iter().any(|block| block.next.len() > 1);
-        graph.inline_callees();
-        graph.find_scc();
-        let mut structural = false;
-        let mut tree = {
-            let mut enumerator = PathEnumerator::new(&graph);
-            if !caller_has_branch || graph.inlined_call_blocks.is_empty() {
-                enumerator.enumerate_paths_repeat(self.allow_repeat)
-            } else {
-                let mut caller_graph = PathGraph::new_with_body(self.tcx, self.def_id, &body);
-                caller_graph.find_scc();
-                if caller_graph
-                    .cfg
-                    .blocks
-                    .iter()
-                    .any(|block| !block.scc.nodes.is_empty())
-                {
-                    enumerator.enumerate_paths_repeat(self.allow_repeat)
-                } else {
-                    let caller_paths = PathEnumerator::new(&caller_graph)
-                        .enumerate_paths_repeat(self.allow_repeat);
-                    if caller_paths.len() <= 1 {
-                        enumerator.enumerate_paths_repeat(self.allow_repeat)
-                    } else {
-                        structural = true;
-                        PathEnumerator::new_context_insensitive(&graph)
-                            .enumerate_paths_caller_first(
-                                &caller_paths,
-                                caller_block_count,
-                                self.allow_repeat,
-                            )
+        caller_graph.find_scc();
+        let caller_paths = PathEnumerator::new(&caller_graph)
+            .with_coverage_targets(self.coverage_targets)
+            .enumerate_paths_repeat(self.allow_repeat);
+        let mut call_index = CallSiteIndex::new(self.tcx, self.def_id, body);
+        call_index.collect();
+        let mut tree = PathComposer::new(&call_index, self.allow_repeat).compose(&caller_paths);
+        tree.mark_structural();
+        call_index.attach_metadata(&mut tree);
+        tree
+    }
+}
+
+struct PathComposer<'g, 'tcx> {
+    call_index: &'g CallSiteIndex<'tcx>,
+    allow_repeat: usize,
+    limit: usize,
+    cache: FxHashMap<usize, Rc<Vec<Vec<usize>>>>,
+    truncated: bool,
+}
+
+impl<'g, 'tcx> PathComposer<'g, 'tcx> {
+    fn new(call_index: &'g CallSiteIndex<'tcx>, allow_repeat: usize) -> Self {
+        Self {
+            call_index,
+            allow_repeat,
+            limit: crate::limit::path_limit(),
+            cache: FxHashMap::default(),
+            truncated: false,
+        }
+    }
+
+    fn compose(mut self, caller_paths: &PathTree) -> PathTree {
+        if self.call_index.entries.is_empty() {
+            return caller_paths.clone();
+        }
+        let mut root_paths = caller_paths.to_vecs();
+        root_paths.sort_by_key(Vec::len);
+        let mut ordered = Vec::with_capacity(root_paths.len());
+        let mut root_paths = VecDeque::from(root_paths);
+        while let Some(shortest) = root_paths.pop_front() {
+            ordered.push(shortest);
+            if let Some(longest) = root_paths.pop_back() {
+                ordered.push(longest);
+            }
+        }
+        let mut pending: VecDeque<VecDeque<Vec<usize>>> = ordered
+            .into_iter()
+            .map(|path| VecDeque::from(self.expand(&path)))
+            .collect();
+        let mut result = PathTree::new();
+        while result.len() < self.limit {
+            let mut progress = false;
+            for paths in &mut pending {
+                if let Some(path) = paths.pop_front() {
+                    result.insert(&path);
+                    progress = true;
+                }
+                if result.len() >= self.limit {
+                    break;
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        if self.truncated || caller_paths.is_truncated()
+            || pending.iter().any(|paths| !paths.is_empty())
+        {
+            result.mark_truncated();
+        }
+        result
+    }
+
+    fn expand(&mut self, path: &[usize]) -> Vec<Vec<usize>> {
+        let mut paths = vec![Vec::new()];
+        for (position, &block) in path.iter().enumerate() {
+            for prefix in &mut paths {
+                prefix.push(block);
+            }
+            let Some(entries) = self.call_index.entries.get(&block).cloned() else {
+                continue;
+            };
+            if path.get(position + 1).copied() != self.call_index.normal_successor(block) {
+                continue;
+            }
+            let choices = entries.into_iter()
+                .map(|entry| self.callee_paths(entry))
+                .collect::<Vec<_>>();
+            let mut next_paths = Vec::new();
+            for prefix in &paths {
+                for group in &choices {
+                    for choice in group.iter() {
+                        if next_paths.len() >= self.limit {
+                            self.truncated = true;
+                            break;
+                        }
+                        let mut full = prefix.clone();
+                        full.extend(choice);
+                        next_paths.push(full);
                     }
                 }
             }
-        };
-        if structural {
-            tree.mark_structural();
+            paths = next_paths;
+            if paths.is_empty() {
+                break;
+            }
         }
-        tree.set_block_fn(
-            graph
-                .cfg
-                .blocks
-                .iter()
-                .map(|b| (b.def_id, b.local_index))
-                .collect(),
-            graph.inline_bindings.clone(),
-            graph.inline_parents.clone(),
-            graph.inlined_call_blocks.clone(),
-        );
-        tree
+        paths
+    }
+
+    fn callee_paths(&mut self, entry: usize) -> Rc<Vec<Vec<usize>>> {
+        if let Some(paths) = self.cache.get(&entry) {
+            return Rc::clone(paths);
+        }
+        let callee = self.call_index.blocks()[entry].0;
+        let body = self.call_index.body(entry);
+        let mut local_graph = if self.call_index.has_body_override(entry) {
+            PathGraph::new_with_body(self.call_index.tcx(), callee, body)
+        } else {
+            PathGraph::new(self.call_index.tcx(), callee)
+        };
+        local_graph.find_scc();
+        let local_paths = PathEnumerator::new(&local_graph)
+            .enumerate_paths_repeat(self.allow_repeat);
+        self.truncated |= local_paths.is_truncated();
+        let mut result = Vec::new();
+        for path in local_paths.to_vecs() {
+            let Some(&last) = path.last() else { continue };
+            if !matches!(body.basic_blocks[BasicBlock::from(last)].terminator().kind,
+                TerminatorKind::Return | TerminatorKind::TailCall { .. }) {
+                continue;
+            }
+            result.extend(self.expand(&path.iter().map(|block| entry + block).collect::<Vec<_>>()));
+            if result.len() > self.limit {
+                result.truncate(self.limit);
+                self.truncated = true;
+                break;
+            }
+        }
+        let result = Rc::new(result);
+        self.cache.insert(entry, Rc::clone(&result));
+        result
     }
 }
 
@@ -153,8 +251,7 @@ impl<'tcx> PathExtractor<'tcx> {
 /// [`PathTree`] produced by [`PathExtractor`]; the VM later consumes it to
 /// know which MIR instructions are relevant and in what order.
 ///
-/// Every path is validated against the SCC-aware [`PathGraph`]; unreachable
-/// sequences are silently discarded during extraction.
+/// The VM checks whether each composed path is reachable.
 #[derive(Clone, Debug)]
 pub(crate) struct Path {
     /// The [`CheckpointLocation`] (function + basic block) reached by this

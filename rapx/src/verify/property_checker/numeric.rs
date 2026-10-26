@@ -228,6 +228,9 @@ impl PropertyChecker {
             ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => {
                 self.expr_has_mul(inner)
             }
+            ContractExpr::MethodCall { receiver, args, .. } => {
+                self.expr_has_mul(receiver) || args.iter().any(|arg| self.expr_has_mul(arg))
+            }
             ContractExpr::If {
                 then_expr,
                 else_expr,
@@ -287,6 +290,12 @@ impl PropertyChecker {
             }
             ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => {
                 self.inject_int_range_axioms(vm_state, solver, checkpoint, inner);
+            }
+            ContractExpr::MethodCall { receiver, args, .. } => {
+                self.inject_int_range_axioms(vm_state, solver, checkpoint, receiver);
+                for arg in args {
+                    self.inject_int_range_axioms(vm_state, solver, checkpoint, arg);
+                }
             }
             ContractExpr::If {
                 then_expr,

@@ -155,6 +155,11 @@ pub(crate) enum ContractExpr<'tcx> {
     SizeOf(Ty<'tcx>),
     AlignOf(Ty<'tcx>),
     Len(Box<ContractExpr<'tcx>>, Option<DefId>),
+    MethodCall {
+        receiver: Box<ContractExpr<'tcx>>,
+        method: DefId,
+        args: Vec<ContractExpr<'tcx>>,
+    },
     IsEmpty(Box<ContractExpr<'tcx>>, Option<DefId>),
     IndexAccess {
         slice: Box<ContractExpr<'tcx>>,

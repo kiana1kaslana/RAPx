@@ -9,9 +9,9 @@
 //! Otherwise it falls back to the summary-based approach.
 
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::{BasicBlock, Local, Operand, Terminator, TerminatorKind};
+use rustc_middle::mir::{BasicBlock, Local, Operand, Rvalue, StatementKind, Terminator, TerminatorKind};
 use rustc_middle::ty::TyKind;
-use z3::ast::{Ast, Int};
+use z3::ast::{Ast, Bool, Int};
 use z3::{SatResult, Solver};
 
 use crate::compat::{FxHashSet, Spanned};
@@ -22,6 +22,125 @@ use crate::verify::call_summary;
 use super::state::{AllocId, MemoryContent, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
+    pub(crate) fn eval_contract_method(
+        &self,
+        method: DefId,
+        receiver: VmValue<'z3, 'tcx>,
+        receiver_local: Option<Local>,
+        args: Vec<Int<'z3>>,
+    ) -> Option<Int<'z3>> {
+        if !super::method_cache::stable_contract_query(self.tcx, method) {
+            return None;
+        }
+        let sig = self.tcx.fn_sig(method).skip_binder();
+        let inputs = sig.inputs().skip_binder();
+        if inputs.len() != args.len() + 1 {
+            return None;
+        }
+        let mut values = vec![receiver];
+        values.extend(args.into_iter().zip(inputs[1..].iter()).map(|(term, ty)| {
+            VmValue::new(term, *ty)
+        }));
+        self.eval_contract_method_paths(method, &values, receiver_local)
+    }
+
+    fn eval_contract_method_paths(
+        &self,
+        method: DefId,
+        values: &[VmValue<'z3, 'tcx>],
+        receiver_local: Option<Local>,
+    ) -> Option<Int<'z3>> {
+        let mut state = self.clone();
+        let frame = state.save_frame();
+        state.current_frame.current_def_id = method;
+        for (index, value) in values.iter().enumerate() {
+            let local = Local::from_usize(index + 1);
+            state.ensure_local_allocation(local);
+            state.set_local(local, value.clone());
+        }
+        if let Some(source) = receiver_local {
+            for path in self.frame_field_paths(&frame, source) {
+                if let Some(value) = self.frame_field_value(&frame, source, &path) {
+                    state.set_field_value(Local::from_usize(1), path, value.clone());
+                }
+            }
+        }
+        let baseline = state.constraints.assertions.len();
+        let body = self.tcx.optimized_mir(method);
+        let mut pending = vec![(state, BasicBlock::from_usize(0), FxHashSet::default())];
+        let mut returns = Vec::new();
+        let mut explored = 0;
+        while let Some((mut state, block, mut visited)) = pending.pop() {
+            if explored >= 128 || !visited.insert(block) {
+                return None;
+            }
+            explored += 1;
+            let data = &body.basic_blocks[block];
+            for statement in &data.statements {
+                crate::verify::vm::rules::exec_statement(&mut state, statement);
+                if let StatementKind::Assign(assign) = &statement.kind
+                    && assign.0.projection.is_empty()
+                    && let Rvalue::Use(Operand::Constant(constant), ..) = &assign.1
+                    && let Ok(value) = constant.const_.eval(
+                        self.tcx,
+                        rustc_middle::ty::TypingEnv::fully_monomorphized(),
+                        rustc_span::DUMMY_SP,
+                    )
+                    && let Some(scalar) = value.try_to_scalar_int()
+                    && let Ok(bits) = u64::try_from(scalar.to_bits(scalar.size()))
+                {
+                    state.set_local(
+                        assign.0.local,
+                        VmValue::new(Int::from_u64(self.z3_ctx, bits), constant.const_.ty()),
+                    );
+                }
+            }
+            let terminator = data.terminator();
+            match &terminator.kind {
+                TerminatorKind::Return => {
+                    if state.unsupported_mir || state.incomplete_inline_branch {
+                        return None;
+                    }
+                    let term = state.local_value(Local::from_usize(0))?.z3_term.clone();
+                    let constraints = &state.constraints.assertions[baseline..];
+                    let guard = Bool::and(self.z3_ctx, &constraints.iter().collect::<Vec<_>>());
+                    returns.push((guard, term));
+                }
+                TerminatorKind::Goto { target, .. } => pending.push((state, *target, visited)),
+                TerminatorKind::SwitchInt { targets, .. } => {
+                    for target in targets.all_targets().iter().copied() {
+                        let mut branch = state.clone();
+                        crate::verify::vm::rules::exec_terminator(&mut branch, terminator, Some(target));
+                        if !branch.path_infeasible {
+                            pending.push((branch, target, visited.clone()));
+                        }
+                    }
+                }
+                TerminatorKind::Unreachable => {}
+                _ => return None,
+            }
+        }
+        if returns.is_empty() {
+            return None;
+        }
+        let guards: Vec<&Bool<'z3>> = returns.iter().map(|(guard, _)| guard).collect();
+        let coverage = Bool::or(self.z3_ctx, &guards);
+        let solver = Solver::new(self.z3_ctx);
+        self.assert_all(&solver);
+        solver.assert(&coverage.not());
+        if solver.check() != SatResult::Unsat {
+            return None;
+        }
+        let mut result = None;
+        for (guard, term) in returns.into_iter().rev() {
+            result = Some(match result {
+                Some(other) => guard.ite(&term, &other),
+                None => term,
+            });
+        }
+        result
+    }
+
     /// Execute a call terminator, dispatching by precision:
     ///
     ///  1. pre-inline side effect (`Eq` const-byte propagation) — always runs

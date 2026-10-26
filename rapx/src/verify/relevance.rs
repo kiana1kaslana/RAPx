@@ -126,6 +126,12 @@ impl RelevantPlaces {
                 self.collect_contract_expr(rhs);
             }
             ContractExpr::Unary { expr, .. } => self.collect_contract_expr(expr),
+            ContractExpr::MethodCall { receiver, args, .. } => {
+                self.collect_contract_expr(receiver);
+                for arg in args {
+                    self.collect_contract_expr(arg);
+                }
+            }
             ContractExpr::Len(expr, _) | ContractExpr::IsEmpty(expr, _) => {
                 self.collect_contract_expr(expr);
                 if let ContractExpr::Place(place) = expr.as_ref() {

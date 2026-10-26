@@ -381,7 +381,7 @@ impl<'tcx> VerifyEngine<'tcx> {
 
                             // Skip ancestors with no retained slice items.
                             let eff_parent = |g: usize| -> DefId {
-                                let mut p = tree.inline_parent(g);
+                                let mut p = tree.call_parent(g);
                                 while let Some(pd) = p {
                                     if pd == caller || active.iter().any(|(d, _, _)| *d == pd) {
                                         return pd;
@@ -389,7 +389,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                                     p = local_to_global
                                         .get(&(pd, 0))
                                         .and_then(|gs| gs.first().copied())
-                                        .and_then(|pe| tree.inline_parent(pe));
+                                        .and_then(|pe| tree.call_parent(pe));
                                 }
                                 caller
                             };
@@ -407,7 +407,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 // Match single-arg and pointer-arithmetic calls by argument;
                                 // other calls use the positional cursor.
                                 let all_single_arg = matching.iter().all(|&g| {
-                                    tree.inline_binding(g).map(|b| b.arg_locals.len()) == Some(1)
+                                    tree.call_binding(g).map(|b| b.arg_locals.len()) == Some(1)
                                 });
                                 let is_ptr_arith = crate::verify::api_classify::is_pointer_add(Some(cur))
                                     || crate::verify::api_classify::is_pointer_sub(Some(cur));
@@ -418,7 +418,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                                         .iter()
                                         .copied()
                                         .filter(|&g| {
-                                            tree.inline_binding(g)
+                                            tree.call_binding(g)
                                                 .is_some_and(|b| b.arg_locals.contains(&arg))
                                         })
                                         .collect();
@@ -442,7 +442,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                             let eff = cur_entry.map(eff_parent).unwrap_or(caller);
                             let mut skipped: Vec<(DefId, usize)> = Vec::new();
                             {
-                                let mut p = cur_entry.and_then(|g| tree.inline_parent(g));
+                                let mut p = cur_entry.and_then(|g| tree.call_parent(g));
                                 while let Some(pd) = p {
                                     if pd == eff {
                                         break;
@@ -452,7 +452,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                                         .and_then(|gs| gs.first().copied())
                                     {
                                         skipped.push((pd, pe));
-                                        p = tree.inline_parent(pe);
+                                        p = tree.call_parent(pe);
                                     } else {
                                         break;
                                     }
@@ -467,7 +467,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 out.push(RelevantItem::CalleeExit { dest });
                             }
                             for (pd, pe) in skipped.iter().rev() {
-                                if let Some(binding) = tree.inline_binding(*pe) {
+                                if let Some(binding) = tree.call_binding(*pe) {
                                     out.push(RelevantItem::CalleeEntry {
                                         callee: *pd,
                                         args: binding.arg_locals.clone(),
@@ -478,7 +478,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 }
                             }
                             if let Some(&global) = cur_entry.as_ref()
-                                && let Some(binding) = tree.inline_binding(global)
+                                && let Some(binding) = tree.call_binding(global)
                             {
                                 out.push(RelevantItem::CalleeEntry {
                                     callee: cur,
@@ -616,6 +616,13 @@ impl<'tcx> VerifyEngine<'tcx> {
                     Box::new(Self::rebind_contract_expr(inner, checkpoint)),
                     *method,
                 )
+            }
+            super::contract::ContractExpr::MethodCall { receiver, method, args } => {
+                super::contract::ContractExpr::MethodCall {
+                    receiver: Box::new(Self::rebind_contract_expr(receiver, checkpoint)),
+                    method: *method,
+                    args: args.iter().map(|arg| Self::rebind_contract_expr(arg, checkpoint)).collect(),
+                }
             }
             super::contract::ContractExpr::IsEmpty(inner, method) => {
                 super::contract::ContractExpr::IsEmpty(

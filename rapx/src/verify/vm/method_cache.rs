@@ -178,12 +178,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 }
 
 fn stable_local_query(tcx: TyCtxt<'_>, method: DefId) -> bool {
-    if method.as_local().is_none()
-        || !tcx.is_mir_available(method)
-        || !tcx
-            .opt_associated_item(method)
-            .is_some_and(|item| matches!(item.name().as_str(), "len" | "is_empty"))
-    {
+    if method.as_local().is_none() || !tcx.is_mir_available(method) {
         return false;
     }
     let sig = tcx.fn_sig(method).skip_binder();
@@ -197,6 +192,26 @@ fn stable_local_query(tcx: TyCtxt<'_>, method: DefId) -> bool {
     {
         return false;
     }
+    stable_query_body(tcx, method)
+}
+
+pub(super) fn stable_contract_query(tcx: TyCtxt<'_>, method: DefId) -> bool {
+    if method.as_local().is_none() || !tcx.is_mir_available(method) {
+        return false;
+    }
+    let sig = tcx.fn_sig(method).skip_binder();
+    let inputs = sig.inputs().skip_binder();
+    if inputs.is_empty()
+        || !matches!(inputs[0].kind(), TyKind::Ref(_, pointee, rustc_middle::ty::Mutability::Not) if matches!(pointee.kind(), TyKind::Adt(..)))
+        || inputs[1..].iter().any(|ty| !matches!(ty.kind(), TyKind::Uint(_) | TyKind::Int(_) | TyKind::Bool))
+        || !matches!(sig.output().skip_binder().kind(), TyKind::Uint(_) | TyKind::Int(_) | TyKind::Bool)
+    {
+        return false;
+    }
+    stable_query_body(tcx, method)
+}
+
+fn stable_query_body(tcx: TyCtxt<'_>, method: DefId) -> bool {
     let body = tcx.optimized_mir(method);
     for block in body.basic_blocks.iter() {
         for statement in &block.statements {
@@ -255,7 +270,7 @@ fn stable_place(place: &Place<'_>) -> bool {
 fn stable_operand(operand: &Operand<'_>) -> bool {
     match operand {
         Operand::Copy(place) | Operand::Move(place) => stable_place(place),
-        Operand::Constant(_) => mir_utils::operand_const_u64(operand).is_some(),
+        Operand::Constant(_) => true,
         _ => false,
     }
 }

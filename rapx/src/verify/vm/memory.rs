@@ -703,14 +703,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Write `byte[i] = v`.
     pub(crate) fn byte_write(&mut self, alloc_id: AllocId, i: &Int<'z3>, v: &Int<'z3>) {
         self.clear_write_evidence(alloc_id);
+        let offset = i.simplify();
         let arr = self.units[alloc_id.0].content.byte_array.clone();
         let updated = match arr {
-            Some(a) => a.store(i, v),
-            None => self.fresh_byte_array().store(i, v),
+            Some(a) => a.store(&offset, v),
+            None => self.fresh_byte_array().store(&offset, v),
         };
         let unit = &mut self.units[alloc_id.0];
         unit.content.byte_array = Some(updated);
-        if let Some(off) = i.as_u64() {
+        if let Some(off) = offset.as_u64() {
             unit.content.byte_written.insert(off as usize);
         }
     }

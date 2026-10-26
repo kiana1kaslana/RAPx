@@ -1,0 +1,6 @@
+[package]
+name = "contract_method_call_01"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]

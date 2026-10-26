@@ -273,6 +273,7 @@ impl<A: Allocator> RawVecInner<A> {
     /// `elem_layout` must be valid for `self`; its size a multiple of its alignment.
     #[rapx::verify]
     #[rapx::requires(ValidNum(elem_layout.size % elem_layout.align == 0))]
+    #[rapx::requires(ValidNum(elem_layout.size * self.cap <= usize::MAX))]
     unsafe fn try_reserve_ext(
         &mut self,
         len: usize,
@@ -292,6 +293,7 @@ impl<A: Allocator> RawVecInner<A> {
     /// `elem_layout` must be valid for `self`; its size a multiple of its alignment.
     #[rapx::verify]
     #[rapx::requires(ValidNum(elem_layout.size % elem_layout.align == 0))]
+    #[rapx::requires(ValidNum(elem_layout.size * self.cap <= usize::MAX))]
     unsafe fn try_reserve_exact_ext(
         &mut self,
         len: usize,
@@ -325,6 +327,7 @@ impl<A: Allocator> RawVecInner<A> {
     /// `elem_layout` must be valid for `self` (size a multiple of its alignment); `len + additional` must exceed the current capacity.
     #[rapx::verify]
     #[rapx::requires(ValidNum(elem_layout.size % elem_layout.align == 0))]
+    #[rapx::requires(ValidNum(elem_layout.size * self.cap <= usize::MAX))]
     unsafe fn grow_amortized_ext(
         &mut self,
         len: usize,
@@ -360,6 +363,7 @@ impl<A: Allocator> RawVecInner<A> {
     /// `elem_layout` must be valid for `self` (size a multiple of its alignment); `len + additional` must exceed the current capacity.
     #[rapx::verify]
     #[rapx::requires(ValidNum(elem_layout.size % elem_layout.align == 0))]
+    #[rapx::requires(ValidNum(elem_layout.size * self.cap <= usize::MAX))]
     unsafe fn grow_exact_ext(
         &mut self,
         len: usize,
@@ -416,6 +420,7 @@ impl<A: Allocator> RawVecInner<A> {
     /// `elem_layout` must be valid for `self` (size a multiple of its alignment); `cap` must be <= `self.capacity(...)`.
     #[rapx::verify]
     #[rapx::requires(ValidNum(elem_layout.size % elem_layout.align == 0))]
+    #[rapx::requires(ValidNum(elem_layout.size * self.cap <= usize::MAX))]
     unsafe fn shrink_ext(&mut self, cap: usize, elem_layout: Layout) -> Result<(), TryReserveErrorExt> {
         assert!(cap <= self.capacity_ext(elem_layout.size()), "Tried to shrink to a larger capacity");
         // SAFETY: just checked this isn't trying to grow.
@@ -429,6 +434,7 @@ impl<A: Allocator> RawVecInner<A> {
     #[rapx::verify]
     #[rapx::requires(ValidNum(cap <= self.capacity_ext(elem_layout.size)))]
     #[rapx::requires(ValidNum(elem_layout.size % elem_layout.align == 0))]
+    #[rapx::requires(ValidNum(elem_layout.size * self.cap <= usize::MAX))]
     unsafe fn shrink_unchecked_ext(
         &mut self,
         cap: usize,

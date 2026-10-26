@@ -86,9 +86,18 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         allow_repeat: usize,
     ) -> Self {
         let checkpoints: Vec<_> = target.all_checkpoints().into_iter().cloned().collect();
-        let path_tree =
-            PathExtractor::new_with_instance(tcx, target.def_id, allow_repeat, target.instance)
-                .run();
+        let locations = checkpoints
+            .iter()
+            .map(Checkpoint::location)
+            .collect::<Vec<_>>();
+        let path_tree = PathExtractor::new_with_instance(
+            tcx,
+            target.def_id,
+            allow_repeat,
+            target.instance,
+        )
+        .with_checkpoints(&locations)
+        .run();
         Self {
             tcx,
             target,
