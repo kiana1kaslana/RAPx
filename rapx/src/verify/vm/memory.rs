@@ -12,6 +12,196 @@ use z3::{Context, Sort, ast::{Array, Ast, Bool, Int}};
 use super::state::{AllocId, AllocKind, Allocation, MemoryContent, MemoryUnit, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
+    pub(crate) fn write_provenance_allocation(
+        &mut self,
+        pointer: &VmValue<'z3, 'tcx>,
+        value: VmValue<'z3, 'tcx>,
+    ) -> bool {
+        if self.write_indexed_allocation(pointer, value.clone()) {
+            return true;
+        }
+        self.write_field_allocation(pointer, value)
+    }
+
+    pub(crate) fn invalidate_provenance_allocation(
+        &mut self,
+        pointer: &VmValue<'z3, 'tcx>,
+    ) {
+        let Some(provenance) = pointer.provenance.as_ref() else {
+            return;
+        };
+        let alloc_id = provenance.alloc_id;
+        if !self.current_frame.local_alloc.values().any(|id| *id == alloc_id) {
+            return;
+        }
+        let content = self.content_mut(alloc_id);
+        content.values.clear();
+        content.indexed_elements.clear();
+        content.indexed_elements_modified = true;
+        content.byte_array = None;
+        content.byte_written.clear();
+    }
+
+    fn write_field_allocation(
+        &mut self,
+        pointer: &VmValue<'z3, 'tcx>,
+        value: VmValue<'z3, 'tcx>,
+    ) -> bool {
+        let Some(provenance) = pointer.provenance.as_ref() else {
+            return false;
+        };
+        let Some(offset) = provenance.offset.simplify().as_u64() else {
+            return false;
+        };
+        let Some(pointee_ty) = mir_utils::pointee_ty(pointer.ty) else {
+            return false;
+        };
+        if value.ty != pointee_ty {
+            return false;
+        }
+        let local = self.current_frame.local_alloc.iter().find_map(|(local, alloc_id)| {
+            (*alloc_id == provenance.alloc_id).then_some(*local)
+        });
+        let Some(root_ty) = local
+            .map(|local| self.body().local_decls[local].ty)
+            .or_else(|| self.alloc(provenance.alloc_id).element_ty.as_ty()) else {
+            return false;
+        };
+        let Some(path) = self.field_path_at_offset(root_ty, offset, pointee_ty) else {
+            return false;
+        };
+        self.content_mut(provenance.alloc_id).values.retain(|(ty, stored_path), _| {
+            *ty == root_ty
+                && !stored_path.starts_with(&path)
+                && !path.starts_with(stored_path)
+        });
+        if matches!(pointee_ty.kind(), TyKind::Uint(rustc_middle::ty::UintTy::U8)) {
+            self.byte_write(provenance.alloc_id, &provenance.offset, &value.z3_term);
+        } else {
+            let content = self.content_mut(provenance.alloc_id);
+            content.byte_array = None;
+            content.byte_written.clear();
+        }
+        let aliases = self.current_frame.local_alloc.keys().copied().filter(|local| {
+            let local_ty = self.body().local_decls[*local].ty;
+            matches!(local_ty.kind(), TyKind::Ref(..) | TyKind::RawPtr(..))
+                && mir_utils::pointee_ty(local_ty) == Some(root_ty)
+                && self.local_value(*local)
+                    .and_then(|value| value.provenance_alloc_id()) == Some(provenance.alloc_id)
+        }).collect::<Vec<_>>();
+        self.store_value(provenance.alloc_id, root_ty, path.clone(), value.clone());
+        for local in aliases {
+            self.write_local_path(local, path.clone(), value.clone());
+        }
+        true
+    }
+
+    fn field_path_at_offset(
+        &self,
+        ty: Ty<'tcx>,
+        offset: u64,
+        target_ty: Ty<'tcx>,
+    ) -> Option<Vec<usize>> {
+        let fields = match ty.kind() {
+            TyKind::Adt(def, args) if !def.is_enum() && !def.is_union() => def
+                .non_enum_variant()
+                .fields
+                .iter()
+                .map(|field| mir_utils::field_ty(self.tcx, field, args))
+                .collect::<Vec<_>>(),
+            TyKind::Tuple(fields) => fields.iter().collect::<Vec<_>>(),
+            _ => return None,
+        };
+        let mut found = None;
+        for (index, field_ty) in fields.into_iter().enumerate() {
+            let start = self.field_offset_in_bytes(ty, index);
+            let size = self.size_of_ty(field_ty);
+            if offset < start || offset - start >= size {
+                continue;
+            }
+            let nested = if offset == start && field_ty == target_ty {
+                Some(Vec::new())
+            } else {
+                self.field_path_at_offset(field_ty, offset - start, target_ty)
+            };
+            if let Some(mut nested) = nested {
+                nested.insert(0, index);
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(nested);
+            }
+        }
+        found
+    }
+
+    fn write_indexed_allocation(
+        &mut self,
+        pointer: &VmValue<'z3, 'tcx>,
+        value: VmValue<'z3, 'tcx>,
+    ) -> bool {
+        let Some(provenance) = pointer.provenance.as_ref() else {
+            return false;
+        };
+        if self.alloc(provenance.alloc_id).slice_len().is_none() {
+            return false;
+        }
+        let Some(pointee_ty) = mir_utils::pointee_ty(pointer.ty) else {
+            return false;
+        };
+        let Some(mut element_ty) = self.alloc(provenance.alloc_id).element_ty.as_ty() else {
+            return false;
+        };
+        while let TyKind::Array(inner, _) = element_ty.kind() {
+            element_ty = *inner;
+        }
+        if element_ty != pointee_ty || value.ty != pointee_ty {
+            return false;
+        }
+        let element_size = self.size_of_ty(pointee_ty);
+        if element_size == 0 {
+            return false;
+        }
+        let index = match &provenance.offset_kind {
+            Some(super::state::OffsetKind::Element(index)) => Some(index.clone()),
+            _ => provenance.offset.simplify().as_u64().and_then(|offset| {
+                (offset % element_size == 0)
+                    .then(|| Int::from_u64(self.z3_ctx, offset / element_size))
+            }),
+        };
+        self.content_mut(provenance.alloc_id)
+            .values
+            .retain(|(_, path), _| path.is_empty());
+        if element_size == 1
+            && matches!(pointee_ty.kind(), TyKind::Uint(rustc_middle::ty::UintTy::U8))
+        {
+            self.byte_write(provenance.alloc_id, &provenance.offset, &value.z3_term);
+        } else if self.content(provenance.alloc_id).byte_array.is_some() {
+            if element_size <= 256 {
+                for byte in 0..element_size {
+                    let offset = Int::add(
+                        self.z3_ctx,
+                        &[&provenance.offset, &Int::from_u64(self.z3_ctx, byte)],
+                    );
+                    let unknown = self.fresh_int("written_byte");
+                    self.byte_write(provenance.alloc_id, &offset, &unknown);
+                }
+            } else {
+                let content = self.content_mut(provenance.alloc_id);
+                content.byte_array = None;
+                content.byte_written.clear();
+            }
+        }
+        if let Some(index) = index {
+            self.store_indexed_element(provenance.alloc_id, index, value);
+        } else {
+            let content = self.content_mut(provenance.alloc_id);
+            content.indexed_elements.clear();
+            content.indexed_elements_modified = true;
+        }
+        true
+    }
+
     pub(crate) fn address_of_place(&mut self, place: &Place<'tcx>) -> Option<VmValue<'z3, 'tcx>> {
         self.ensure_local_allocation(place.local);
 
@@ -23,9 +213,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             // Prefer the local's value provenance over the stack-allocation
             // provenance. For Box/Vec parameters, the value tracks the heap
             // allocation while slots tracks the stack location.
-            let provenance = self
-                .local_value(place.local)
-                .and_then(|v| v.provenance.clone())
+            let provenance = (!matches!(ty.kind(), TyKind::Array(..)))
+                .then(|| self.local_value(place.local).and_then(|v| v.provenance.clone()))
+                .flatten()
                 .or_else(|| {
                     self.current_frame.local_alloc
                         .get(&place.local)
@@ -60,7 +250,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let mut view_ty = current_ty;
 
         for proj in place.projection.iter() {
-            let mut handled = false;
             if let ProjectionElem::Index(local) = proj {
                 // The element stride is the *element* size, not the container
                 // size: peel `[T; N]` / `[T]` down to `T` (mirroring state.rs's
@@ -69,26 +258,16 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 // the factor for `idx + 1 <= N`.
                 let elem_ty = match current_ty.kind() {
                     TyKind::Array(e, _) | TyKind::Slice(e) => *e,
-                    _ => current_ty,
+                    _ => return None,
                 };
                 let elem_sz = Int::from_u64(self.z3_ctx, self.size_of_ty(elem_ty).max(1));
-                if let Some(val) = self.local_value(local)
-                    && let Some(idx) = val.z3_term.simplify().as_u64() {
-                        let scaled = Int::mul(self.z3_ctx, &[&Int::from_u64(self.z3_ctx, idx), &elem_sz]);
-                        term = Int::add(self.z3_ctx, &[&term, &scaled]);
-                        if let Some(ref mut prov) = provenance {
-                            prov.offset = Int::add(self.z3_ctx, &[&prov.offset, &scaled]);
-                        }
-                        handled = true;
-                    }
-                if !handled {
-                    let idx = self.fresh_int("idx");
-                    let scaled = Int::mul(self.z3_ctx, &[&idx, &elem_sz]);
-                    term = Int::add(self.z3_ctx, &[&term, &scaled]);
-                    if let Some(ref mut prov) = provenance {
-                        prov.offset = Int::add(self.z3_ctx, &[&prov.offset, &scaled]);
-                    }
+                let idx = self.local_value(local)?.z3_term.clone();
+                let scaled = Int::mul(self.z3_ctx, &[&idx, &elem_sz]);
+                term = Int::add(self.z3_ctx, &[&term, &scaled]);
+                if let Some(ref mut prov) = provenance {
+                    prov.offset = Int::add(self.z3_ctx, &[&prov.offset, &scaled]);
                 }
+                current_ty = elem_ty;
                 continue;
             }
             match proj.kind() {
@@ -97,8 +276,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     field_path.push(fidx);
                     let field_offset = self.field_offset_in_bytes(current_ty, fidx);
                     let field_off = Int::from_u64(self.z3_ctx, field_offset);
-                    // Advance `current_ty` to the field's type so that subsequent
-                    // projections resolve their offsets against the right layout.
                     let field_ty = match current_ty.kind() {
                         TyKind::Adt(adt_def, substs) => {
                             let variant = adt_def.non_enum_variant();
@@ -155,8 +332,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let pointed = self.local_value(place.local)?;
                     term = pointed.z3_term.clone();
                     provenance = pointed.provenance.clone();
-                    // For fat pointers (aggregates without provenance),
-                    // use the first field's provenance (the data pointer).
                     if provenance.is_none() && matches!(pointed.ty.kind(), TyKind::RawPtr(..))
                         && let Some(field0) = self.field_value(place.local, &[0]) {
                             provenance = field0.provenance.clone();
@@ -191,8 +366,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
         let ty = self.body().local_decls[local].ty;
         let align = self.align_sym(ty);
-        // Generate the base address symbol directly (the address lives only in
-        // `Allocation::base` now; `local_address` reads it back from there).
         let name = format!("addr__{}", local.as_usize());
         let base = Int::new_const(self.z3_ctx, name.as_str());
         let id = AllocId(self.units.len());
@@ -288,6 +461,13 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// `InBound`.
     pub(crate) fn size_sym(&mut self, ty: Ty<'tcx>) -> Int<'z3> {
         let ty = peel_slice_elem(ty);
+        if let TyKind::Array(elem, count) = ty.kind() {
+            let count = self.const_len_term(count);
+            let zero = Int::from_u64(self.z3_ctx, 0);
+            self.constraints.assertions.push(count.ge(&zero));
+            let elem_size = self.size_sym(*elem);
+            return Int::mul(self.z3_ctx, &[&count, &elem_size]);
+        }
         let size = self.size_of_ty(ty);
         if size > 0 || !mir_utils::ty_has_type_param(ty) {
             return Int::from_u64(self.z3_ctx, size);
@@ -308,11 +488,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     pub(crate) fn const_len_term(&self, const_len: &rustc_middle::ty::Const<'tcx>) -> Int<'z3> {
         match const_len.try_to_target_usize(self.tcx) {
             Some(v) => Int::from_u64(self.z3_ctx, v),
-            None => {
-                let const_text = format!("Ty({:?}, {:?})", self.tcx.types.usize, const_len);
-                let name = format!("const_{}", const_text.replace([':', '#', ' '], "_"));
-                Int::new_const(self.z3_ctx, name.as_str())
-            }
+            None => self.symbolic_const_term(&rustc_middle::mir::Const::Ty(
+                self.tcx.types.usize,
+                *const_len,
+            )),
         }
     }
 
@@ -324,6 +503,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// element size keeps `size / elem_size` derivations from dividing by zero.
     pub(crate) fn size_sym_read(&self, ty: Ty<'tcx>) -> Int<'z3> {
         let ty = peel_slice_elem(ty);
+        if let TyKind::Array(elem, count) = ty.kind() {
+            let count = self.const_len_term(count);
+            let elem_size = self.size_sym_read(*elem);
+            return Int::mul(self.z3_ctx, &[&count, &elem_size]);
+        }
         let size = self.size_of_ty(ty);
         if size > 0 {
             return Int::from_u64(self.z3_ctx, size);
@@ -360,7 +544,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// pointer (`(*node).value`) inherits the container's alignment.
     pub(crate) fn align_sym(&mut self, ty: Ty<'tcx>) -> Int<'z3> {
         let ty = peel_slice_elem(ty);
-        // An array's alignment equals its element's alignment.
         if let TyKind::Array(elem, _) = ty.kind() {
             return self.align_sym(*elem);
         }
@@ -421,7 +604,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.constraints.assertions.push(size.ge(&sum));
                 }
             }
-        // Layout invariant: a type's size is a multiple of its alignment.
         let size = self.size_sym(ty);
         self.constraints.assertions.push(size.rem(&a)._eq(&zero));
         a
@@ -434,7 +616,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// type).  Concrete types return their constant alignment.
     pub(crate) fn align_sym_read(&self, ty: Ty<'tcx>) -> Int<'z3> {
         let ty = peel_slice_elem(ty);
-        // An array's alignment equals its element's alignment.
         if let TyKind::Array(elem, _) = ty.kind() {
             return self.align_sym_read(*elem);
         }

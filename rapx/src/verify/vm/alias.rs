@@ -67,8 +67,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
         let alloc_id = prov.alloc_id;
 
-        // Walk all locals to find which one(s) have the same provenance.
-        // Prefer parameters (arg_count) over temporaries.
         let mut best: Option<VmOrigin> = None;
 
         for (local, val) in self.all_local_values() {
@@ -85,8 +83,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 kind,
             };
 
-            // Prefer parameter locals and owned origins (Box/Vec), then the
-            // lower local index.
             let is_param = local.as_usize() >= 1 && local.as_usize() <= self.body().arg_count;
             let is_owned = candidate.is_owned();
 
@@ -223,7 +219,6 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
 ) -> VmAliasResult {
     let callee = match checkpoint.callee {
         Some(c) => c,
-        // raw-ptr-deref / synthetic checkpoints: trace provenance to verify safety
         None => {
             let Some(origin_arg) = checkpoint.args.first() else {
                 return VmAliasResult::Unknown;
@@ -415,7 +410,6 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
                     return VmAliasResult::Proved;
                 }
             }
-            // Pointer has provenance: check if it's safe.
             if let Some(prov) = &origin_val.provenance {
                 let is_external = vm_state.alloc(prov.alloc_id).is_external();
                 if !is_external {
@@ -432,7 +426,6 @@ pub(crate) fn check_alias_vm<'z3, 'tcx>(
                     return VmAliasResult::Proved;
                 }
             }
-            // Without provenance: fall back to any reference parameter.
             if origin_val.provenance.is_none() {
                 for decl in &vm_state.body().local_decls {
                     if matches!(decl.ty.kind(), rustc_middle::ty::TyKind::Ref(..)) {
@@ -547,7 +540,6 @@ fn check_view_alias<'z3, 'tcx>(
     }
 
     let origin_place = alias_hazard::operand_place(origin_arg).unwrap_or_else(|| {
-        // Fallback: extract from the origin value's type
         PlaceKey::from_origin(
             mir_utils::extract_local(origin_arg)
                 .map(|l| l.as_usize())
@@ -578,7 +570,6 @@ fn check_view_alias<'z3, 'tcx>(
             }
         }
 
-    // Try VM provenance tracing for fast-path checks
     if let Some(origin) = vm_state.resolve_origin(&origin_val) {
         match (kind, origin.kind) {
             (HazardKind::UniqueView, VmOriginKind::MutRef) => return VmAliasResult::Proved,
@@ -603,8 +594,6 @@ fn check_view_alias<'z3, 'tcx>(
                     "shared reference cannot produce a unique mutable view".into(),
                 );
             }
-            // Raw-pointer origins (*const / *mut, compile-time-equivalent)
-            // defer: the local hazard scan / escape / field analysis decides.
             _ => {}
         }
         if origin.is_owned() {
@@ -633,7 +622,6 @@ fn check_view_alias<'z3, 'tcx>(
         .get(1)
         .and_then(|a| alias_hazard::operand_place(a));
 
-    // Run MIR-level hazard scanning
     if let Some(reason) = alias_hazard::local_hazard_violation(
         tcx,
         caller,
@@ -646,35 +634,13 @@ fn check_view_alias<'z3, 'tcx>(
         return VmAliasResult::Failed(reason);
     }
 
-    // Type-level safety checks (even when provenance is unavailable)
     let origin_pk = alias_hazard::resolve_param_origin(tcx, caller, &origin_place);
     if let Some(local_index) = origin_pk {
-        match alias_hazard::alias_proved_for_param_local(tcx, caller, local_index, kind) {
-            alias_hazard::HazardCheck::Safe(_) => return VmAliasResult::Proved,
-            alias_hazard::HazardCheck::Violation(_) => {
-                // Don't hard-fail here — the struct field analysis below may
-                // override this for &self methods with private raw ptr fields.
-            }
-            alias_hazard::HazardCheck::Inconclusive => {}
+        if let alias_hazard::HazardCheck::Safe(_) =
+            alias_hazard::alias_proved_for_param_local(tcx, caller, local_index, kind)
+        {
+            return VmAliasResult::Proved;
         }
-    }
-    let origin_local_place = if origin_place.fields.is_empty() {
-        PlaceKey::from_origin(
-            origin_place.local().map(|l| l.as_usize()).unwrap_or(1),
-            vec![],
-        )
-    } else {
-        origin_place.clone()
-    };
-    match alias_hazard::alias_proved_for_param_local_from_origin(
-        tcx,
-        caller,
-        &origin_local_place,
-        kind,
-    ) {
-        alias_hazard::HazardCheck::Violation(_) => {} // defer to struct field analysis
-        alias_hazard::HazardCheck::Safe(_) => {}
-        alias_hazard::HazardCheck::Inconclusive => {}
     }
 
     let dest_escapes = alias_hazard::destination_flows_to_return(tcx, caller, destination);
@@ -715,7 +681,6 @@ fn check_view_alias<'z3, 'tcx>(
         }
     }
 
-    // If no hazard found and view doesn't escape: local view is safe
     if !dest_escapes {
         return VmAliasResult::Proved;
     }
@@ -723,14 +688,6 @@ fn check_view_alias<'z3, 'tcx>(
     // A unique view that escapes with a raw-pointer origin not backed by a
     // private struct field is a hazard.
     if kind == HazardKind::UniqueView {
-        // Try to infer struct field from the caller's self type when origin
-        // tracing fails. For &self/&mut self methods, scan the struct's fields
-        // for a raw pointer field.
-        if let Some(sfo) = infer_self_field_from_type(tcx, caller, checkpoint)
-            .or_else(|| find_struct_field_origin_for_param(tcx, caller, checkpoint))
-            && alias_hazard::escaped_self_field_violation(tcx, caller, &sfo).is_none() {
-                return VmAliasResult::Proved;
-            }
         let body = tcx.optimized_mir(caller);
         if body.arg_count >= 1 {
             let self_ty = body.local_decls[Local::from_usize(1)].ty;
@@ -748,7 +705,6 @@ fn check_view_alias<'z3, 'tcx>(
         ));
     }
 
-    // Conservatively proved (origin traced to safe type or no conflicts found)
     VmAliasResult::Proved
 }
 
@@ -829,7 +785,6 @@ fn find_struct_field_origin_for_param<'tcx>(
         }
     }
 
-    // Otherwise, scan MIR blocks for assignments from _1 to the arg's local
     let arg_local = arg_place.local;
     if arg_place.projection.is_empty() && arg_local != Local::from_usize(1) {
         for block in body.basic_blocks.iter() {
@@ -875,64 +830,6 @@ fn find_struct_field_origin_for_param<'tcx>(
     None
 }
 
-/// When origin tracing fails to resolve the exact struct field, try to infer
-/// it from the function's self type. Looks for a raw pointer field in the struct
-/// — for simple wrappers with a single raw pointer field, this works reliably.
-fn infer_self_field_from_type<'tcx>(
-    tcx: rustc_middle::ty::TyCtxt<'tcx>,
-    caller: DefId,
-    checkpoint: &Checkpoint<'tcx>,
-) -> Option<FieldOrigin> {
-    let (adt_def, _) = self_adt(tcx, caller)?;
-
-    let adt = tcx.adt_def(adt_def);
-    let mut raw_ptr_fields: Vec<(usize, String)> = Vec::new();
-    let variant = adt.non_enum_variant();
-    for (idx, field) in variant.fields.iter().enumerate() {
-        let field_ty = mir_utils::field_ty(
-            tcx,
-            field,
-            rustc_middle::ty::GenericArgs::identity_for_item(tcx, adt_def),
-        );
-        if matches!(field_ty.kind(), rustc_middle::ty::TyKind::RawPtr(..)) {
-            raw_ptr_fields.push((idx, field.name.to_string()));
-        }
-    }
-
-    if raw_ptr_fields.len() == 1 {
-        let (field_index, field_name) = raw_ptr_fields.into_iter().next().unwrap();
-        return Some(FieldOrigin {
-            struct_def_id: adt_def,
-            field_index,
-            field_name,
-        });
-    }
-
-    // Multiple raw ptr fields: try to match by the checkpoint arg's source
-    // This is less reliable but serves as a fallback.
-    if let Some(arg0) = checkpoint.args.first()
-        && let Some(place) = alias_hazard::operand_mir_place(arg0)
-    {
-        let fields: Vec<usize> = place
-            .projection
-            .iter()
-            .filter_map(|p| match p {
-                ProjectionElem::Field(idx, _) => Some(idx.as_usize()),
-                _ => None,
-            })
-            .collect();
-        if let Some(&idx) = fields.first()
-            && let Some(field) = adt.all_fields().nth(idx) {
-                return Some(FieldOrigin {
-                    struct_def_id: adt_def,
-                    field_index: idx,
-                    field_name: field.name.to_string(),
-                });
-            }
-    }
-
-    None
-}
 /// Check whether a self field's type is a shared reference (`&T` or `&[T]`).
 /// Used by raw-ptr-deref alias checks to prove shared views are safe when the
 /// underlying field is a shared reference.
@@ -1083,7 +980,6 @@ fn check_read_memory_alias<'z3, 'tcx>(
         return VmAliasResult::Proved;
     }
 
-    // If the pointee type is Copy, read is safe
     if let rustc_middle::ty::TyKind::RawPtr(pointee, _) = origin_val.ty.kind() {
         let tcx = vm_state.tcx;
         let typing_env = rustc_middle::ty::TypingEnv::post_analysis(tcx, checkpoint.caller);
@@ -1092,7 +988,6 @@ fn check_read_memory_alias<'z3, 'tcx>(
         }
     }
 
-    // If the returned value doesn't escape to the return, read is local and safe
     let tcx = vm_state.tcx;
     let destination = alias_hazard::call_destination(tcx, checkpoint);
     if !alias_hazard::destination_flows_to_return(tcx, checkpoint.caller, destination) {

@@ -240,9 +240,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             CallEffect::ReturnTransparentDeref { arg, peel } => {
                 if let Some(arg_val) = args.get(*arg) {
                     self.set_dest_as_heap_ptr(arg_val, dest);
-                    // Peel `peel` leading field-0 hops off the argument's
-                    // pointee field values (ManuallyDrop.value → MaybeDangling.0)
-                    // and expose them as the deref result's pointee fields.
                     if let Some(arg_local) = caller_arg_locals.get(*arg).copied().flatten() {
                         let keys: Vec<Vec<usize>> = self.field_paths(arg_local);
                         for path in keys {
@@ -268,7 +265,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
                 let dest_ty = self.body().local_decls[dest].ty;
                 if let TyKind::Tuple(elem_tys) = dest_ty.kind() {
-                    // Look up the source allocation from self's provenance.
                     let src_alloc_id = self_val.provenance.as_ref().map(|p| p.alloc_id);
 
                     let (elem_ty, elem_sz_term, alloc_size) = src_alloc_id
@@ -301,7 +297,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let mid = mid_val.z3_term.clone();
                     let rest_len = Int::sub(self.z3_ctx, &[&total_len, &mid]);
 
-                    // mid byte offset for field 1 pointer
                     let mid_bytes = Int::mul(self.z3_ctx, &[&mid, &elem_sz_term]);
                     let ptr1 = Int::add(self.z3_ctx, &[&self_val.z3_term, &mid_bytes]);
 
@@ -484,11 +479,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let mut val = arg_val.clone();
                     let dest_ty = self.body().local_decls[dest].ty;
                     val.ty = dest_ty;
-                    // The returned pointer aliases `arg`, so it is non-null
-                    // exactly when the source is. The source is non-null either
-                    // because its value already carries the fact, or by its
-                    // *type*: a reference (`&`/`&mut`) is never null, and
-                    // `NonNull` is non-null by invariant.
                     let src_non_null = arg_val.facts.non_null
                         || matches!(arg_val.ty.kind(), rustc_middle::ty::TyKind::Ref(..))
                         || matches!(
@@ -497,11 +487,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                                 if api_classify::is_std_nonnull(adt.did())
                         );
                     val.facts.non_null = src_non_null;
-                    // Preserve the tracked alignment so `as_ptr().deref()` can
-                    // discharge the `raw-ptr-deref` `Align` check (Iter::next).
                     val.facts.align_n = arg_val.facts.align_n.clone();
-                    // Pointer-returning APIs expose the backing allocation;
-                    // mark it init-accessible for raw pointer types.
                     if matches!(dest_ty.kind(), rustc_middle::ty::TyKind::RawPtr(..)) {
                         val.facts.init = true;
                     }
@@ -613,9 +599,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }
             CallEffect::ReturnAligned => {
                 if let Some(mut existing) = self.local_value(dest).cloned() {
-                    // `as_ptr`/`as_mut_ptr`/`into_raw` expose a pointer aligned to
-                    // the *pointee* type, so record the symbolic alignment for the
-                    // downstream `raw-ptr-deref`/`from_raw_parts` `Align` check.
                     if existing.facts.align_n.is_none() {
                         let dest_ty = self.body().local_decls[dest].ty;
                         if let Some(pointee) = mir_utils::pointee_ty(dest_ty) {
@@ -855,8 +838,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let dest_ty = self.body().local_decls[dest].ty;
                     let zero = Int::from_u64(self.z3_ctx, 0);
                     let term = self.fresh_int(&format!("ret_nz_iff_{}", dest.as_usize()));
-                    // `result == 0` iff `arg == 0`, i.e. non-zero is preserved
-                    // exactly (bit-preserving ops map 0 -> 0, non-zero -> non-zero).
                     self.constraints
                         .assertions
                         .push(term._eq(&zero)._eq(&a.z3_term._eq(&zero)));
@@ -864,8 +845,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             CallEffect::ReturnOptionSomeNonZero => {
-                // `Some` payload is unconditionally non-zero (e.g.
-                // `checked_next_power_of_two`).
                 let zero = Int::from_u64(self.z3_ctx, 0);
                 let term = self.fresh_int(&format!("ret_opt_nz_{}", dest.as_usize()));
                 self.constraints.assertions.push(term._eq(&zero).not());
@@ -1012,9 +991,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             self.alloc_mut(prov.alloc_id).element_ty = ElementTy::Typed(*inner);
                         }
                     }
-                    // For locally-created Vec-like types: create a heap data
-                    // allocation on first mutation. (Param Vecs already have
-                    // an external allocation set by init_parameters.)
                     let is_vec = api_classify::is_vec_push_or_reserve(callee);
                     let is_external = self.alloc(prov.alloc_id).is_external();
                     if is_vec && !is_external {
@@ -1046,8 +1022,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             elem_ty.unwrap_or(container_ty),
                         );
                     }
-                    // When offset is concrete, only mark the bytes actually
-                    // written. For symbolic offsets, mark entire allocation.
                     let off_u64 = prov
                         .offset
                         .as_u64()
@@ -1130,16 +1104,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         offset: Int::from_u64(self.z3_ctx, 0),
                         offset_kind: None,
                     };
-                    // Propagate init status and byte-level tracking from the source pointer.
                     if let Some(ref source_prov) = ptr_val.provenance {
                         if !self.alloc(source_prov.alloc_id).facts.dead {
                             self.content_mut(alloc_id).facts.initialized = true;
                             self.alloc_mut(alloc_id).parent = Some(source_prov.alloc_id);
                         }
-                        // Copy byte-level tracking (value, init, NUL knowledge),
-                        // shifting by the source pointer's byte offset so a
-                        // non-zero-offset sub-slice (`from_raw_parts(ptr.add(k),
-                        // n)`) inherits the right per-byte state.
                         let src_offset = source_prov
                             .offset
                             .simplify()
@@ -1172,8 +1141,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             source: ValueSource::None,
                         },
                     );
-                    // Materialize `{ptr, cap, len}` fields for a Vec destination
-                    // (`from_raw_parts` sets cap == len).
                     if let rustc_middle::ty::TyKind::Adt(adt_def, _) = dest_ty.kind()
                         && api_classify::is_std_vec(adt_def.did())
                     {
@@ -1318,16 +1285,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             CallEffect::ReturnNewAllocationFromBox => {
-                // Box→Vec conversion (into_vec, box_assume_init_into_vec_unsafe)
-                // and `slice::to_vec` (a fresh copy of a slice).
                 self.ensure_local_allocation(dest);
                 let dest_ty = self.body().local_decls[dest].ty;
                 let elem_ty = crate::verify::call_summary::effects::vec_elem_ty(dest_ty);
                 let heap_align = elem_ty
                     .map(|ty| self.align_sym(ty))
                     .unwrap_or_else(|| Int::from_u64(self.z3_ctx, 1));
-                // Use the receiver's slice length as the allocation size when
-                // known (`to_vec`/`into_vec`), else a symbolic upper bound.
                 let known_len = args
                     .first()
                     .and_then(|v| v.provenance.as_ref())
@@ -1346,9 +1309,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     .clone()
                     .unwrap_or_else(|| Int::from_u64(self.z3_ctx, i64::MAX as u64));
                 let (alloc_id, base) = self.allocate_external(size, heap_align, elem_ty);
-                // Copy the boxed slice's tracked byte values into the fresh Vec
-                // buffer so byte-level checkers (`ValidCStr`/`ValidString`) can
-                // reason over the copied contents.
                 if let Some(box_alloc) = args.first().and_then(|v| v.provenance_alloc_id()) {
                     self.copy_byte_tracking(box_alloc, 0, alloc_id);
                 }
@@ -1374,9 +1334,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         source: ValueSource::None,
                     },
                 );
-                // `into_vec` / `box_assume_init_into_vec_unsafe`: the Vec's
-                // length equals the source boxed slice's length (symbolic);
-                // cap == len (no spare capacity).
                 if let rustc_middle::ty::TyKind::Adt(adt_def, _) = dest_ty.kind()
                     && api_classify::is_std_vec(adt_def.did())
                 {
@@ -1600,7 +1557,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         .expect("iter_ptr_end guarantees same-alloc provenance");
                     self.set_local(dest, VmValue::new(len, dest_ty));
                 } else {
-                    // is_empty(): ptr == end_or_len  (non-ZST branch)
                     let pp = ptr.provenance.as_ref().unwrap();
                     let ep = end.provenance.as_ref().unwrap();
                     let eq = pp.offset._eq(&ep.offset);
@@ -1628,7 +1584,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         .as_ref()
                         .is_some_and(|p| !self.alloc(p.alloc_id).is_external());
                 if definitely_non_null {
-                    // Some(NonNull(ptr)): the Option data payload is the non-null pointer.
                     let mut val = ptr.clone();
                     val.ty = dest_ty;
                     val.facts.non_null = true;
@@ -1638,7 +1593,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         .push(ptr.z3_term._eq(&zero).not());
                     self.set_local(dest, val);
                 } else {
-                    // ptr may be null, so the Option may be None — keep it symbolic.
                     let term = self.fresh_int(&format!("nn_new_{}", dest.as_usize()));
                     self.set_local(dest, VmValue::new(term, dest_ty));
                 }
@@ -1672,9 +1626,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     .iter_remaining_len_from_ptrs(&ptr, &end, Some(&iter_key))
                     .expect("iter_ptr_end guarantees same-alloc provenance");
                 let is_empty = remaining._eq(&Int::from_u64(self.z3_ctx, 0));
-                // The returned element is the *current* position: the tracked element
-                // index (iter_ptr_offset) scaled by the element stride, or the base
-                // ptr offset on the first call.
                 let zero = Int::from_u64(self.z3_ctx, 0);
                 let cur_off = match self.constraints.term_caches.iter_ptr_offset.get(&iter_key) {
                     Some((_, prev, _)) => Int::mul(self.z3_ctx, &[prev, &sz]),
@@ -1695,7 +1646,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     },
                     source: ValueSource::None,
                 };
-                // Advance ptr when not empty
                 let one_term = Int::from_u64(self.z3_ctx, 1);
                 let (old_offset, base_len_elem) =
                     match self.constraints.term_caches.iter_ptr_offset.get(&iter_key) {
@@ -1703,7 +1653,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         None => (pp.offset.div(&sz), ep_elem),
                     };
                 let new_offset = Int::add(self.z3_ctx, &[&old_offset, &one_term]);
-                // Push: base_len >= tracked_offset
                 let base_len = base_len_elem.clone().unwrap_or_else(|| ep_offset.div(&sz));
                 self.constraints.assertions.push(Bool::or(
                     self.z3_ctx,
@@ -1762,8 +1711,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 let Some(alloc_id) = self_val.provenance_alloc_id() else {
                     return;
                 };
-                // The aggregate's fields are stored under the *monomorphized* view type
-                // (e.g. `Range<usize>`), not the generic `Range<A>` carried by `self`.
+                // Field values use the monomorphized type, e.g. `Range<usize>`.
                 let range_view_ty = self.units[alloc_id.0]
                     .content
                     .values

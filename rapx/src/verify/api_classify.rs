@@ -640,7 +640,6 @@ pub fn is_std_ordering(def_id: DefId) -> bool {
 
 // ── Arithmetic / collection-operation classifiers ─────────────────
 // Matched by `DefId` via [`other_api::OP_FNS`] (resolved from `fn_defs()`).
-// These were previously name-based in the call-summary registry; see
 // [`crate::def_ids::other_api`] for the exact method-name patterns each group collects.
 
 pub fn is_integer_wrapping_sub_method(callee: Option<DefId>) -> bool {

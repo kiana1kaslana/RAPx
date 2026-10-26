@@ -3,7 +3,7 @@
 use rustc_middle::mir::{CopyNonOverlapping, Local, Operand, Place, ProjectionElem, Rvalue};
 #[cfg(rapx_const_ext)]
 use rustc_middle::ty::consts::ConstExt;
-use z3::ast::{Ast, Int};
+use z3::ast::{Ast, Bool, Int};
 
 use super::super::state::{Provenance, VmState, VmValue};
 use super::eval_rvalue;
@@ -44,10 +44,55 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
     let uninit_source = source_place
         .and_then(|source| state.current_frame.local_alloc.get(&source.local))
         .is_some_and(|id| state.possible_uninit_allocs.contains(id));
+    let source_fields = source_place.map(|source| {
+        let prefix = source.projection.iter().filter_map(|projection| {
+            match projection.kind() {
+                ProjectionElem::Field(field, _) => Some(field.as_usize()),
+                _ => None,
+            }
+        }).collect::<Vec<_>>();
+        if !source.projection.iter().all(|projection| {
+            matches!(
+                projection.kind(),
+                ProjectionElem::Field(..)
+                    | ProjectionElem::Deref
+                    | ProjectionElem::Downcast(..)
+                    | ProjectionElem::UnwrapUnsafeBinder(..)
+            )
+        }) {
+            return Vec::new();
+        }
+        state.field_paths(source.local).into_iter().filter_map(|path| {
+            let rest = if prefix.is_empty() {
+                Some(path.clone())
+            } else if path.len() > prefix.len() && path.starts_with(&prefix) {
+                Some(path[prefix.len()..].to_vec())
+            } else {
+                None
+            }?;
+            state.field_value(source.local, &path).cloned().map(|value| (rest, value))
+        }).collect::<Vec<_>>()
+    }).unwrap_or_default();
     if place.projection.is_empty()
         && source_place.is_none_or(|source| source.local != place.local)
     {
-        state.invalidate_pointer_array(place.local);
+        state.invalidate_indexed_array(place.local);
+        state.invalidate_field_descendants(place.local, &[]);
+    }
+    if !place.projection.is_empty()
+        && place.projection.iter().all(|projection| {
+            matches!(projection.kind(), ProjectionElem::Field(..) | ProjectionElem::Downcast(..))
+        })
+    {
+        let path = place.projection.iter().filter_map(|projection| {
+            match projection.kind() {
+                ProjectionElem::Field(field, _) => Some(field.as_usize()),
+                _ => None,
+            }
+        }).collect::<Vec<_>>();
+        if !path.is_empty() {
+            state.invalidate_field_descendants(place.local, &path);
+        }
     }
     let mut value = eval_rvalue(state, place, rvalue);
 
@@ -95,53 +140,8 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             });
             state.set_local(place.local, wv);
         }
-        // Propagate field values for aggregate copies (e.g. `_4 = copy _1`) so
-        // downstream field accesses (NonZero::get -> self.0) resolve to the same
-        // symbolic field terms.  A projected source (`_11 = move (_1.2)`) shifts
-        // the field path by its `Field` projection prefix, so `(_1.2).1` becomes
-        // `_11.1` — this keeps the `NonNull` node field's provenance alive across
-        // `NodeRef` moves.
-        if let Some(sp) = source_place {
-            let field_prefix: Vec<usize> = sp
-                .projection
-                .iter()
-                .filter_map(|p| match p.kind() {
-                    ProjectionElem::Field(fi, _) => Some(fi.as_usize()),
-                    _ => None,
-                })
-                .collect();
-            // Also propagate for a leading `Deref` (`_3 = copy (*_1)`): the
-            // source is the pointee of a reference, whose per-field values are
-            // keyed by the reference local itself, so copying the pointee value
-            // into a fresh local must carry those field values along (otherwise
-            // `into_leaf(self)`'s `self.node` provenance is lost).
-            let only_field_deref = sp.projection.iter().all(|p| {
-                matches!(
-                    p.kind(),
-                    ProjectionElem::Field(..)
-                        | ProjectionElem::Deref
-                        | ProjectionElem::UnwrapUnsafeBinder(..)
-                )
-            });
-            if only_field_deref {
-                let keys: Vec<Vec<usize>> = state.field_paths(sp.local);
-                for k in keys {
-                    let rest = if field_prefix.is_empty() {
-                        Some(k.clone())
-                    } else if k.len() > field_prefix.len()
-                        && k[..field_prefix.len()] == field_prefix[..]
-                    {
-                        Some(k[field_prefix.len()..].to_vec())
-                    } else {
-                        None
-                    };
-                    if let Some(rest) = rest
-                        && let Some(fv) = state.field_value(sp.local, &k).cloned()
-                    {
-                        state.set_field_value(place.local, rest, fv);
-                    }
-                }
-            }
+        for (path, field) in source_fields {
+            state.set_field_value(place.local, path, field);
         }
         // Invalidate the moved-out source's owner-field provenance *after* the
         // field propagation, so a later `Owning` check does not treat the source
@@ -160,7 +160,12 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             .collect();
         if !field_indices.is_empty() {
             let track_iter = field_indices == [0];
-            state.set_field_value(place.local, field_indices, value);
+            state.set_field_value(place.local, field_indices.clone(), value);
+            for (path, field) in source_fields {
+                let mut full = field_indices.clone();
+                full.extend(path);
+                state.set_field_value(place.local, full, field);
+            }
             if track_iter {
                 state.track_iter_ptr_update(place.local);
             }
@@ -186,32 +191,30 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
                 let pointed = state.local_value(place.local).cloned();
                 if let Some(pointed) = pointed {
                     state.write_through_pointer(&pointed, Vec::new(), value);
+                    for (path, field) in source_fields {
+                        state.write_through_pointer(&pointed, path, field);
+                    }
                 }
                 return;
             } else {
-                // `&mut self` (and other reference parameters) materialize their
-                // pointee's scalar fields keyed by the *reference* local itself,
-                // so a `(*self).field = val` write must land in the reference
-                // local's own field values directly.  (This is what makes a
-                // struct-invariant re-proof see `self.len += 1`.)
-                if state.field_value(place.local, &field_indices).is_some() {
-                    let is_iter_field = field_indices == [0];
-                    let pointed = state.local_value(place.local).cloned();
-                    state.set_field_value(place.local, field_indices.clone(), value.clone());
-                    if let Some(pointed) = pointed {
-                        state.write_through_pointer(&pointed, field_indices, value);
-                    }
-                    if is_iter_field {
-                        state.track_iter_ptr_update(place.local);
-                    }
-                    return;
-                }
-                // Otherwise resolve the dereferenced pointer (a reference/reborrow
-                // temp) back to the local it points at, matching its address term
-                // against the known local addresses.
+                let has_local_field = state.field_value(place.local, &field_indices).is_some();
                 let pointed = state.local_value(place.local).cloned();
-                if let Some(pointed) = pointed {
-                    state.write_through_pointer(&pointed, field_indices, value);
+                let mut writes = vec![(field_indices.clone(), value)];
+                for (path, field) in source_fields {
+                    let mut full = field_indices.clone();
+                    full.extend(path);
+                    writes.push((full, field));
+                }
+                for (path, field) in writes {
+                    if has_local_field {
+                        state.write_local_path(place.local, path.clone(), field.clone());
+                    }
+                    if let Some(pointed) = &pointed {
+                        state.write_through_pointer(pointed, path, field);
+                    }
+                }
+                if has_local_field && field_indices == [0] {
+                    state.track_iter_ptr_update(place.local);
                 }
             }
         }
@@ -304,19 +307,61 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Track byte-level values for index-based stores (e.g. `buf[i] = 0u8`)
     /// that `record_projected_store` skips due to Index projections.
     fn record_indexed_store(&mut self, place: &Place<'tcx>, value: &VmValue<'z3, 'tcx>) {
-        if let Some((alloc_id, index)) = self.pointer_index_target(place) {
-            let content = self.content_mut(alloc_id);
-            content.pointer_elements_modified = true;
-            let elements = &mut content.pointer_elements;
-            elements.retain(|(stored_index, _)| {
-                stored_index
-                    .simplify()
-                    .as_u64()
-                    .zip(index.simplify().as_u64())
-                    .is_some_and(|(stored, written)| stored != written)
-            });
-            elements.push((index, value.clone()));
-            return;
+        let index_count = place.projection.iter().filter(|projection| {
+            matches!(projection.kind(), rustc_middle::mir::ProjectionElem::Index(_) | rustc_middle::mir::ProjectionElem::ConstantIndex { .. })
+        }).count();
+        if let Some((alloc_id, index)) = self.indexed_element_target(place)
+            && (index_count > 1
+                || matches!(value.ty.kind(), rustc_middle::ty::TyKind::RawPtr(..))
+                || self.content(alloc_id).indexed_elements_modified)
+        {
+            self.store_indexed_element(alloc_id, index, value.clone());
+            if index_count > 1 || matches!(value.ty.kind(), rustc_middle::ty::TyKind::RawPtr(..)) {
+                return;
+            }
+        }
+        let mut element_ty = place.ty(self.body(), self.tcx).ty;
+        let array_ty = element_ty;
+        let mut array_depth = 0;
+        while let rustc_middle::ty::TyKind::Array(inner, _) = element_ty.kind() {
+            element_ty = *inner;
+            array_depth += 1;
+        }
+        if array_depth > 0
+            && matches!(
+                element_ty.kind(),
+                rustc_middle::ty::TyKind::RawPtr(..)
+                    | rustc_middle::ty::TyKind::Int(..)
+                    | rustc_middle::ty::TyKind::Uint(..)
+                    | rustc_middle::ty::TyKind::Bool
+                    | rustc_middle::ty::TyKind::Char
+                    | rustc_middle::ty::TyKind::Float(..)
+            )
+            && let Some(address) = self.address_of_place(place)
+            && let Some(provenance) = address.provenance
+        {
+            let element_size = self.size_of_ty(element_ty);
+            if element_size > 0 {
+                let start = provenance.offset.div(&Int::from_u64(self.z3_ctx, element_size));
+                let count = Int::from_u64(self.z3_ctx, self.size_of_ty(array_ty) / element_size);
+                let end = Int::add(self.z3_ctx, &[&start, &count]);
+                let retained = self.content(provenance.alloc_id)
+                    .indexed_elements
+                    .iter()
+                    .filter(|(index, _)| {
+                        let distinct = Bool::or(
+                            self.z3_ctx,
+                            &[&index.lt(&start), &index.ge(&end)],
+                        );
+                        self.path_implies(&distinct)
+                    })
+                    .cloned()
+                    .collect();
+                let content = self.content_mut(provenance.alloc_id);
+                content.indexed_elements = retained;
+                content.indexed_elements_modified = true;
+                return;
+            }
         }
         if place.projection.len() == 1
             && let rustc_middle::mir::ProjectionElem::Index(index_local) = place.projection[0]

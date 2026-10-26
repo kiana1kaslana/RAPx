@@ -16,7 +16,10 @@ use rustc_hir::LangItem;
 #[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
 use rustc_hir::attrs::lang_items::LangItem;
 use rustc_middle::ty::{Ty, TyKind};
-use z3::ast::Ast;
+use z3::{
+    SatResult, Solver,
+    ast::{Ast, Int},
+};
 
 use super::PropertyChecker;
 
@@ -66,11 +69,9 @@ impl PropertyChecker {
                 return CheckResult::ProvedByRule;
             }
 
-            // Check provenance: does the allocation's element type match the expected type?
             if let Some(alloc_id) = value.provenance_alloc_id() {
                 let alloc = vm_state.alloc(alloc_id);
                 if let Some(mut elem_ty) = alloc.element_ty.as_ty() {
-                    // Resolve generic type param to concrete callsite type.
                     elem_ty = self.resolve_ty_params(vm_state, checkpoint, elem_ty);
                     if matches!(elem_ty.kind(), TyKind::Param(_)) {
                         let resolved = self.instantiate_callsite_ty(vm_state, checkpoint, elem_ty);
@@ -92,8 +93,6 @@ impl PropertyChecker {
                     if elem_ty == expected_elem {
                         return CheckResult::ProvedByRule;
                     }
-                    // MaybeUninit<T> accessed via raw pointer from as_mut_ptr:
-                    // treat as T for write ops where caller will initialize it.
                     if let TyKind::Adt(adt_def, substs) = elem_ty.kind()
                         && crate::verify::api_classify::is_maybe_uninit_type(adt_def.did())
                             && matches!(value.ty.kind(), TyKind::RawPtr(..))
@@ -104,7 +103,6 @@ impl PropertyChecker {
                                     ) {
                                         return CheckResult::ProvedByRule;
                                     }
-                    // Struct/enum field: check if expected_ty matches a field at the provenance offset.
                     if let TyKind::Adt(adt_def, substs) = elem_ty.kind()
                         && !adt_def.is_enum() {
                             let off_u64 = value
@@ -131,7 +129,6 @@ impl PropertyChecker {
                                         return CheckResult::Failed;
                                     }
                                 } else if off_u64 == Some(accum) {
-                                    // Unwrap ManuallyDrop<T> → T for unions like MaybeUninit.
                                     if let TyKind::Adt(wrap_adt, wrap_substs) = field_ty.kind()
                                         && !wrap_adt.is_enum()
                                             && (vm_state.tcx.is_lang_item(
@@ -152,9 +149,6 @@ impl PropertyChecker {
                                 accum += vm_state.size_of_ty(field_ty).max(1);
                             }
                         }
-                    // ForEach (`buckets.iter()`): the allocation stores pointers
-                    // (`*mut T`), but the invariant applies to the pointee (`T`).
-                    // Unwrap *const/*mut to match.
                     if property.for_each().is_some()
                         && let TyKind::RawPtr(inner, _) = elem_ty.kind()
                             && *inner == expected_ty {
@@ -183,18 +177,15 @@ impl PropertyChecker {
                             return CheckResult::ProvedByRule;
                         }
                     }
-                    // Non-ADT element type that doesn't match → Failed.
                     if !matches!(elem_ty.kind(), TyKind::Adt(..)) {
                         return CheckResult::Failed;
                     }
-                    // ADT type with no matching field and no init → Failed.
                     if !value.facts.init {
                         return CheckResult::Failed;
                     }
                 }
             }
 
-            // No provenance: fall back to init and size checks.
             if value.facts.init
                 && vm_state.size_of_ty(value_elem_ty) > 0
                     && vm_state.size_of_ty(expected_ty) > 0
@@ -243,12 +234,8 @@ impl PropertyChecker {
         checkpoint: &Checkpoint<'tcx>,
         property: &Property<'tcx>,
     ) -> CheckResult {
-        let ty = match property.args().iter().find_map(|a| match a {
-            PropertyArg::Ty(t) => Some(*t),
-            _ => None,
-        }) {
-            Some(t) => t,
-            None => return CheckResult::Unknown(UnknownReason::Unimplemented),
+        let Some(ty) = Self::ty_arg(property, 0) else {
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
         // Resolve a generic `T` to the call-site concrete type (e.g. `Box<i32>`
         // for `drop_in_place::<Box<i32>>`), so `Size(T, 0)` is decided rather
@@ -279,7 +266,28 @@ impl PropertyChecker {
             Some(PropertyArg::Expr(ContractExpr::Const(c))) => {
                 let ty = resolved_ty;
                 if self.is_generic_ty(ty) {
-                    return CheckResult::Unknown(UnknownReason::Unimplemented);
+                    let Some(size) = vm_state.constraints.term_caches.sizes.get(&ty) else {
+                        return CheckResult::Unknown(UnknownReason::Unimplemented);
+                    };
+                    let Ok(expected) = u64::try_from(*c) else {
+                        return CheckResult::Unknown(UnknownReason::Unimplemented);
+                    };
+                    let equal = size._eq(&Int::from_u64(vm_state.z3_ctx, expected));
+                    let solver = Solver::new(vm_state.z3_ctx);
+                    vm_state.assert_all(&solver);
+                    solver.push();
+                    solver.assert(&equal.not());
+                    let proved = solver.check();
+                    solver.pop(1);
+                    if proved == SatResult::Unsat {
+                        return CheckResult::ProvedBySmt;
+                    }
+                    solver.assert(&equal);
+                    return match solver.check() {
+                        SatResult::Unsat => CheckResult::Failed,
+                        SatResult::Sat => CheckResult::Unknown(UnknownReason::Unimplemented),
+                        SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
+                    };
                 }
                 if vm_state.size_of_ty(ty) as u128 == *c {
                     CheckResult::ProvedByRule
@@ -297,10 +305,7 @@ impl PropertyChecker {
         checkpoint: &Checkpoint<'tcx>,
         property: &Property<'tcx>,
     ) -> CheckResult {
-        let Some(ty) = property.args().iter().find_map(|a| match a {
-            PropertyArg::Ty(t) => Some(*t),
-            _ => None,
-        }) else {
+        let Some(ty) = Self::ty_arg(property, 0) else {
             return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
         let ty = self.instantiate_callsite_ty(vm_state, checkpoint, ty);

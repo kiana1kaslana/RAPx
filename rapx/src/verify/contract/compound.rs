@@ -338,7 +338,6 @@ fn expand_compound_body<'tcx>(
             // declared argument roles (e.g. a `Ptr` param used in a `Ty` slot).
             if let Some(spec) = super::spec::find_spec(tag) {
                 match spec.kind {
-                    // Variadic target list (Alias/Alive): every param must be Ptr.
                     PropertyKind::Alias | PropertyKind::Alive => {
                         for (pos, a) in args.iter().enumerate() {
                             if let CompoundArg::Param(i) = a

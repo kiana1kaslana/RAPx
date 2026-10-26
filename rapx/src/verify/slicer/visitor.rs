@@ -214,8 +214,6 @@ impl<'tcx> BackwardSlicer<'tcx> {
                     keep_owner,
                 );
             }
-            // Pass 2: re-visit definitions that became relevant only
-            // during pass 1.
             Self::re_visit_newly_added(
                 visitor,
                 def_id,
@@ -232,8 +230,6 @@ impl<'tcx> BackwardSlicer<'tcx> {
             (Vec::new(), RelevantPlaces::new())
         };
 
-        // Process children — even when this is the target block,
-        // deeper checkpoint occurrences may hide below.
         for child in &node.children {
             let child_results = Self::build_leaf_items(
                 visitor,

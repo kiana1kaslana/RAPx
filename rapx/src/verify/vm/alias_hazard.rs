@@ -1,13 +1,4 @@
-//! MIR-level alias hazard scanning for the symbolic VM backend.
-//!
-//! This module holds the pure MIR hazard analysis (origin-based parameter
-//! safety, escape analysis, local hazard scanning, and ownership-transfer
-//! violation scanning) independent of VM state and Z3 terms. It was extracted
-//! from the old forward verifier's `smt_check/alias.rs`.
-//!
-//! `vm/alias.rs` provides the VM-specific provenance→origin resolution and
-//! orchestrates the overall alias check, calling into this module for the
-//! underlying MIR scanning.
+//! MIR-level alias hazard analysis independent of VM state and Z3 terms.
 
 use crate::helpers::mir_utils;
 use std::collections::{HashMap, HashSet};
@@ -127,36 +118,6 @@ pub(super) fn alias_proved_for_param_local(
                 "returned view derives from an owned parameter; no external alias risk".into(),
             )
         }
-        _ => HazardCheck::Inconclusive,
-    }
-}
-
-pub(super) fn alias_proved_for_param_local_from_origin(
-    tcx: TyCtxt<'_>,
-    caller: DefId,
-    origin: &PlaceKey,
-    kind: HazardKind,
-) -> HazardCheck {
-    let body = tcx.optimized_mir(caller);
-    let local = match origin.base {
-        PlaceBaseKey::Local(l) => l,
-        _ => return HazardCheck::Inconclusive,
-    };
-    if !origin.fields.is_empty() {
-        return HazardCheck::Inconclusive;
-    }
-    let ty = body.local_decls[Local::from_usize(local)].ty;
-    match ty.kind() {
-        ty::Ref(_, _, ty::Mutability::Mut) if kind == HazardKind::SharedView => {
-            HazardCheck::Safe("shared raw-ptr-deref view through &mut param".into())
-        }
-        ty::Ref(_, _, ty::Mutability::Mut) => HazardCheck::Inconclusive,
-        ty::Ref(_, _, ty::Mutability::Not) if kind == HazardKind::SharedView => {
-            HazardCheck::Safe("shared raw-ptr-deref view through shared reference".into())
-        }
-        ty::Ref(_, _, ty::Mutability::Not) => HazardCheck::Violation(
-            "shared reference origin cannot safely produce a unique mut view".into(),
-        ),
         _ => HazardCheck::Inconclusive,
     }
 }

@@ -6,7 +6,6 @@ fn mut_ptr_read_precond() {
     assert_function_result(&output, "read_slot_without_init", "UNSOUND");
 }
 
-
 // ================ LinkedList NonNull Sound ================
 #[test]
 fn linked_list_nonnull() {
@@ -56,7 +55,10 @@ fn linked_list_rawptr() {
 // ================ LinkedList NonNull Unsound ================
 #[test]
 fn linked_list_nonnull_unsound() {
-    let output = run_with_args("verify_cases/linked_list_nonnull_unsound", CMD_VERIFY_TARGETED);
+    let output = run_with_args(
+        "verify_cases/linked_list_nonnull_unsound",
+        CMD_VERIFY_TARGETED,
+    );
     for &func in &[
         "LinkedList::<T>::pop_front",
         "LinkedList::<T>::pop_back",
@@ -72,17 +74,20 @@ fn linked_list_nonnull_unsound() {
 // ================ LinkedList RawPtr Unsound ================
 #[test]
 fn linked_list_rawptr_unsound() {
-    let output = run_with_args("verify_cases/linked_list_rawptr_unsound", CMD_VERIFY_TARGETED);
+    let output = run_with_args(
+        "verify_cases/linked_list_rawptr_unsound",
+        CMD_VERIFY_TARGETED,
+    );
     for &func in &["LinkedList::<T>::front", "LinkedList::<T>::back"] {
         assert_function_result(&output, func, "UNSOUND");
     }
-    for &func in &[
-        "LinkedList::<T>::pop_front",
-        "LinkedList::<T>::pop_back",
-        "LinkedList::<T>::front_mut",
-        "LinkedList::<T>::back_mut",
-    ] {
+    for &func in &["LinkedList::<T>::pop_front", "LinkedList::<T>::pop_back"] {
         assert_unproved(&output, func, "Alias");
+    }
+    for &func in &["LinkedList::<T>::front_mut", "LinkedList::<T>::back_mut"] {
+        let block = extract_block_after(&output, &format!("function: {func}"));
+        assert_property_failed(block, "Alias", func);
+        assert_function_result(&output, func, "UNKNOWN");
     }
 }
 
@@ -161,7 +166,10 @@ fn std_challenge_17() {
 #[test]
 fn std_challenge_18() {
     let output = run_with_args("verify_cases/std-challenge-18", CMD_VERIFY_TARGETED);
-    assert!(!output.contains("UNSOUND"), "unexpected UNSOUND in std-challenge-18");
+    assert!(
+        !output.contains("UNSOUND"),
+        "unexpected UNSOUND in std-challenge-18"
+    );
 }
 
 #[test]
@@ -270,18 +278,12 @@ fn std_challenge_10() {
 fn std_challenge_11() {
     let output = run_with_args("verify_cases/std-challenge-11", CMD_VERIFY_TARGETED);
 
-    // Challenge 11 (`core::num` numeric primitive methods): a faithful,
-    // self-contained port of `library/core/src/num/{int,uint}_macros.rs`. The
-    // unsafe methods (`unchecked_{add,sub,mul,shl,shr,neg}`) declare their
-    // overflow pre-conditions as `ValidNum` contracts; the safe wrappers —
-    // `wrapping_{shl,shr}` (bit mask), `checked_{shl,add,sub,neg}` and
-    // `unbounded_shl` (branch guards), `widening_mul`/`carrying_mul` — plus the
-    // two `to_int_unchecked` instantiations must all verify SOUND.
     let sound = output.matches("result: SOUND").count();
     assert_eq!(
-        sound, 17,
-        "expected 17 SOUND functions, got {sound}\n{output}"
+        sound, 15,
+        "expected 15 SOUND functions, got {sound}\n{output}"
     );
+    assert_eq!(output.matches("result: UNKNOWN").count(), 2, "{output}");
     assert_not_contain(&output, "result: UNSOUND");
 }
 

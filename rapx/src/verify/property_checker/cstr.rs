@@ -97,7 +97,6 @@ impl PropertyChecker {
             return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
 
-        // If we have provenace, check liveness and byte-level tracking
         if let Some(alloc_id) = value.provenance_alloc_id() {
             // A `Vec`/boxed buffer exposes its byte data through the container's
             // owning pointer field (or a slice view's parent chain); track the
@@ -150,7 +149,6 @@ impl PropertyChecker {
                 return r;
             }
 
-            // 2. Try byte_value-based symbolic check via SMT
             if let Some(size) = buffer_size
                 && let Some(r) =
                     self.check_valid_cstr_from_byte_values(vm_state, &solver, alloc_id, &size)
@@ -159,15 +157,10 @@ impl PropertyChecker {
                 }
         }
 
-        // 3. MIR-level fallback: scan the body for constant byte assignments
-        //    (mirrors the legacy checker's approach for promoted constants)
         if let Some(r) = self.check_valid_cstr_from_mir_constants(vm_state, checkpoint) {
             return r;
         }
 
-        // 4. Fallback: if the constructor requires strict NUL-termination
-        //    (from_bytes_with_nul_unchecked, from_vec_with_nul_unchecked)
-        //    and we can't verify all bytes, return Unknown.
         let is_strict =
             crate::verify::api_classify::is_cstr_unchecked_constructor(checkpoint.callee);
         if is_strict {
@@ -224,7 +217,6 @@ impl PropertyChecker {
                 return Some(CheckResult::Failed);
             }
             if !vm_state.is_byte_non_nul(alloc_id, off) {
-                // Unknown byte — can't prove valid
                 return None;
             }
         }
@@ -359,10 +351,7 @@ impl PropertyChecker {
         None
     }
 
-    /// Scan MIR blocks for a single `0_u8` store into the target buffer.
-    /// When exactly one nul-store exists among all constant stores, we
-    /// can prove ValidCStr even without VM-level byte tracking.  This
-    /// mirrors the legacy `nul_store_before_checkpoint` logic.
+    /// Prove `ValidCStr` from a unique NUL store in MIR when byte tracking is absent.
     fn check_valid_cstr_nul_store<'tcx>(
         vm_state: &VmState<'_, 'tcx>,
         checkpoint: &Checkpoint<'tcx>,
@@ -471,7 +460,6 @@ impl PropertyChecker {
             }
         }
 
-        // 2. Fallback: simple constant byte chain for Aggregate locals
         if let Some(bytes) =
             mir_utils::const_bytes_for_local(tcx, body, target_local)
         {
@@ -484,8 +472,6 @@ impl PropertyChecker {
             };
         }
 
-        // 3. Scan MIR for a single 0_u8 store into the target buffer
-        //    (mirrors legacy nul_store_before_checkpoint logic)
         if let Some(r) = Self::check_valid_cstr_nul_store(vm_state, checkpoint) {
             return Some(r);
         }

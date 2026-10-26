@@ -1,12 +1,13 @@
 //! Symbolic arithmetic and layout constraints used by MIR transfer rules.
 
-use rustc_middle::mir::{BinOp, Operand, UnOp};
+use rustc_middle::mir::{BinOp, Local, Operand, UnOp};
+use rustc_middle::ty::{Ty, TyKind};
 use z3::ast::{Ast, Bool, Int};
 
 use crate::helpers::mir_utils;
 use crate::verify::api_classify;
 
-use super::state::{VmState, VmValue};
+use super::state::{OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Inject layout constraints (>= 1) for generic AlignOf/SizeOf constants.
@@ -41,7 +42,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let rustc_middle::mir::Const::Unevaluated(uneval, _) = constant.const_ else {
             return;
         };
-        // Cheap gate: only a *promoted* const block can be a `gcd` const.
         let def_name = self.tcx.def_path_str(uneval.def);
         if !def_name.contains("::{constant") {
             return;
@@ -117,8 +117,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         self.constraints.assertions.push(lhs._eq(&sum_term));
         let zero = Int::from_u64(self.z3_ctx, 0);
         self.constraints.assertions.push(rem.ge(&zero));
-        // Remainder and quotient bounds help prove length constraints involving
-        // % and / in the SMT solver.
         if rhs.as_u64().is_none_or(|r| r >= 1) {
             self.constraints.assertions.push(rem.lt(rhs));
         }
@@ -131,7 +129,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if rhs.as_u64().is_some_and(|r| r >= 2) {
             let one = Int::from_u64(self.z3_ctx, 1);
             let qp1 = Int::add(self.z3_ctx, &[quot, &one]);
-            // qp1 <= lhs is equivalent to quot < lhs for integers
             self.constraints.assertions.push(qp1.le(lhs));
         } else {
             // For rhs >= 1: quot <= lhs
@@ -282,7 +279,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let one = Int::from_u64(self.z3_ctx, 1);
                     val._eq(&zero).ite(&one, &zero)
                 } else {
-                    // Two's-complement bitwise NOT: !x == -x - 1.
                     let one = Int::from_u64(self.z3_ctx, 1);
                     let result = Int::sub(self.z3_ctx, &[&self.negate(val), &one]);
                     self.constraints.term_caches.not_mask_terms.insert(result.clone());
@@ -294,4 +290,201 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
+
+    /// Clone `arg_val`, retype it to `dest`'s type, mark it as a non-null,
+    /// aligned, initialized pointer, and bind it to `dest`.
+    pub(crate) fn set_dest_as_heap_ptr(&mut self, arg_val: &VmValue<'z3, 'tcx>, dest: Local) {
+        let mut val = arg_val.clone();
+        val.ty = self.body().local_decls[dest].ty;
+        val.facts.non_null = true;
+        val.facts.init = true;
+        self.set_local(dest, val);
+    }
+
+    /// Apply a binary numeric effect: compute `f(lhs.z3_term, rhs.z3_term)` and store
+    /// it as the destination's fresh scalar value.
+    pub(crate) fn apply_binary_num(
+        &mut self,
+        dest: Local,
+        args: &[VmValue<'z3, 'tcx>],
+        lhs_arg: usize,
+        rhs_arg: usize,
+        f: impl Fn(&Int<'z3>, &Int<'z3>) -> Int<'z3>,
+    ) {
+        if let (Some(lhs), Some(rhs)) = (args.get(lhs_arg), args.get(rhs_arg)) {
+            let dest_ty = self.body().local_decls[dest].ty;
+            self.set_local(dest, VmValue::new(f(&lhs.z3_term, &rhs.z3_term), dest_ty));
+        }
+    }
+
+    pub(crate) fn integer_limits(&self, ty: Ty<'tcx>) -> Option<(Int<'z3>, Int<'z3>, Int<'z3>, bool)> {
+        let signed = match ty.kind() {
+            TyKind::Int(_) => true,
+            TyKind::Uint(_) => false,
+            _ => return None,
+        };
+        let (_, bytes) = mir_utils::type_layout(self.tcx, self.current_frame.current_def_id, ty)?;
+        let bits = bytes.checked_mul(8)?;
+        if bits == 0 || bits > 128 {
+            return None;
+        }
+        let unsigned_max = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+        let modulus = Int::add(self.z3_ctx, &[
+            &Int::from_str(self.z3_ctx, &unsigned_max.to_string())?,
+            &Int::from_u64(self.z3_ctx, 1),
+        ]);
+        let (min, max) = if signed {
+            let signed_max = if bits == 128 {
+                i128::MAX
+            } else {
+                (1i128 << (bits - 1)) - 1
+            };
+            let signed_min = if bits == 128 {
+                i128::MIN
+            } else {
+                -(1i128 << (bits - 1))
+            };
+            (signed_min.to_string(), signed_max.to_string())
+        } else {
+            ("0".to_string(), unsigned_max.to_string())
+        };
+        Some((
+            Int::from_str(self.z3_ctx, &min)?,
+            Int::from_str(self.z3_ctx, &max)?,
+            modulus,
+            signed,
+        ))
+    }
+
+    /// Compute the preserved alignment when doing `base + offset * stride`.
+    /// Pointer arithmetic only ever *preserves* the base's alignment; it never
+    /// creates it. When the base's alignment is unknown, we cannot conclude
+    /// anything about the result (a `wrapping_add` over misaligned storage does
+    /// not become aligned just because the stride is a power of two).
+    fn compute_pointer_add_align(
+        &self,
+        base: &VmValue<'z3, 'tcx>,
+        stride_bytes: u64,
+    ) -> Option<Int<'z3>> {
+        let base_align = base.facts.align_n.as_ref()?;
+        // Concrete alignment: the result stays n-aligned only if the stride is
+        // a multiple of n.  A symbolic alignment can't be decided against a
+        // concrete stride, so drop it here (the `check_align` SMT query
+        // re-derives alignment from the allocation's align and the
+        // `sizeof_T % align_T == 0` layout constraint).
+        let n = base_align.simplify().as_u64()?;
+        if stride_bytes > 0 && stride_bytes.is_multiple_of(n) {
+            return Some(base_align.clone());
+        }
+        None
+    }
+
+    /// The byte stride for a pointer add/sub: the fixed `stride`, or the pointee's
+    /// symbolic size when the stride is element-sized (a generic `T`).
+    fn pointer_stride_term(&mut self, dest: Local, stride: Option<u64>) -> Int<'z3> {
+        match stride {
+            Some(s) => Int::from_u64(self.z3_ctx, s),
+            None => {
+                let dest_ty = self.body().local_decls[dest].ty;
+                let pointee = mir_utils::pointee_ty(dest_ty).unwrap_or(dest_ty);
+                self.size_sym(pointee)
+            }
+        }
+    }
+
+    /// Model `dest = base.offset(offset)` with element/byte stride and tracked
+    /// provenance (`offset_kind`), shared by the `ReturnPointerAdd` call effect
+    /// and the inlined `Offset` MIR statement.
+    pub(crate) fn apply_pointer_add(
+        &mut self,
+        dest: Local,
+        base: &VmValue<'z3, 'tcx>,
+        offset: &VmValue<'z3, 'tcx>,
+        stride: Option<u64>,
+        dereferenceable: bool,
+    ) {
+        // `sub` lowers `intrinsics::unchecked_sub(0, n)` to a unary negation `-n`
+        // (`eval_binary_op` folds `0 - x` to `-x`).  Recover the positive count
+        // and model the result as `base - count*stride` (a negated product) so a
+        // later `+ count*stride` in `Allocated`'s byte-coverage query cancels
+        // linearly, instead of `base + (-count)*stride` whose `(-count)*stride`
+        // product Z3's nonlinear solver cannot factor out.
+        let (offset_term, subtract) = if offset.z3_term.num_children() == 1
+            && let Some(positive) = offset.z3_term.nth_child(0).and_then(|c| c.as_int())
+        {
+            (positive, true)
+        } else {
+            (offset.z3_term.clone(), false)
+        };
+        let stride_term = self.pointer_stride_term(dest, stride);
+        let adjusted_offset = if stride == Some(1) {
+            offset_term.clone()
+        } else {
+            Int::mul(self.z3_ctx, &[&offset_term, &stride_term])
+        };
+        let combine = |l: &Int<'z3>, r: &Int<'z3>| {
+            if subtract {
+                Int::sub(self.z3_ctx, &[l, r])
+            } else {
+                Int::add(self.z3_ctx, &[l, r])
+            }
+        };
+        let new_term = combine(&base.z3_term, &adjusted_offset);
+        let is_field_offset = offset.is_field_offset()
+            && base
+                .provenance
+                .as_ref()
+                .is_some_and(|p| p.offset.as_u64() == Some(0));
+        let element_offset = if stride == Some(1) {
+            None
+        } else {
+            match base.provenance.as_ref().and_then(|p| match &p.offset_kind {
+                Some(OffsetKind::Element(e)) => Some(e.clone()),
+                _ => None,
+            }) {
+                Some(e) => Some(combine(&e, &offset_term)),
+                None if base
+                    .provenance
+                    .as_ref()
+                    .is_some_and(|p| p.offset.as_u64() == Some(0)) =>
+                {
+                    Some(if subtract {
+                        -offset_term.clone()
+                    } else {
+                        offset_term.clone()
+                    })
+                }
+                None => None,
+            }
+        };
+        let offset_kind = if is_field_offset {
+            Some(OffsetKind::Field)
+        } else if let Some(e) = element_offset {
+            Some(OffsetKind::Element(e))
+        } else {
+            Some(OffsetKind::Byte)
+        };
+        let adjusted_provenance = base.provenance.as_ref().map(|prov| Provenance {
+            alloc_id: prov.alloc_id,
+            offset: combine(&prov.offset, &adjusted_offset),
+            offset_kind,
+        });
+        let align_n = match stride {
+            Some(s) => self.compute_pointer_add_align(base, s),
+            None => base.facts.align_n.clone(),
+        };
+        let val = VmValue {
+            z3_term: new_term,
+            ty: self.body().local_decls[dest].ty,
+            provenance: adjusted_provenance,
+            facts: ValueFacts {
+                non_null: base.facts.non_null,
+                in_bounds: dereferenceable,
+                align_n,
+                init: base.facts.init,
+            },
+            source: ValueSource::None,
+        };
+        self.set_local(dest, val);
+    }
 }

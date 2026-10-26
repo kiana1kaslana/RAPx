@@ -97,7 +97,6 @@ pub(crate) fn parse_rapx_attr(
         return Ok(None);
     }
 
-    // Only list-style attributes carry an argument list.
     let syn::Meta::List(meta_list) = &attr.meta else {
         return Ok(None);
     };

@@ -1,7 +1,7 @@
 //! Initialize symbolic function parameters and their backing allocations.
 
 use rustc_middle::mir::{Local, Operand, Rvalue, StatementKind};
-use rustc_middle::ty::Ty;
+use rustc_middle::ty::{Ty, TyKind};
 use z3::ast::Int;
 
 use crate::compat::FxHashMap;
@@ -58,10 +58,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     );
                     continue;
                 }
-                // Create a symbolic external allocation for provenance
-                // tracking. No invariants are set — callers must provide
-                // contracts (NonNull, ValidPtr, etc.) via assert_contract_fact
-                // to make property checks pass.
                 if let rustc_middle::ty::TyKind::RawPtr(pointee, _mutbl) = ty.kind() {
                     let max_size = Int::from_u64(self.z3_ctx, i64::MAX as u64);
                     let pointee_align = self.align_sym(*pointee);
@@ -252,8 +248,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 source: ValueSource::None,
             },
         );
-        // For Vec: assert `0 <= len <= cap` and `cap * elem_size <= isize::MAX`
-        // as path conditions (the backing allocation's slice length tracks `len`).
         if is_vec {
             let cap = self.fresh_int(&format!("vec_cap_{}", local_idx));
             let len = self.fresh_int(&format!("vec_len_{}", local_idx));
@@ -298,9 +292,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         self.content_mut(alloc_id).facts.initialized = true;
         self.current_frame.local_alloc.insert(local, alloc_id);
         invariants.init = true;
-        // Constant `N` records every element; a generic `N` records a bounded
-        // placeholder prefix (16 elements) so downstream Index ITE chains /
-        // assert_in_bound_for_each can add constraints.
         for i in 0..n.unwrap_or(16) {
             let off = i * step;
             let elem_term = self.fresh_int(&format!("array_{}_idx_{}", local_idx, i));
@@ -336,9 +327,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let rustc_middle::ty::TyKind::Ref(..) = ty.kind() else {
             return false;
         };
-        // Prefer the precise pointee type from the function signature
-        // (late-bound-liberated) so reference-field regions are `'a` rather than
-        // MIR's erased `ReErased`.
         let precise_pointee = crate::verify::vm::region::fn_arg_ty(
             self.tcx,
             self.current_frame.current_def_id,
@@ -390,6 +378,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             self.constraints
                 .assertions
                 .push(Int::mul(self.z3_ctx, &[&len, &elem_sz_term]).le(&isize_max));
+            if let TyKind::Array(inner_ty, count) = elem_ty.kind() {
+                let inner_size = self.size_sym(*inner_ty);
+                let count = self.const_len_term(count);
+                self.constraints.assertions.push(count.ge(&zero));
+                let flat_len = Int::mul(self.z3_ctx, &[&len, &count]);
+                self.constraints
+                    .assertions
+                    .push(inner_size.gt(&zero).implies(&flat_len.le(&isize_max)));
+            }
             // The data allocation's byte size uses the shared symbolic `sizeof_T`
             // so `InBound` can cancel the factor (`len·S / S == len`);
             // `allocate_slice` computes `size = len * sizeof_T` and materializes
@@ -433,9 +430,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return true;
         }
 
-        // Non-slice reference: allocate pointee.  A generic `T` yields
-        // `sizeof_T`; a struct with a generic field is summed (`struct_size_sym`)
-        // so a field reference can be discharged.
         let (pointee_alloc_id, pointee_base) = if let rustc_middle::ty::TyKind::Array(elem_ty, const_len) = pointee_ty.kind() {
             let n = self.const_len_term(const_len);
             let elem_size = self.size_sym(*elem_ty);
@@ -466,15 +460,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             },
         );
 
-        // Decompose struct fields for pointer-field access.
-        // E.g. &RawBuf → (*self).ptr should yield a valid raw ptr.
         if let rustc_middle::ty::TyKind::Adt(adt_def, substs) = pointee_ty.kind()
             && !adt_def.is_enum() {
                 let variant = adt_def.non_enum_variant();
-                // Track the first data allocation per element type. Subsequent
-                // RawPtr / NonNull fields with the same pointee type reuse the
-                // allocation with per-field symbolic offsets, preserving the field
-                // relationships (e.g. ptr=start, end_or_len=start+len).
                 let mut elem_alloc: FxHashMap<Ty<'tcx>, (AllocId, Int<'z3>)> =
                     FxHashMap::default();
                 for (idx, field_def) in variant.fields.iter().enumerate() {
@@ -492,8 +480,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             "field_nn",
                         );
                     } else if let Some(pointee) = self.find_nn_pointee(field_ty) {
-                        // Field contains NonNull<T> (possibly wrapped in Option):
-                        // create/reuse an external allocation for the pointee.
                         self.init_ptr_field(
                             local,
                             vec![idx],
@@ -508,9 +494,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     } else if let rustc_middle::ty::TyKind::Ref(region, pointee, _) =
                         field_ty.kind()
                     {
-                        // Field contains a reference (&T, &mut T, &[T], etc.). Give
-                        // it provenance so that as_ptr() / as_mut_ptr() on the field
-                        // propagates the allocation info.
                         let elem_ty = match pointee.kind() {
                             rustc_middle::ty::TyKind::Slice(e) => *e,
                             _ => *pointee,

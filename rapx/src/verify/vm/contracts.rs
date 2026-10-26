@@ -32,9 +32,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 if atom.contract_kind == ContractKind::Hazard {
                     return;
                 }
-                // Assert the atom's own effect, then each of its transitive
-                // consequences exactly once (`subsumption_closure` is
-                // deduplicated).
                 self.assert_atom_direct(property);
                 for sub in crate::verify::contract::compound::subsumption_closure(atom) {
                     self.assert_atom_direct(&Property::Atom(sub));
@@ -187,12 +184,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     && let Some(alloc_id) = val.provenance_alloc_id()
                     && let Some(expected_ty) = Self::ty_arg(property, 1)
                 {
-                    // A `Typed(container.iter(), T)` *for_each* invariant
-                    // declares that the container's pointer elements all
-                    // point at valid `T`s. Record that target type so a
-                    // single pointer loaded from the container can later
-                    // discharge `Typed(ptr, T)` soundly (the fact comes
-                    // from the invariant, not from the pointer type).
                     if property.for_each().is_some() {
                         self.alloc_mut(alloc_id).facts.for_each.target_ty = Some(expected_ty);
                     }
@@ -244,11 +235,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             PropertyKind::ValidCStr => {
-                // A `ValidCStr(p, n)` fact guarantees `p` points to a live,
-                // initialized, null-terminated byte buffer. Mark the target
-                // allocation so the checker can treat it (and any of its
-                // sub-slices) as a valid C string, and so pointer reads /
-                // `from_raw_parts` over it see a live, initialized allocation.
                 //
                 // For a `&CStr`-style target the field projection (`inner`)
                 // may not be materialised for a DST, so fall back to the base
@@ -283,11 +269,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             PropertyKind::ValidString => {
-                // A `ValidString` fact guarantees the target's bytes form a
-                // valid UTF-8 sequence.  Mark the backing allocation so the
-                // checker can trust it instead of re-running the byte-level
-                // DFA.  Unlike `ValidCStr`, UTF-8 validity is a content
-                // property, so only content facts are set.
                 let id = self.contract_alloc_id_field_aware(property).or_else(|| {
                     // Iterator form (`ValidString(bytes)` with `bytes: &mut I`):
                     // trace the iterator to its backing byte buffer.
@@ -339,9 +320,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return false;
         };
         self.alloc_mut(alloc_id).facts.dead = false;
-        // An `Allocated(p, T, n)` contract on a raw-pointer parameter means the
-        // caller guarantees the memory is allocated and outlives the call, so
-        // it is alive for the function's execution region.
         if self.alloc(alloc_id).is_external() {
             self.alloc_mut(alloc_id).facts.liveness = Some(self.tcx.lifetimes.re_static);
         }
@@ -435,7 +413,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 return;
             };
             if field_path.is_empty() {
-                // Whole pointer parameter: exact size.
                 let Some(val) = self.local_value(local).cloned() else {
                     return;
                 };
@@ -566,8 +543,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             PropertyArg::Expr(ContractExpr::Const(n)) => {
                 Some(Int::from_u64(self.z3_ctx, *n as u64))
             }
-            // Delegate field-projected places and arithmetic (e.g. `cap * elem_size`)
-            // to the general simple evaluator.
             PropertyArg::Expr(expr) => self.eval_contract_expr_simple(expr),
             _ => None,
         }
@@ -644,7 +619,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         crate::verify::contract::ContractProjection::Field { index, .. } => {
                             path.push(*index);
                         }
-                        // Downcast / ForEach are not scalar numeric values.
                         _ => return None,
                     }
                 }
@@ -654,10 +628,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.field_value(local, &path)
                         .map(|v| v.z3_term.clone())
                         .or_else(|| {
-                            // Deref+Field: the base local is a reference whose pointee
-                            // fields live in the per-allocation map (e.g. the
-                            // `ValidNum(len <= CAPACITY)` invariant on `&LeafNode`
-                            // reads `(*leaf).len` through `MemoryContent::values`).
                             let base_val = self.local_value(local)?;
                             let alloc_id = base_val.provenance_alloc_id()?;
                             let view_ty = mir_utils::pointee_ty(base_val.ty).unwrap_or(base_val.ty);
@@ -717,6 +687,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 }
             }
             ContractExpr::Const(n) => Some(Int::from_u64(self.z3_ctx, *n as u64)),
+            ContractExpr::ConstParam { index, .. } => self.const_param_term(*index),
             _ => None,
         }
     }
@@ -853,9 +824,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     (one.clone(), base)
                 }
             };
-        // Mirror `try_iter_next`: the tracked offset must never exceed the
-        // iterator's length (the inlined `post_inc_start` body itself only
-        // mutates `ptr` and does not assert `offset <= len`).
         if let Some(e) = &base_len {
             self.constraints.assertions.push(new_offset.le(e));
         }
@@ -959,8 +927,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         else {
             return;
         };
-        // Prefer the materialized slice length; fall back to `size / elem_size`
-        // for allocations that never got a materialized `slice_len`.
         let len = self
             .slice_len_of_alloc(da_id)
             .unwrap_or_else(|| self.alloc(da_id).size.clone());
@@ -1162,6 +1128,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Set owning invariant on the target value.
     fn set_owning_for_value(&mut self, val: VmValue<'z3, 'tcx>) {
         if let Some(prov) = &val.provenance {
+            self.alloc_mut(prov.alloc_id).facts.owning = Some(val.z3_term.clone());
             self.content_mut(prov.alloc_id).facts.initialized = true;
         }
     }

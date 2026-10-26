@@ -1,9 +1,4 @@
-//! Unified property checker for the symbolic VM.
-//!
-//! `PropertyChecker::check` is the entry point; `check_inner` dispatches each
-//! `PropertyKind` to a per-family `check_*` method living in one of the sibling
-//! submodules (`memory`, `bounds`, `typed`, `numeric`, `string`, `alias`,
-//! `cstr`, `transmute`).  Shared helpers live in `util`.
+//! Property checks for the symbolic VM.
 
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::vm::state::{OffsetKind, VmState};
@@ -31,16 +26,10 @@ pub(crate) use auto_trait::{
 
 pub(crate) struct PropertyChecker;
 
-/// A property-checking rule: prove a [`PropertyKind`] by matching the kind and
-/// running the associated checker.  `kind` is the `PropertyKind` itself (a
-/// `Copy` enum, so no predicate function is needed), and `apply` is the checker
-/// under one uniform signature.
+/// Dispatch entry for a [`PropertyKind`].
 pub(crate) struct PropertyRule {
-    /// Rule name, for logging / hit-statistics / debugging.
     pub name: &'static str,
-    /// The `PropertyKind` this rule discharges.
     pub kind: PropertyKind,
-    /// The checker: prove `property` (whose kind equals `self.kind`).
     pub apply: for<'z3, 'tcx> fn(
         &PropertyChecker,
         &VmState<'z3, 'tcx>,
@@ -221,6 +210,9 @@ impl PropertyChecker {
         checkpoint: &Checkpoint<'tcx>,
         property: &Property<'tcx>,
     ) -> CheckResult {
+        if vm_state.path_infeasible {
+            return CheckResult::ProvedByRule;
+        }
         if vm_state.unsupported_mir {
             return CheckResult::Unknown(UnknownReason::Unimplemented);
         }
@@ -250,7 +242,7 @@ impl PropertyChecker {
             else {
                 return CheckResult::Unknown(UnknownReason::Unimplemented);
             };
-            if vm_state.content(alloc_id).pointer_elements_modified {
+            if vm_state.content(alloc_id).indexed_elements_modified {
                 return CheckResult::Unknown(UnknownReason::Unimplemented);
             }
             let facts = &vm_state.alloc(alloc_id).facts.for_each;
@@ -300,29 +292,17 @@ impl PropertyChecker {
                 // A property whose target value (or a checkpoint argument it
                 // reads) depends on a truncated inline cannot be decided:
                 // report `Unknown` instead of failing on the placeholder term.
-                if self.atom_depends_on_inline_terms(
-                    vm_state,
-                    checkpoint,
-                    property,
-                    &vm_state.inline.inline_truncated_terms,
-                ) {
-                    return CheckResult::Unknown(UnknownReason::InlineDepthExceeded);
-                }
-                if self.atom_depends_on_inline_terms(
-                    vm_state,
-                    checkpoint,
-                    property,
-                    &vm_state.inline.inline_branch_terms,
-                ) {
-                    return CheckResult::Unknown(UnknownReason::Unimplemented);
-                }
-                if self.atom_depends_on_inline_terms(
-                    vm_state,
-                    checkpoint,
-                    property,
-                    &vm_state.inline.opaque_intrinsic_terms,
-                ) {
-                    return CheckResult::Unknown(UnknownReason::Unimplemented);
+                for (terms, reason) in [
+                    (
+                        &vm_state.inline.inline_truncated_terms,
+                        UnknownReason::InlineDepthExceeded,
+                    ),
+                    (&vm_state.inline.inline_branch_terms, UnknownReason::Unimplemented),
+                    (&vm_state.inline.opaque_intrinsic_terms, UnknownReason::Unimplemented),
+                ] {
+                    if self.atom_depends_on_inline_terms(vm_state, checkpoint, property, terms) {
+                        return CheckResult::Unknown(reason);
+                    }
                 }
                 if vm_state.incomplete_inline_branch
                     && (checkpoint.callee.is_some() || !checkpoint.args.is_empty())

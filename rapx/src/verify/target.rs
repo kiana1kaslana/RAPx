@@ -517,7 +517,6 @@ fn resolve_chain_contracts<'tcx>(
 
             let mut reqs = get_contract_from_annotation(tcx, sub_def_id);
 
-            // Try trait method requires.
             if reqs.is_empty() {
                 reqs = get_trait_method_requires(tcx, sub_def_id);
             }
@@ -652,20 +651,10 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                 }
 
                 if requires.is_empty() && follow_chain {
-                    // Recursively resolve contracts from the callee's call chain.
-                    // e.g. A -> B -> C -> D where B,C are unsafe unannotated,
-                    // D has contracts; follow the chain to D and use its contracts.
                     let mut visited = HashSet::new();
                     requires = resolve_chain_contracts(self.tcx, callee_def_id, &mut visited);
                     if requires.is_empty() {
-                        // Only warn for genuinely `unsafe` callees: a safe
-                        // function has no caller-side safety contract, so an
-                        // empty entry here is expected (e.g. a safe
-                        // `#[rapx::verify]` target whose body uses raw-pointer
-                        // derefs rather than unsafe callee calls).  Compiler
-                        // intrinsics (`extern "rust-intrinsic"`) have no MIR
-                        // and their safety is enforced by the type system, so
-                        // they never carry a JSON contract either.
+                        // Safe callees, intrinsics, and verified bodies need no JSON contract.
                         let is_intrinsic =
                             crate::def_ids::intrinsic_api::is_intrinsic(self.tcx, callee_def_id);
                         let has_json_entry = is_std
@@ -702,11 +691,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                 }
 
                 if requires.is_empty() {
-                    // An empty JSON entry (e.g. `fmt::new`) means "no safety
-                    // contract needed".  A `#[rapx::verify]` callee has its body
-                    // verified, so its "contract" is the body proof (or a struct
-                    // invariant) rather than a `requires`.  Anything else with no
-                    // contract is a genuine unknown.
+                    // An empty JSON entry or verified body may have no `requires`.
                     let has_json_entry = is_std
                         && super::contract::json::get_std_contracts_from_json(
                             self.tcx,
@@ -746,16 +731,10 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
             .collect();
 
         let mut caller_requires = self.get_fn_contracts(def_id, false);
-        // A `requires` lifetime (`Alive(p, 'a)`) names a lifetime on the
-        // function, so bind it here (callee `requires` keep the generic `Ident`
-        // and are instantiated at the call site instead).
+        // Bind entry lifetimes here; callee lifetimes bind at the call site.
         for contract in &mut caller_requires {
             bind_alive_regions(self.tcx, def_id, contract);
         }
-        // `get_fn_contracts` already resolves the entry contracts with the
-        // right precedence — inline `#[rapx::requires]`, then trait contracts,
-        // then the std JSON database (only when no annotation is present).
-        // Querying JSON again here would duplicate the annotation.
 
         let raw_ptr_deref_checks = build_raw_ptr_deref_checks(self.tcx, def_id);
         let static_mut_checks = build_static_mut_checks(self.tcx, def_id);
@@ -767,31 +746,21 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
             })
             .unwrap_or_default();
 
-        // Hazard atoms in a struct invariant (e.g. `Alias` alongside `Owning`)
-        // are *use-point* obligations: they are marked here to document the
-        // exclusive-ownership intent, but deferred to the operation that consumes
-        // the pointer — not verified at construction nor carried as entry facts
-        // (where `assert_contract_fact` would accept, not enforce, `Alias`).
+        // Hazard atoms belong at pointer use sites, not among entry facts.
         struct_invariants = struct_invariants
             .into_iter()
             .filter_map(|inv| inv.strip_hazards())
             .collect();
 
-        // Struct invariants are implicit preconditions for every method:
-        // safe methods need them as automatic entry facts (no requires
-        // needed), and unsafe constructors verify they hold at return.
+        // Methods inherit struct invariants as entry facts.
         caller_requires.extend(struct_invariants.clone());
 
-        // drop is a destructor — the struct is being torn down, so we skip
-        // struct invariant checks at exit points.
+        // Destructors may dismantle struct invariants.
         if is_drop_impl(self.tcx, def_id) {
             struct_invariants.clear();
         }
 
-        // Standard-library type invariants: for each function parameter (and
-        // the return type), look up the type's invariants from
-        // std-type-invariants.json (including the built-in `[T]` slice key)
-        // and add them as preconditions.
+        // Type invariants for parameters and returns are entry facts.
         let type_invariants = build_type_invariants_from_params(self.tcx, def_id);
         caller_requires.extend(type_invariants.clone());
 
@@ -877,8 +846,6 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                 continue;
             }
 
-            // Skip `targeted` mode filtering — non-local crates don't have
-            // HIR attributes available (only metadata is present).
             if matches!(self.mode, VerifyMode::Targeted) {
                 continue;
             }
@@ -927,18 +894,12 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
         let crate_name = self.tcx.crate_name(def_id.krate);
         let crate_prefix = format!("{}::", crate_name.as_str());
 
-        // Try matching filter after stripping the crate prefix.
-        // e.g. filter "slice" matches def_path "core::slice::raw::from_raw_parts"
-        // after stripping "core::".
         if let Some(inner) = filter.strip_prefix(&crate_prefix)
             && (def_path == inner || def_path.starts_with(&format!("{}::", inner)))
         {
             return true;
         }
 
-        // Try matching def_path after stripping the crate prefix.
-        // e.g. filter "core::slice" matches def_path "slice::raw::from_raw_parts"
-        // after stripping "core::" from the filter.
         if let Some(inner) = def_path.strip_prefix(&crate_prefix)
             && (inner == *filter || inner.starts_with(&format!("{}::", filter)))
         {
@@ -1017,8 +978,6 @@ impl<'tcx> Visitor<'tcx> for VerifyTargetCollector<'tcx> {
 
                 let self_ty_def_id = resolve_impl_self_ty_def_id(item);
 
-                // Marker traits (`Send`/`Sync`) carry type-level obligations;
-                // unsafe traits with methods carry method-level `ensures`.
                 if let Some(kind) = marker_trait_kind(self.tcx, trait_def_id) {
                     let obligations =
                         build_marker_trait_obligations(self.tcx, self_ty_def_id, kind);
@@ -1064,14 +1023,8 @@ impl<'tcx> Visitor<'tcx> for VerifyTargetCollector<'tcx> {
             }
         }
 
-        // HIR pre-filter: skip functions that have nothing to verify.
-        // `contains_unsafe` catches functions with unsafe blocks/declarations;
-        // `function_has_struct_invariant` catches methods on structs with invariants;
-        // `function_has_trait_ensurance` catches methods on unsafe trait impls with contracts.
         let def_id = id.to_def_id();
 
-        // Skip never-returning (divergent) functions — they have no return
-        // paths and can trigger stack overflows in downstream analysis.
         if let rustc_hir::def::DefKind::Fn = self.tcx.def_kind(def_id) {
             let fn_sig = self.tcx.fn_sig(def_id).skip_binder();
             if matches!(

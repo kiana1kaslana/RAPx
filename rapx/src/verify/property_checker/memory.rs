@@ -40,9 +40,6 @@ impl PropertyChecker {
             return CheckResult::ProvedByRule;
         }
         let ty_arg = Self::ty_arg(property, 1);
-        // Alignment term: the *symbolic* `align_T` for a generic `T` (bounded by
-        // the trait bounds' min/max), the concrete constant alignment for a
-        // concrete type, or `1` when the property carries no type.
         let align = match ty_arg {
             Some(ty) => {
                 let resolved = self.instantiate_callsite_ty(vm_state, checkpoint, ty);
@@ -92,9 +89,6 @@ impl PropertyChecker {
             value.facts.align_n.clone()
         };
         if let Some(known_align) = effective_align_n {
-            // Concrete fast-path: both alignments are powers of two, so
-            // `align_n >= align` is a plain integer comparison — decide
-            // structurally, no solver query.
             if let (Some(known_u64), Some(align_u64)) =
                 (known_align.simplify().as_u64(), align.simplify().as_u64())
                 && known_u64 >= align_u64 {
@@ -116,9 +110,6 @@ impl PropertyChecker {
                 return CheckResult::ProvedBySmt;
             }
         }
-        // `Align(container.iter(), T)` for_each: every element pointer is
-        // aligned to `align_of(T)`, so a pointer loaded from the container
-        // (whose provenance names the container allocation) is T-aligned.
         if let Some(prov) = &value.provenance
             && let Some(aligned_ty) = vm_state.alloc(prov.alloc_id).facts.for_each.aligned_ty {
                 let fa = vm_state.align_sym_read(aligned_ty);
@@ -128,7 +119,6 @@ impl PropertyChecker {
                         return CheckResult::ProvedByRule;
                     }
             }
-        // Check allocation base alignment with concrete offset
         if let Some(ref prov) = value.provenance {
             let alloc = vm_state.alloc(prov.alloc_id);
             let off_u64 = prov
@@ -141,16 +131,13 @@ impl PropertyChecker {
                 alloc.align.simplify().as_u64(),
             )
                 && alloc_align_u64 >= align_u64 {
-                    if off % align_u64 == 0 {
-                        return CheckResult::ProvedByRule;
-                    }
-                    if off % align_u64 != 0 {
-                        return CheckResult::Failed;
-                    }
+                    return if off % align_u64 == 0 {
+                        CheckResult::ProvedByRule
+                    } else {
+                        CheckResult::Failed
+                    };
                 }
         }
-        // Packed-struct fast-path: if the allocation is less aligned than
-        // required, the concrete offset alone determines alignment.
         if let Some(ref prov) = value.provenance {
             let alloc = vm_state.alloc(prov.alloc_id);
             if let (Some(alloc_align_u64), Some(align_u64)) =
@@ -264,15 +251,9 @@ impl PropertyChecker {
         let Some(value) = self.target_value(vm_state, checkpoint, property) else {
             return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
-        if value.facts.non_null {
+        if value.facts.non_null || value.facts.in_bounds {
             return CheckResult::ProvedByRule;
         }
-        if value.facts.in_bounds {
-            return CheckResult::ProvedByRule;
-        }
-        // Pointers with non-external provenance point into known stack/heap
-        // allocations whose base addresses are never zero.  Raw-pointer
-        // parameters get external provenance which may be null.
         if let Some(ref prov) = value.provenance
             && !vm_state.alloc(prov.alloc_id).is_external() {
                 return CheckResult::ProvedByRule;
@@ -376,31 +357,17 @@ impl PropertyChecker {
             return CheckResult::ProvedByRule;
         }
 
-        // Zero-element access (`Allocated(p, T, 0)`) is trivially satisfied:
-        // any pointer is valid for its 0-byte prefix, so this holds even when
-        // provenance has been lost through a cast.  Mirrors the `count == 0`
-        // fast-path in `check_in_bound` and covers `from_raw_parts(ptr, 0)`
-        // (e.g. `Option::as_slice` on `None`).
         if self.count_is_zero(vm_state, checkpoint, property, 2) {
             return CheckResult::ProvedByRule;
         }
 
         let Some(alloc_id) = value.provenance_alloc_id() else {
-            // `ManuallyDrop::drop(&mut slot)` on an *empty* container (`Vec::new`
-            // / `String::new`) has no heap allocation behind the reference: the
-            // container value is valid and there is nothing to free, so its
-            // `ValidPtr`/`Allocated` precondition holds vacuously.
             if crate::verify::api_classify::is_manually_drop_drop(checkpoint.callee) {
                 return CheckResult::ProvedByRule;
             }
-            // A null pointer (address term 0) is definitely not backed by any
-            // allocation — a confirmed violation, not an incomplete proof.
             if value.z3_term.simplify().as_u64() == Some(0) {
                 return CheckResult::Failed;
             }
-            // A pointer whose address is a compile-time constant (e.g.
-            // `NonNull::dangling`'s `align_of::<T>()`, an unevaluated `const_…`
-            // term) is likewise not backed by any allocation.
             if value.z3_term.to_string().contains("const_") {
                 return CheckResult::Failed;
             }
@@ -408,9 +375,6 @@ impl PropertyChecker {
         };
 
         if vm_state.alloc(alloc_id).facts.dead {
-            // An already-dead allocation reaching a second drop is a double
-            // free; only `MaybeUninit` pointers (whose storage is not itself
-            // dropped) are exempt.
             if !Self::is_maybe_uninit_ptr(vm_state, &value, alloc_id) {
                 let is_param_ref = vm_state.resolve_origin(&value).is_some_and(|origin| {
                     origin.local.as_usize() <= vm_state.body().arg_count
@@ -460,9 +424,6 @@ impl PropertyChecker {
 
         let alloc = vm_state.alloc(alloc_id);
         if let (Some(alloc_elem_ty), Some(req_ty)) = (alloc.element_ty.as_ty(), required_ty) {
-            if self.alloc_elem_is_array_of(alloc_elem_ty, req_ty) {
-                return CheckResult::ProvedByRule;
-            }
             // `MaybeUninit<T>` is `#[repr(transparent)]` over a union, so it has
             // exactly the size/alignment of `T`.  An allocation of
             // `MaybeUninit<T>` is therefore a valid allocation of `T` (and vice
@@ -562,10 +523,6 @@ impl PropertyChecker {
             return r;
         }
 
-        // Concrete sizes and offset: direct byte-range comparison, no solver.
-        // The accessed range is `[offset, offset + access)`, which must fit in
-        // `[0, size)`.  The offset is a non-negative byte offset by provenance
-        // construction, so only the upper bound needs checking.
         if let (Some(off), Some(size_val), Some(access_val)) = (
             value
                 .provenance
@@ -668,9 +625,6 @@ impl PropertyChecker {
             return CheckResult::ProvedByRule;
         }
 
-        // Zero elements: `Init(p, T, 0)` is vacuously satisfied (the empty
-        // range is trivially initialized, regardless of whether `p` is a
-        // dangling pointer), mirroring `check_allocated`'s fast-path.
         if self.count_is_zero(vm_state, checkpoint, property, 2) {
             return CheckResult::ProvedByRule;
         }
@@ -687,8 +641,6 @@ impl PropertyChecker {
                 return CheckResult::ProvedByRule;
             }
 
-        // `access_bytes` falls back to the target's pointee element type when
-        // `T` is omitted and to `count = 1` when `count` is omitted.
         let access = self.access_bytes(vm_state, property, 1, 2, checkpoint, &value);
 
         if let Some(id) = value.provenance_alloc_id() {
@@ -730,7 +682,6 @@ impl PropertyChecker {
                 }
                 return CheckResult::ProvedByRule;
             }
-            // as_ptr/as_mut_ptr on MaybeUninit → write operations don't need pre-init.
             if value.facts.init
                 && value.facts.non_null
                 && Self::is_value_aligned(vm_state, &value)
@@ -747,10 +698,6 @@ impl PropertyChecker {
                     return CheckResult::ProvedByRule;
                 }
             }
-            // The allocation's `initialized` flag stayed `false` (nothing wrote
-            // it: `MaybeUninit::uninit` / `Box::new_uninit`), and this is not a
-            // write operation — the access reads uninitialized memory, a
-            // confirmed violation rather than an incomplete proof.
             return CheckResult::Failed;
         }
         if let Some(origin_op) = checkpoint.args.first() {
@@ -762,7 +709,6 @@ impl PropertyChecker {
                         if access_val <= size_val {
                             return CheckResult::ProvedByRule;
                         }
-                        // Required bytes exceed allocation → not fully init
                     } else {
                         return CheckResult::ProvedByRule;
                     }
@@ -781,10 +727,6 @@ impl PropertyChecker {
                     }
                 }
             }
-            // No path proved init.  If the value traces to a known allocation
-            // that was never written (its `initialized` flag stayed `false`),
-            // reading it is a confirmed violation rather than an incomplete
-            // proof.
             if let Operand::Copy(place) | Operand::Move(place) = origin_op {
                 let allocs = self.trace_alloc_ids(vm_state, place.local);
                 if !allocs.is_empty() && allocs.iter().all(|id| !vm_state.content(*id).facts.initialized) {
@@ -888,16 +830,9 @@ impl PropertyChecker {
             while let Some(parent_id) = vm_state.alloc(root_id).parent {
                 root_id = parent_id;
             }
-            // A non-external allocation (stack local, owned heap, or const
-            // materialization) is a real allocation whose liveness is tracked by
-            // `dead`, so "not dead" means alive.
             if !vm_state.alloc(root_id).is_external() && !vm_state.alloc(root_id).facts.dead {
                 return CheckResult::ProvedByRule;
             }
-            // An external allocation is a placeholder for arbitrary external
-            // memory (raw-pointer params/fields) and carries no liveness
-            // guarantee; it is alive only if explicitly assumed (`Alive`
-            // precondition / struct invariant), or grounded in a live reference.
             if !vm_state.alloc(root_id).facts.dead
                 && let Some(src_region) = &vm_state.alloc(root_id).facts.liveness {
                     // The `Alive(p, 'r)` check demands the memory alive for
@@ -928,8 +863,6 @@ impl PropertyChecker {
                             *src_region,
                             r,
                         );
-                        // A reference parameter `&'r Self<'a>` implies
-                        // `'a: 'r` through its type (not a where-clause).
                         let implied = crate::verify::vm::region::fn_arg_ty(
                             vm_state.tcx,
                             checkpoint.caller,
@@ -970,9 +903,6 @@ impl PropertyChecker {
             if matches_live_param {
                 return CheckResult::ProvedByRule;
             }
-            // No local origin: the allocation is not tied to any local, so it
-            // outlives the function (e.g. `static` data not materialized as a
-            // const byte array).
             if vm_state.resolve_origin(&value).is_none() {
                 return CheckResult::ProvedByRule;
             }

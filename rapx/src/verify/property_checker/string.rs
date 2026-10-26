@@ -2,16 +2,15 @@
 
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::contract::Property;
-use crate::verify::report::CheckResult;
+use crate::verify::report::{CheckResult, UnknownReason};
 use crate::verify::vm::state::VmState;
 use z3::{SatResult, Solver};
 
 use super::PropertyChecker;
 
 impl PropertyChecker {
-    /// Shared UTF-8 byte check: prove the tracked buffer bytes of `alloc_id` are
-    /// *not* valid UTF-8 (i.e. disprove the DFA), reporting `Failed` when the
-    /// solver proves they cannot be valid.
+    /// Check tracked UTF-8 bytes, separating proved validity, proved
+    /// invalidity, and unresolved symbolic contents.
     fn check_utf8_alloc<'z3, 'tcx>(
         &self,
         vm_state: &VmState<'z3, 'tcx>,
@@ -25,16 +24,27 @@ impl PropertyChecker {
             return CheckResult::ProvedByRule;
         }
         let Some(valid) = vm_state.utf8_validity(alloc_id) else {
-            return CheckResult::ProvedByRule; // no byte-level info → trust
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
 
         solver.push();
         solver.assert(&valid);
         let r = solver.check();
         solver.pop(1);
+        if r == SatResult::Unsat {
+            return CheckResult::Failed;
+        }
+        if r == SatResult::Unknown {
+            return CheckResult::Unknown(UnknownReason::SmtTimeout);
+        }
+        solver.push();
+        solver.assert(&valid.not());
+        let r = solver.check();
+        solver.pop(1);
         match r {
-            SatResult::Unsat => CheckResult::Failed,
-            _ => CheckResult::ProvedByRule,
+            SatResult::Unsat => CheckResult::ProvedBySmt,
+            SatResult::Sat => CheckResult::Unknown(UnknownReason::Unimplemented),
+            SatResult::Unknown => CheckResult::Unknown(UnknownReason::SmtTimeout),
         }
     }
 
@@ -56,7 +66,7 @@ impl PropertyChecker {
             }
 
         let Some(value) = self.target_value(vm_state, checkpoint, property) else {
-            return CheckResult::ProvedByRule;
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
         if let Some(alloc_id) = value.provenance_alloc_id() {
             return self.check_utf8_alloc(vm_state, &solver, alloc_id);
@@ -69,6 +79,6 @@ impl PropertyChecker {
             && let Some((alloc_id, _end_offset)) = vm_state.iter_utf8_buffer(local) {
                 return self.check_utf8_alloc(vm_state, &solver, alloc_id);
             }
-        CheckResult::ProvedByRule
+        CheckResult::Unknown(UnknownReason::Unimplemented)
     }
 }

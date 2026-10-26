@@ -39,9 +39,7 @@ impl PropertyChecker {
             for pred in predicates {
                 match self.eval_numeric_predicate(vm_state, &solver, Some(checkpoint), pred) {
                     Some(r) if !r.is_proved() => return r,
-                    None if self.expr_has_local_adt_method(vm_state, checkpoint, &pred.lhs)
-                        || self.expr_has_local_adt_method(vm_state, checkpoint, &pred.rhs) =>
-                    {
+                    None => {
                         return CheckResult::Unknown(UnknownReason::Unimplemented);
                     }
                     _ => {}
@@ -162,8 +160,7 @@ impl PropertyChecker {
         // to help Z3 prove (X/N)*N <= X via X = (X/N)*N + X%N, X%N >= 0.
         self.inject_nia_axioms(vm_state, solver, checkpoint, &pred.lhs);
         self.inject_nia_axioms(vm_state, solver, checkpoint, &pred.rhs);
-        // Walk VM binary op sources for Div/Rem terms used in the
-        // predicate — these are not visible in the ContractExpr tree.
+        // Div/Rem producers are recorded by the VM, outside ContractExpr.
         self.inject_vm_div_axioms(vm_state, solver, &pred.lhs);
         self.inject_vm_div_axioms(vm_state, solver, &pred.rhs);
         self.inject_int_range_axioms(vm_state, solver, checkpoint, &pred.lhs);
@@ -178,8 +175,6 @@ impl PropertyChecker {
             SatResult::Sat => Some(CheckResult::Failed),
             _ => None,
         };
-        // If Le/Ge check failed, inject a path-condition-level NIA axiom
-        // based on the VM's binary op sources and retry.
         if matches!(r, Some(CheckResult::Failed))
             && matches!(pred.op, RelOp::Le | RelOp::Ge | RelOp::Lt | RelOp::Gt)
         {
@@ -218,44 +213,6 @@ impl PropertyChecker {
             };
         }
         r
-    }
-
-    fn expr_has_local_adt_method<'z3, 'tcx>(
-        &self,
-        vm_state: &VmState<'z3, 'tcx>,
-        checkpoint: &Checkpoint<'tcx>,
-        expr: &ContractExpr<'tcx>,
-    ) -> bool {
-        match expr {
-            ContractExpr::Len(inner, _) | ContractExpr::IsEmpty(inner, _) => self
-                .eval_contract_expr_to_value(vm_state, Some(checkpoint), inner)
-                .is_some_and(|val| {
-                    let ty = mir_utils::pointee_ty(val.ty).unwrap_or(val.ty);
-                    matches!(ty.kind(), TyKind::Adt(adt, _) if adt.did().as_local().is_some())
-                }),
-            ContractExpr::Binary { lhs, rhs, .. } => {
-                self.expr_has_local_adt_method(vm_state, checkpoint, lhs)
-                    || self.expr_has_local_adt_method(vm_state, checkpoint, rhs)
-            }
-            ContractExpr::Unary { expr, .. } => {
-                self.expr_has_local_adt_method(vm_state, checkpoint, expr)
-            }
-            ContractExpr::If {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                self.expr_has_local_adt_method(vm_state, checkpoint, &cond.lhs)
-                    || self.expr_has_local_adt_method(vm_state, checkpoint, &cond.rhs)
-                    || self.expr_has_local_adt_method(vm_state, checkpoint, then_expr)
-                    || self.expr_has_local_adt_method(vm_state, checkpoint, else_expr)
-            }
-            ContractExpr::IndexAccess { slice, index } => {
-                self.expr_has_local_adt_method(vm_state, checkpoint, slice)
-                    || self.expr_has_local_adt_method(vm_state, checkpoint, index)
-            }
-            _ => false,
-        }
     }
 
     fn expr_has_mul<'tcx>(&self, expr: &ContractExpr<'tcx>) -> bool {
@@ -410,8 +367,6 @@ impl PropertyChecker {
             return;
         }
 
-        // Walk binary-op producers (recorded on the value) for destinations
-        // whose term matches target.
         let op_sources: Vec<(Option<PlaceKey>, Option<PlaceKey>)> = {
             let mut src: Vec<(Option<PlaceKey>, Option<PlaceKey>)> = Vec::new();
             for (_, val) in vm_state.all_local_values() {
@@ -544,7 +499,6 @@ impl PropertyChecker {
         {
             return Some(len);
         }
-        // Fallback: scan all locals for one with same struct alloc.
         let target_alloc = local_val.provenance_alloc_id()?;
         for (scan_local, scan_val) in vm_state.all_local_values() {
             if scan_val.provenance_alloc_id() != Some(target_alloc) {

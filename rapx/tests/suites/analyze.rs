@@ -335,13 +335,13 @@ fn path_false_1_repeat_2() {
 
 #[test]
 fn init_std_unsound_08_paths() {
-    let output = run_with_args("verify_units/init_std_unsound_8", CMD_ANALYZE_PATHS);
+    let output = run_with_args("verify_units/init_std_unsound_08", CMD_ANALYZE_PATHS);
     assert_eq!(path_count_for(&output, "unsound_len_bound_loop_skips_even_indices"), 1);
 }
 
 #[test]
 fn align_unsound_05_paths() {
-    let output = run_with_args("verify_units/align_unsound_5", CMD_ANALYZE_PATHS);
+    let output = run_with_args("verify_units/align_unsound_05", CMD_ANALYZE_PATHS);
     assert_eq!(path_count_for(&output, "unsound_iteration_count_can_leave_unaligned"), 4);
 }
 

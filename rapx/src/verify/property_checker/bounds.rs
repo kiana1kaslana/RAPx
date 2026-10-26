@@ -30,8 +30,6 @@ impl PropertyChecker {
     ) -> CheckResult {
         let solver = Solver::new(vm_state.z3_ctx);
         vm_state.assert_all(&solver);
-        // Fast-path: contract with for_each guarantees all elements
-        // of the index array are in bounds.
         if property.for_each().is_some() {
             return CheckResult::ProvedByRule;
         }
@@ -42,7 +40,6 @@ impl PropertyChecker {
             return self.check_in_bound_slice(vm_state, &solver, checkpoint, property);
         }
 
-        let required_ty = Self::ty_arg(property, 1);
         if self.zst_guard(vm_state, checkpoint, property) {
             return CheckResult::ProvedByRule;
         }
@@ -63,14 +60,6 @@ impl PropertyChecker {
                 return CheckResult::ProvedByRule;
             }
         }
-        if matches!(value.ty.kind(), TyKind::Ref(..)) {
-            return CheckResult::ProvedByRule;
-        }
-        if value.is_pointer()
-            && let TyKind::Adt(adt_def, _) = value.ty.kind()
-                && api_classify::is_std_nonnull(adt_def.did()) {
-                    return CheckResult::ProvedByRule;
-                }
         // `byte_add(offset_of!(Container, field))` always keeps the pointer
         // within the container allocation, because the byte offset of a field
         // never exceeds `size_of::<Container>()`.  This covers patterns such
@@ -78,9 +67,6 @@ impl PropertyChecker {
         if self.count_is_offset_of(vm_state, checkpoint, property, &value) {
             return CheckResult::ProvedByRule;
         }
-        // When the contract expression for the element count evaluates to
-        // zero (e.g. div-by-sizeof for ZST generic params), the byte-level
-        // access is zero and limits checking is trivial.
         if self.count_is_zero(vm_state, checkpoint, property, 2) {
             return CheckResult::ProvedByRule;
         }
@@ -92,11 +78,6 @@ impl PropertyChecker {
         let size = vm_state.allocation_size(alloc_id).clone();
 
         let alloc = vm_state.alloc(alloc_id);
-        if let (Some(alloc_elem_ty), Some(req_ty)) = (alloc.element_ty.as_ty(), required_ty)
-            && self.alloc_elem_is_array_of(alloc_elem_ty, req_ty) {
-                return CheckResult::ProvedByRule;
-            }
-
         // An external allocation whose size is the `i64::MAX` "unbounded"
         // sentinel (a Vec/slice buffer, or a materialized `Allocated` fact)
         // auto-passes any `InBound` access.  A *raw-pointer target* carries a
@@ -310,8 +291,6 @@ impl PropertyChecker {
             return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
 
-        // Prefer the materialized slice length; fall back to `size / elem_size`
-        // for allocations that never got a materialized `slice_len`.
         let len = vm_state
             .slice_len_from_value(&slice_val)
             .unwrap_or_else(|| {
@@ -327,11 +306,8 @@ impl PropertyChecker {
 
         solver.push();
         let negated = if is_range {
-            // For range-based InBound (start..end), check end <= len
             index_val.z3_term.le(&len).not()
         } else {
-            // For single-element InBound (index), check index < len — the same
-            // strict bound recorded by `assert_in_bound_single`.
             index_val.z3_term.lt(&len).not()
         };
         solver.assert(&negated);
@@ -415,8 +391,6 @@ impl PropertyChecker {
         let Some(v1) = self.target_value(vm_state, checkpoint, property) else {
             return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
-        // Get the second pointer from the property args (not from checkpoint directly).
-        // The property may reference the two pointers in any order (e.g. dst at args[0]).
         let v2 = property
             .args()
             .get(1)
@@ -441,7 +415,6 @@ impl PropertyChecker {
                     .map(|op| vm_state.value_of_operand(op))
             });
         let Some(v2) = v2 else {
-            // Without a second pointer we cannot prove non-overlap.
             return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
         // Only discharge non-overlap when both pointers carry provenance into
@@ -635,14 +608,12 @@ impl PropertyChecker {
         if !matches!(pred.op, RelOp::Le | RelOp::Lt) {
             return false;
         }
-        // rhs must be >= isize::MAX (the language invaraint bound)
         let ContractExpr::Const(bound) = &pred.rhs else {
             return false;
         };
         if *bound < i64::MAX as u128 {
             return false;
         }
-        // lhs must be size_of(T) * count
         let ContractExpr::Binary {
             op: NumericBinOp::Mul,
             lhs,
@@ -657,7 +628,6 @@ impl PropertyChecker {
             _ => return false,
         };
         let resolved_ty = self.instantiate_callsite_ty(vm_state, checkpoint, size_ty);
-        // count must be a Place referencing a callsite arg
         self.count_derives_from_slice_param(vm_state, checkpoint, count_expr, resolved_ty)
     }
 
@@ -668,7 +638,6 @@ impl PropertyChecker {
         count_expr: &ContractExpr<'tcx>,
         elem_ty: Ty<'tcx>,
     ) -> bool {
-        // Must be a Place, not a constant literal
         let ContractExpr::Place(cp) = count_expr else {
             return false;
         };
@@ -700,8 +669,6 @@ impl PropertyChecker {
         if has_slice_param {
             return true;
         }
-        // No direct slice param — check if the pointer has provenance from
-        // an external allocation (raw pointer params get this in init_parameters).
         if let Some(op) = checkpoint.args.first() {
             let target_val = vm_state.value_of_operand(op);
             if target_val.is_pointer() {

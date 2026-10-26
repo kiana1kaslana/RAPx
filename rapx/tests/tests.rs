@@ -160,7 +160,7 @@ fn assert_unproved(output: &str, function: &str, property: &str) {
     assert_contain(output, &format!("function: {function}"));
     let block = extract_block_after(output, &format!("function: {function}"));
     assert_property_failed(&block, property, function);
-    assert_contain(output, "result: UNSOUND");
+    assert_contain(block, "result: UNSOUND");
 }
 
 /// Assert `property` appears as `Failed`/`Unknown` in `block`, matching the
@@ -226,11 +226,18 @@ fn assert_unproved_exclusive_with_result(
         unexpected.is_empty(),
         "Unexpected Failed/Unknown for {function}: {unexpected:?}\nAllowed: {allowed:?}\nBlock:\n{block}"
     );
-    assert_contain(output, &format!("result: {result_pat}"));
+    assert_contain(block, &format!("result: {result_pat}"));
 }
 
 fn extract_block_after<'a>(text: &'a str, marker: &str) -> &'a str {
-    let Some(pos) = text.find(marker) else {
+    let Some(pos) = text.match_indices(marker).find_map(|(pos, _)| {
+        let after = &text[pos + marker.len()..];
+        after
+            .split('\n')
+            .next()
+            .is_some_and(|tail| tail.trim().is_empty())
+            .then_some(pos)
+    }) else {
         return "";
     };
     let rest = &text[pos + marker.len()..];
@@ -257,6 +264,7 @@ const CMD_VERIFY_SCAN: &[&str] = &["verify", "--mode", "scan"];
 
 // ── Verify backend ──────────────────────────────────────────────
 const CMD_VERIFY_TARGETED: &[&str] = &["verify", "--mode", "targeted"];
+const CMD_VERIFY_REPEAT_0: &[&str] = &["verify", "--mode", "targeted", "--postfix-repeat", "0"];
 const CMD_VERIFY_REPEAT_1: &[&str] = &["verify", "--mode", "targeted", "--postfix-repeat", "1"];
 const CMD_VERIFY_REPEAT_2: &[&str] = &["verify", "--mode", "targeted", "--postfix-repeat", "2"];
 const CMD_VERIFY_SKIP_INVARIANT: &[&str] = &["verify", "--skip-invariant"];
@@ -266,8 +274,7 @@ const CMD_VERIFY_TARGETED_SKIP_INVARIANT: &[&str] =
 macro_rules! verify_sound {
     ($dir:literal, $func:literal) => {{
         let output = $crate::run_with_args($dir, CMD_VERIFY_TARGETED);
-        $crate::assert_contain(&output, concat!("function: ", $func));
-        $crate::assert_contain(&output, "result: SOUND");
+        $crate::assert_function_result(&output, $func, "SOUND");
     }};
 }
 
@@ -310,8 +317,7 @@ macro_rules! sound_tests_multi {
             fn $name() {
                 let output = $crate::run_with_args($dir, CMD_VERIFY_TARGETED);
                 $(
-                    $crate::assert_contain(&output, concat!("function: ", $func));
-                    $crate::assert_contain(&output, "result: SOUND");
+                    $crate::assert_function_result(&output, $func, "SOUND");
                 )+
             }
         )+

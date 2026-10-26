@@ -1,7 +1,4 @@
 //! Checkers for `Alias` and `Owning` properties.
-//!
-//! `Alias` delegates to [`crate::verify::vm::alias::check_alias_vm`]; `Owning`
-//! is a simple liveness check on the target allocation.
 
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
@@ -47,7 +44,7 @@ impl PropertyChecker {
                 .and_then(|v| v.provenance_alloc_id())
         });
         let Some(alloc_id) = alloc_id else {
-            return CheckResult::ProvedByRule;
+            return CheckResult::Unknown(UnknownReason::Unimplemented);
         };
         // `Owning(container.iter())` for_each: every element pointer is the
         // sole owner of its pointee, so a pointer loaded from the container
@@ -55,6 +52,83 @@ impl PropertyChecker {
         if vm_state.alloc(alloc_id).facts.for_each.owning {
             return CheckResult::ProvedByRule;
         }
+        let origin = vm_state.resolve_origin(&value);
+        let target_place = property.target_place();
+        let arg_place = target_place
+            .and_then(|place| match place.base {
+                crate::verify::contract::PlaceBase::Arg(n) => checkpoint.args.get(n),
+                _ => None,
+            })
+            .and_then(mir_utils::operand_mir_place);
+        let owning_invariant_field = arg_place.and_then(|arg_place| {
+            let tree =
+                crate::verify::vm::alias_tree::AliasTree::build(vm_state.tcx, checkpoint.caller);
+            let (root, fields) = tree.resolve_local_to_root(arg_place.local);
+            let field = fields.first().copied().or_else(|| {
+                arg_place
+                    .projection
+                    .iter()
+                    .find_map(|projection| match projection {
+                        rustc_middle::mir::ProjectionElem::Field(index, _) => {
+                            Some(index.as_usize())
+                        }
+                        _ => None,
+                    })
+            })?;
+            let root_ty =
+                vm_state.body().local_decls[rustc_middle::mir::Local::from_usize(root)].ty;
+            let root_ty = match root_ty.kind() {
+                rustc_middle::ty::TyKind::Ref(_, inner, _) => *inner,
+                _ => root_ty,
+            };
+            let rustc_middle::ty::TyKind::Adt(adt, _) = root_ty.kind() else {
+                return None;
+            };
+            Some((adt.did(), field))
+        });
+        let owns_field_by_invariant = owning_invariant_field.is_some_and(|(adt_id, field)| {
+            crate::verify::target::get_struct_invariants_from_annotation(
+                vm_state.tcx,
+                adt_id,
+                adt_id,
+            )
+            .iter()
+            .any(|p| {
+                p.kind() == Some(crate::verify::contract::PropertyKind::Owning)
+                    && p.target_place().is_some_and(|place| {
+                        place
+                            .projections
+                            .iter()
+                            .find_map(|projection| match projection {
+                                crate::verify::contract::ContractProjection::Field {
+                                    index,
+                                    ..
+                                } => Some(*index),
+                                _ => None,
+                            })
+                            == Some(field)
+                    })
+            })
+        });
+        let internal_alloc = !vm_state.alloc(alloc_id).is_external();
+        let local_alloc = vm_state
+            .current_frame
+            .local_alloc
+            .values()
+            .any(|id| *id == alloc_id);
+        let untrusted_raw_origin = origin.as_ref().is_none_or(|origin| match origin.kind {
+            crate::verify::vm::alias::VmOriginKind::RawPtr
+            | crate::verify::vm::alias::VmOriginKind::SharedRef
+            | crate::verify::vm::alias::VmOriginKind::Unknown => true,
+            crate::verify::vm::alias::VmOriginKind::MutRef => !owns_field_by_invariant,
+            crate::verify::vm::alias::VmOriginKind::Owned(def_id) => {
+                !(crate::verify::api_classify::is_std_box(def_id)
+                    || crate::verify::api_classify::is_std_vec(def_id)
+                    || crate::verify::api_classify::is_std_cstring(def_id)
+                    || owns_field_by_invariant
+                    || (internal_alloc && !local_alloc))
+            }
+        });
         // Owning(p): p is the sole carrier of *p's ownership. A live `needs_drop`
         // owner whose buffer aliases `alloc_id` means a second owner will drop the
         // same allocation — a double free. The reconstructed owner (the call's
@@ -67,18 +141,6 @@ impl PropertyChecker {
                 }
                 _ => None,
             }
-        });
-        // The local the `Owning(p)` argument names (e.g. `raw` in
-        // `Box::from_raw(raw)`), resolved to the caller's local.
-        let raw_local = property.target_place().and_then(|cp| match cp.base {
-            crate::verify::contract::PlaceBase::Arg(n) => checkpoint
-                .args
-                .get(n)
-                .and_then(|op| mir_utils::operand_mir_place(op).map(|p| p.local)),
-            crate::verify::contract::PlaceBase::Local(n) => {
-                Some(rustc_middle::mir::Local::from_usize(n))
-            }
-            crate::verify::contract::PlaceBase::Return => None,
         });
         let live = crate::verify::vm::alias_hazard::live_locals_at(
             vm_state.tcx,
@@ -93,24 +155,6 @@ impl PropertyChecker {
         );
         let typing_env =
             rustc_middle::ty::TypingEnv::non_body_analysis(vm_state.tcx, checkpoint.caller);
-        // `p`'s term often points at the owner's address (e.g. `s.as_mut_ptr()`
-        // yields a term `addr__1` for `s`). Trace it back to the owner local and
-        // report a second owner directly, without needing its field provenance.
-        // A moved-out source still has the same term but its owner-field
-        // provenance has been invalidated, so it is not counted as an owner.
-        if let Some(owner) = vm_state.find_local_by_address(&value.z3_term)
-            && live.contains(&owner)
-                && Some(owner) != dest_local
-                && Some(owner) != raw_local
-                && vm_state
-                    .owner_ptr_field(owner)
-                    .is_some_and(|f| f.provenance_alloc_id() == Some(alloc_id))
-            {
-                let oty = vm_state.body().local_decls[owner].ty;
-                if oty.needs_drop(vm_state.tcx, typing_env) {
-                    return CheckResult::Failed;
-                }
-            }
         for local in vm_state.current_frame.local_alloc.keys() {
             if Some(*local) == dest_local {
                 continue;
@@ -132,8 +176,32 @@ impl PropertyChecker {
                 return CheckResult::Failed;
             }
         }
-        CheckResult::ProvedByRule
+        let matches_owning_precondition = vm_state
+            .alloc(alloc_id)
+            .facts
+            .owning
+            .as_ref()
+            .is_some_and(|owner| owner == &value.z3_term);
+        if untrusted_raw_origin && !matches_owning_precondition {
+            let fresh_internal = origin.is_none() && internal_alloc && !local_alloc;
+            let local_manually_drop =
+                crate::verify::api_classify::is_manually_drop_drop(checkpoint.callee)
+                    && internal_alloc
+                    && local_alloc
+                    && origin.as_ref().is_some_and(|origin| {
+                        matches!(
+                            origin.kind,
+                            crate::verify::vm::alias::VmOriginKind::MutRef
+                                | crate::verify::vm::alias::VmOriginKind::Owned(_)
+                        )
+                    });
+            if fresh_internal || local_manually_drop {
+                CheckResult::ProvedByRule
+            } else {
+                CheckResult::Unknown(UnknownReason::Unimplemented)
+            }
+        } else {
+            CheckResult::ProvedByRule
+        }
     }
 }
-
-

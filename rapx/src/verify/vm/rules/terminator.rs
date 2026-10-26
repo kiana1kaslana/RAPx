@@ -3,7 +3,7 @@
 use rustc_middle::mir::{BasicBlock, Operand, Place, SwitchTargets};
 use z3::ast::{Ast, Int};
 
-use super::super::state::VmState;
+use super::super::state::{ValueSource, VmState};
 use crate::helpers::def_use::PlaceKey;
 
 pub(crate) fn exec_switch_int<'z3, 'tcx>(
@@ -13,6 +13,22 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
     switch_succ: Option<BasicBlock>,
 ) {
     let discr_val = state.value_of_operand(discr);
+    if !state.unsupported_mir
+        && !state.incomplete_inline_branch
+        && matches!(discr_val.source, ValueSource::CallsiteConst)
+        && let Some(value) = discr_val.z3_term.simplify().as_u64()
+        && let Some(chosen) = switch_succ
+    {
+        let actual = targets
+            .iter()
+            .find(|(candidate, _)| *candidate == value as u128)
+            .map(|(_, target)| target)
+            .unwrap_or_else(|| targets.otherwise());
+        if actual != chosen {
+            state.path_infeasible = true;
+            return;
+        }
+    }
     if VmState::term_involves(&state.inline.opaque_intrinsic_terms, &discr_val.z3_term) {
         state.unsupported_mir = true;
     }
@@ -41,7 +57,6 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
                 return;
             }
         }
-        // Otherwise branch: the discrim is NOT any of the explicit values.
         if targets.otherwise() == chosen {
             for (value, _) in targets.iter() {
                 let val_term = Int::from_u64(state.z3_ctx, value as u64);

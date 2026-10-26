@@ -222,9 +222,8 @@ pub struct PathGraph<'tcx> {
 pub struct InlineBinding {
     /// Caller argument locals (callee param `_i+1` ← `arg_locals[i]`).
     pub arg_locals: Vec<usize>,
-    /// Constant argument values: `(param, value)` for a `Const` argument that
-    /// has no local (`callee param `_param` ← const `value``).
-    pub arg_consts: Vec<(usize, u64)>,
+    /// Literal or symbolic constant arguments and their callee parameter indices.
+    pub arg_consts: Vec<(usize, InlineConstArg)>,
     /// Callee parameters bound to an `offset_of!` const argument (a symbolic
     /// field offset, not a concrete `u64`).  Preserved so the VM can mark the
     /// value as a `FieldOffset` (keeping `Align` dischargeable) instead of
@@ -232,6 +231,12 @@ pub struct InlineBinding {
     pub arg_field_offsets: Vec<usize>,
     /// Caller destination local (receives the callee's `_0`).
     pub dest_local: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum InlineConstArg {
+    Literal(u64),
+    Symbol(String),
 }
 
 /// Scan a function's MIR and collect its per-block constant/discriminant
@@ -868,11 +873,22 @@ impl<'tcx> PathGraph<'tcx> {
                         .iter()
                         .filter_map(|a| a.node.place().map(|p| p.local.as_usize()))
                         .collect();
-                    let arg_consts: Vec<(usize, u64)> = args
+                    let arg_consts: Vec<(usize, InlineConstArg)> = args
                         .iter()
                         .enumerate()
                         .filter_map(|(i, a)| {
-                            mir_utils::operand_const_u64(&a.node).map(|v| (i + 1, v))
+                            if let Some(value) = mir_utils::operand_const_u64(&a.node) {
+                                return Some((i + 1, InlineConstArg::Literal(value)));
+                            }
+                            let Operand::Constant(constant) = &a.node else {
+                                return None;
+                            };
+                            let rustc_middle::mir::Const::Ty(_, value) = constant.const_ else {
+                                return None;
+                            };
+                            matches!(value.kind(), rustc_middle::ty::ConstKind::Param(_)).then(|| {
+                                (i + 1, InlineConstArg::Symbol(format!("{:?}", constant.const_)))
+                            })
                         })
                         .collect();
                     let arg_field_offsets: Vec<usize> = args

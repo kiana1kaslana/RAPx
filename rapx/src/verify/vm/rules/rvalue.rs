@@ -471,6 +471,18 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
     }
     let term = state.fresh_int("aggregate");
     let dest_local = dest_place.local;
+    let dest_prefix = if dest_place.projection.iter().all(|projection| {
+        matches!(projection.kind(), rustc_middle::mir::ProjectionElem::Field(..) | rustc_middle::mir::ProjectionElem::Downcast(..))
+    }) {
+        dest_place.projection.iter().filter_map(|projection| {
+            match projection.kind() {
+                rustc_middle::mir::ProjectionElem::Field(field, _) => Some(field.as_usize()),
+                _ => None,
+            }
+        }).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     // Prefer the pointee allocation (through a `*ptr` deref) over the base
     // local's own stack slot, so byte values land on the real buffer (e.g.
     // `((*_8).1).0 = [a, b, 0]` writes into the box).
@@ -496,7 +508,9 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
             .map(|ty| state.size_of_ty(ty) as usize)
             .unwrap_or(1);
         let field_term = field_val.z3_term.clone();
-        state.set_field_value(dest_local, vec![i], field_val);
+        let mut field_path = dest_prefix.clone();
+        field_path.push(i);
+        state.set_field_value(dest_local, field_path.clone(), field_val);
         // Flatten a nested aggregate: if the operand is a local whose own fields
         // are tracked (e.g. `_0 = Result::Ok(_24)` where `_24 = RawVecInner { ptr:
         // _25, .. }`), expose the nested fields under the destination's field
@@ -519,7 +533,7 @@ pub(crate) fn eval_aggregate<'z3, 'tcx>(
                 })
                 .collect();
             for (nested_path, nested_val) in nested {
-                let mut full = vec![i];
+                let mut full = field_path.clone();
                 full.extend_from_slice(&nested_path);
                 state.set_field_value(dest_local, full, nested_val);
             }
@@ -780,17 +794,26 @@ pub(crate) fn eval_repeat<'z3, 'tcx>(
         return eval_fresh_value(state, dest_place, "repeat");
     }
     let value = state.value_of_operand(operand);
-    let mut field_path = dest_place
-        .projection
-        .iter()
-        .filter_map(|projection| match projection.kind() {
-            rustc_middle::mir::ProjectionElem::Field(index, _) => Some(index.as_usize()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if field_path.len() != dest_place.projection.len() {
-        state.unsupported_mir = true;
-        return eval_fresh_value(state, dest_place, "repeat");
+    let mut field_path = Vec::new();
+    for projection in dest_place.projection.iter() {
+        let index = match projection {
+            rustc_middle::mir::ProjectionElem::Field(index, _) => index.as_usize(),
+            rustc_middle::mir::ProjectionElem::Index(local) => {
+                let Some(index) = state.local_value(local)
+                    .and_then(|value| value.z3_term.simplify().as_u64())
+                    .and_then(|index| usize::try_from(index).ok()) else {
+                    state.unsupported_mir = true;
+                    return eval_fresh_value(state, dest_place, "repeat");
+                };
+                index
+            }
+            rustc_middle::mir::ProjectionElem::ConstantIndex { offset, from_end: false, .. } => offset as usize,
+            _ => {
+                state.unsupported_mir = true;
+                return eval_fresh_value(state, dest_place, "repeat");
+            }
+        };
+        field_path.push(index);
     }
     if let Some(alloc_id) = state
         .current_frame
@@ -804,7 +827,22 @@ pub(crate) fn eval_repeat<'z3, 'tcx>(
         });
     }
     field_path.push(REPEATED_ARRAY_ELEMENT);
-    state.set_field_value(dest_place.local, field_path, value);
+    state.set_field_value(dest_place.local, field_path.clone(), value);
+    if let Some(source) = operand.place()
+        && source.projection.is_empty()
+    {
+        let nested = state.field_paths(source.local)
+            .into_iter()
+            .filter_map(|path| {
+                state.field_value(source.local, &path).cloned().map(|value| (path, value))
+            })
+            .collect::<Vec<_>>();
+        for (path, value) in nested {
+            let mut full = field_path.clone();
+            full.extend(path);
+            state.set_field_value(dest_place.local, full, value);
+        }
+    }
     eval_fresh_value(state, dest_place, "repeat")
 }
 
@@ -880,15 +918,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         lhs: &VmValue<'z3, 'tcx>,
         rhs: &VmValue<'z3, 'tcx>,
     ) -> Option<Provenance<'z3>> {
-        // `ptr ⊙ ptr` (rhs is a pointer) yields an integer / is meaningless, so
-        // it carries no provenance.  `Div`/`Rem` keep `lhs`'s provenance
-        // regardless (ptr ÷ scalar), so they are excluded here.
         if rhs.is_pointer() && !matches!(op, BinOp::Div | BinOp::Rem) {
             return None;
         }
         match op {
             BinOp::Add | BinOp::AddWithOverflow | BinOp::AddUnchecked | BinOp::Offset => {
-                // ptr + scalar → propagate with adjusted offset
                 lhs.provenance.as_ref().map(|prov| Provenance {
                     alloc_id: prov.alloc_id,
                     offset: Int::add(self.z3_ctx, &[&prov.offset, &rhs.z3_term]),
@@ -956,10 +990,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             | BinOp::SubWithOverflow
             | BinOp::SubUnchecked
             | BinOp::Offset => {
-                // If both LHS and RHS are known to be n-aligned, sum/diff is n-aligned
                 match (&lhs.facts.align_n, &rhs.facts.align_n) {
                     (Some(a), Some(b)) if a == b => Some(a.clone()),
-                    // LHS has alignment, RHS is a constant multiple of it
                     (Some(a), None) => match a.simplify().as_u64() {
                         Some(au) => {
                             let c = rhs.z3_term.as_u64().unwrap_or(1);
@@ -979,7 +1011,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             }
                         }
                     },
-                    // LHS has alignment, RHS is the result of Mul by constant factor
                     (Some(a), _) if self.rhs_is_aligned_multiple(rhs, a) => Some(a.clone()),
                     _ => None,
                 }

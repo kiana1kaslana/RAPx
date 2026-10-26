@@ -10,8 +10,8 @@
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{BasicBlock, Local, Operand, Terminator, TerminatorKind};
-use rustc_middle::ty::{Ty, TyKind};
-use z3::ast::{Ast, Int};
+use rustc_middle::ty::TyKind;
+use z3::ast::Int;
 use z3::{SatResult, Solver};
 
 use crate::compat::{FxHashSet, Spanned};
@@ -19,7 +19,7 @@ use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
 use crate::verify::api_classify;
 use crate::verify::call_summary;
-use super::state::{AllocId, MemoryContent, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
+use super::state::{AllocId, MemoryContent, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Execute a call terminator, dispatching by precision:
@@ -248,9 +248,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
         self.restore_frame(frame);
 
-        // Apply deferred field writes (`(*self).field = val` through a
-        // `&mut self` reborrow) collected during the callee's execution, now
-        // that the caller's frame (and its address map) is live again.
         let writes = std::mem::take(&mut self.inline.deferred_field_writes);
         self.inline.arg_referents = saved_inline_arg_referents;
         self.inline.deferred_field_writes = saved_deferred_field_writes;
@@ -260,8 +257,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         match return_val {
             Some(mut val) => {
                 val.ty = dest_ty;
-                // Infer facts: a non-null provenance with offset=0
-                // means the return value is valid and initialized.
                 let at_base = val
                     .provenance
                     .as_ref()
@@ -271,9 +266,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.mark_initialized(&mut val);
                 }
                 self.set_local(dest, val);
-                // Propagate the callee's per-field return values (e.g. a
-                // tuple `(NonNull<T>, A)`'s field 0) to the caller's
-                // destination so subsequent field projections resolve.
                 for (path, fv) in return_fields {
                     self.set_field_value(dest, path, fv);
                 }
@@ -493,7 +485,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
         let mut explored = 0;
         while let Some((mut state, block, mut visited)) = stack.pop() {
-            if explored >= 512 || !visited.insert(block) {
+            if state.path_infeasible || explored >= 512 || !visited.insert(block) {
                 continue;
             }
             explored += 1;
@@ -555,335 +547,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         found
     }
 
-    /// Clone `arg_val`, retype it to `dest`'s type, mark it as a non-null,
-    /// aligned, initialized pointer, and bind it to `dest`.
-    pub(crate) fn set_dest_as_heap_ptr(&mut self, arg_val: &VmValue<'z3, 'tcx>, dest: Local) {
-        let mut val = arg_val.clone();
-        val.ty = self.body().local_decls[dest].ty;
-        val.facts.non_null = true;
-        val.facts.init = true;
-        self.set_local(dest, val);
-    }
-
-    /// Apply a binary numeric effect: compute `f(lhs.z3_term, rhs.z3_term)` and store
-    /// it as the destination's fresh scalar value.
-    pub(crate) fn apply_binary_num(
-        &mut self,
-        dest: Local,
-        args: &[VmValue<'z3, 'tcx>],
-        lhs_arg: usize,
-        rhs_arg: usize,
-        f: impl Fn(&Int<'z3>, &Int<'z3>) -> Int<'z3>,
-    ) {
-        if let (Some(lhs), Some(rhs)) = (args.get(lhs_arg), args.get(rhs_arg)) {
-            let dest_ty = self.body().local_decls[dest].ty;
-            self.set_local(dest, VmValue::new(f(&lhs.z3_term, &rhs.z3_term), dest_ty));
-        }
-    }
-
-    pub(crate) fn integer_limits(&self, ty: Ty<'tcx>) -> Option<(Int<'z3>, Int<'z3>, Int<'z3>, bool)> {
-        let signed = match ty.kind() {
-            TyKind::Int(_) => true,
-            TyKind::Uint(_) => false,
-            _ => return None,
-        };
-        let (_, bytes) = mir_utils::type_layout(self.tcx, self.current_frame.current_def_id, ty)?;
-        let bits = bytes.checked_mul(8)?;
-        if bits == 0 || bits > 128 {
-            return None;
-        }
-        let unsigned_max = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
-        let modulus = Int::add(self.z3_ctx, &[
-            &Int::from_str(self.z3_ctx, &unsigned_max.to_string())?,
-            &Int::from_u64(self.z3_ctx, 1),
-        ]);
-        let (min, max) = if signed {
-            let signed_max = if bits == 128 {
-                i128::MAX
-            } else {
-                (1i128 << (bits - 1)) - 1
-            };
-            let signed_min = if bits == 128 {
-                i128::MIN
-            } else {
-                -(1i128 << (bits - 1))
-            };
-            (signed_min.to_string(), signed_max.to_string())
-        } else {
-            ("0".to_string(), unsigned_max.to_string())
-        };
-        Some((
-            Int::from_str(self.z3_ctx, &min)?,
-            Int::from_str(self.z3_ctx, &max)?,
-            modulus,
-            signed,
-        ))
-    }
-
-    /// Compute the preserved alignment when doing `base + offset * stride`.
-    /// Pointer arithmetic only ever *preserves* the base's alignment; it never
-    /// creates it. When the base's alignment is unknown, we cannot conclude
-    /// anything about the result (a `wrapping_add` over misaligned storage does
-    /// not become aligned just because the stride is a power of two).
-    fn compute_pointer_add_align(
-        &self,
-        base: &VmValue<'z3, 'tcx>,
-        stride_bytes: u64,
-    ) -> Option<Int<'z3>> {
-        let base_align = base.facts.align_n.as_ref()?;
-        // Concrete alignment: the result stays n-aligned only if the stride is
-        // a multiple of n.  A symbolic alignment can't be decided against a
-        // concrete stride, so drop it here (the `check_align` SMT query
-        // re-derives alignment from the allocation's align and the
-        // `sizeof_T % align_T == 0` layout constraint).
-        let n = base_align.simplify().as_u64()?;
-        if stride_bytes > 0 && stride_bytes.is_multiple_of(n) {
-            return Some(base_align.clone());
-        }
-        None
-    }
-
-    /// The byte stride for a pointer add/sub: the fixed `stride`, or the pointee's
-    /// symbolic size when the stride is element-sized (a generic `T`).
-    fn pointer_stride_term(&mut self, dest: Local, stride: Option<u64>) -> Int<'z3> {
-        match stride {
-            Some(s) => Int::from_u64(self.z3_ctx, s),
-            None => {
-                let dest_ty = self.body().local_decls[dest].ty;
-                let pointee = mir_utils::pointee_ty(dest_ty).unwrap_or(dest_ty);
-                self.size_sym(pointee)
-            }
-        }
-    }
-
-    /// Model `dest = base.offset(offset)` with element/byte stride and tracked
-    /// provenance (`offset_kind`), shared by the `ReturnPointerAdd` call effect
-    /// and the inlined `Offset` MIR statement.
-    pub(crate) fn apply_pointer_add(
-        &mut self,
-        dest: Local,
-        base: &VmValue<'z3, 'tcx>,
-        offset: &VmValue<'z3, 'tcx>,
-        stride: Option<u64>,
-        dereferenceable: bool,
-    ) {
-        // `sub` lowers `intrinsics::unchecked_sub(0, n)` to a unary negation `-n`
-        // (`eval_binary_op` folds `0 - x` to `-x`).  Recover the positive count
-        // and model the result as `base - count*stride` (a negated product) so a
-        // later `+ count*stride` in `Allocated`'s byte-coverage query cancels
-        // linearly, instead of `base + (-count)*stride` whose `(-count)*stride`
-        // product Z3's nonlinear solver cannot factor out.
-        let (offset_term, subtract) = if offset.z3_term.num_children() == 1
-            && let Some(positive) = offset.z3_term.nth_child(0).and_then(|c| c.as_int())
-        {
-            (positive, true)
-        } else {
-            (offset.z3_term.clone(), false)
-        };
-        let stride_term = self.pointer_stride_term(dest, stride);
-        let adjusted_offset = if stride == Some(1) {
-            offset_term.clone()
-        } else {
-            Int::mul(self.z3_ctx, &[&offset_term, &stride_term])
-        };
-        let combine = |l: &Int<'z3>, r: &Int<'z3>| {
-            if subtract {
-                Int::sub(self.z3_ctx, &[l, r])
-            } else {
-                Int::add(self.z3_ctx, &[l, r])
-            }
-        };
-        let new_term = combine(&base.z3_term, &adjusted_offset);
-        let is_field_offset = offset.is_field_offset()
-            && base
-                .provenance
-                .as_ref()
-                .is_some_and(|p| p.offset.as_u64() == Some(0));
-        let element_offset = if stride == Some(1) {
-            None
-        } else {
-            match base.provenance.as_ref().and_then(|p| match &p.offset_kind {
-                Some(OffsetKind::Element(e)) => Some(e.clone()),
-                _ => None,
-            }) {
-                Some(e) => Some(combine(&e, &offset_term)),
-                None if base
-                    .provenance
-                    .as_ref()
-                    .is_some_and(|p| p.offset.as_u64() == Some(0)) =>
-                {
-                    Some(if subtract {
-                        -offset_term.clone()
-                    } else {
-                        offset_term.clone()
-                    })
-                }
-                None => None,
-            }
-        };
-        let offset_kind = if is_field_offset {
-            Some(OffsetKind::Field)
-        } else if let Some(e) = element_offset {
-            Some(OffsetKind::Element(e))
-        } else {
-            Some(OffsetKind::Byte)
-        };
-        let adjusted_provenance = base.provenance.as_ref().map(|prov| Provenance {
-            alloc_id: prov.alloc_id,
-            offset: combine(&prov.offset, &adjusted_offset),
-            offset_kind,
-        });
-        let align_n = match stride {
-            Some(s) => self.compute_pointer_add_align(base, s),
-            None => base.facts.align_n.clone(),
-        };
-        let val = VmValue {
-            z3_term: new_term,
-            ty: self.body().local_decls[dest].ty,
-            provenance: adjusted_provenance,
-            facts: ValueFacts {
-                non_null: base.facts.non_null,
-                in_bounds: dereferenceable,
-                align_n,
-                init: base.facts.init,
-            },
-            source: ValueSource::None,
-        };
-        self.set_local(dest, val);
-    }
-
-    pub(crate) fn propagate_const_bytes_to_tracked(&mut self, args: &[Spanned<Operand<'tcx>>]) {
-        let mut const_bytes: Option<(Vec<u8>, usize)> = None;
-        let mut tracked_alloc: Option<AllocId> = None;
-        let mut tracked_offset: usize = 0;
-
-        for (i, arg) in args.iter().enumerate() {
-            let arg_val = self.value_of_operand(&arg.node);
-            if const_bytes.is_none() {
-                let bytes_opt = mir_utils::const_operand_bytes(self.tcx, &arg.node)
-                    .or_else(|| self.trace_to_const_bytes(&arg.node));
-                if let Some(bytes) = bytes_opt {
-                    const_bytes = Some((bytes, i));
-                }
-            }
-            if tracked_alloc.is_none()
-                && let Some(alloc_id) = arg_val.provenance_alloc_id() {
-                    tracked_alloc = Some(alloc_id);
-                    if let Some(ref prov) = arg_val.provenance {
-                        tracked_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
-                    }
-                }
-        }
-
-        if let (Some((bytes, _)), Some(alloc_id)) = (const_bytes, tracked_alloc) {
-            for (j, &b) in bytes.iter().enumerate() {
-                let off = tracked_offset + j;
-                self.record_byte_value(alloc_id, off, Int::from_u64(self.z3_ctx, b as u64));
-            }
-            self.content_mut(alloc_id).facts.initialized = true;
-        }
-    }
-
-    /// The two pointer fields of an Iter/IterMut local (`[0]` = ptr, `[1]` =
-    /// end_or_len), which share the same allocation.  Returns `None` when
-    /// either field is missing or the two point into different allocations.
-    pub(crate) fn iter_ptr_end(&self, local: Local) -> Option<(VmValue<'z3, 'tcx>, VmValue<'z3, 'tcx>)> {
-        for (ptr_path, end_path) in [(&[0][..], &[1][..]), (&[0, 0][..], &[0, 1][..])] {
-            let (Some(ptr), Some(end)) =
-                (self.field_value(local, ptr_path), self.field_value(local, end_path))
-            else {
-                continue;
-            };
-            if ptr
-                .provenance
-                .as_ref()
-                .zip(end.provenance.as_ref())
-                .is_some_and(|(pp, ep)| pp.alloc_id == ep.alloc_id)
-            {
-                return Some((ptr.clone(), end.clone()));
-            }
-        }
-        None
-    }
-
-    /// Element size of the type iterated by an Iter/IterMut pointer, symbolic
-    /// (`sizeof_T`) for a generic element type so `size / elem_size` cancels.
-    pub(crate) fn iter_elem_size(&self, ptr: &VmValue<'z3, 'tcx>) -> Int<'z3> {
-        let elem_ty = match ptr.ty.kind() {
-            TyKind::Adt(_, substs) => substs.first().and_then(|s| s.as_type()),
-            TyKind::RawPtr(ty, _) | TyKind::Ref(_, ty, _) => Some(*ty),
-            _ => None,
-        };
-        if elem_ty.is_some_and(|ty| matches!(ty.kind(), TyKind::Param(_)))
-            && let Some(alloc_id) = ptr.provenance_alloc_id()
-            && let Some(concrete) = self.alloc(alloc_id).element_ty.as_ty()
-            && !matches!(concrete.kind(), TyKind::Param(_))
-        {
-            return self.size_sym_read(concrete);
-        }
-        match elem_ty {
-            Some(t) => self.size_sym_read(t),
-            None => Int::from_u64(self.z3_ctx, 1),
-        }
-    }
-
-    /// Element count from two pointer fields sharing the same allocation:
-    /// `(end.offset - ptr.offset) / elem_size`. When both pointers carry an
-    /// element-structured offset (`OffsetKind::Element`, or the base), the
-    /// count is computed element-wise (`end_elem - ptr_elem`) so the
-    /// `(end·S - ptr·S)/S` division is avoided for a generic element size `S`.
-    pub(crate) fn iter_len_from_ptrs(
-        &self,
-        ptr: &VmValue<'z3, 'tcx>,
-        end: &VmValue<'z3, 'tcx>,
-    ) -> Option<Int<'z3>> {
-        let pp = ptr.provenance.as_ref()?;
-        let ep = end.provenance.as_ref()?;
-        if pp.alloc_id != ep.alloc_id {
-            return None;
-        }
-        let elem_of = |p: &Provenance<'z3>| -> Option<Int<'z3>> {
-            match &p.offset_kind {
-                Some(OffsetKind::Element(e)) => Some(e.clone()),
-                Some(OffsetKind::Field) | None => Some(Int::from_u64(self.z3_ctx, 0)),
-                _ => None,
-            }
-        };
-        if let (Some(pe), Some(ee)) = (elem_of(pp), elem_of(ep)) {
-            return Some(Int::sub(self.z3_ctx, &[&ee, &pe]));
-        }
-        let sz = self.iter_elem_size(ptr);
-        let diff = Int::sub(self.z3_ctx, &[&ep.offset, &pp.offset]);
-        Some(diff.div(&sz))
-    }
-
-    /// Remaining element count of an Iter/IterMut from its two pointer fields.
-    /// When a tracked pointer offset exists (`iter_ptr_offset`), prefers the
-    /// compact `base_len - offset` form; otherwise falls back to
-    /// `(end.offset - ptr.offset) / elem_size`.
-    pub(crate) fn iter_remaining_len_from_ptrs(
-        &self,
-        ptr: &VmValue<'z3, 'tcx>,
-        end: &VmValue<'z3, 'tcx>,
-        iter_owner: Option<&(AllocId, Int<'z3>)>,
-    ) -> Option<Int<'z3>> {
-        let ep = end.provenance.as_ref()?;
-        let sz = self.iter_elem_size(ptr);
-        if let Some((_, offset, base_len_elem)) = iter_owner
-            .and_then(|id| self.constraints.term_caches.iter_ptr_offset.get(id))
-        {
-            let base_len = base_len_elem.clone().unwrap_or_else(|| ep.offset.div(&sz));
-            let zero = Int::from_u64(self.z3_ctx, 0);
-            Some(
-                offset
-                    .gt(&base_len)
-                    .ite(&zero, &Int::sub(self.z3_ctx, &[&base_len, offset])),
-            )
-        } else {
-            self.iter_len_from_ptrs(ptr, end)
-        }
-    }
-
     /// Find the local whose symbolic address matches `term` (the address a
     /// reference value points at). Used to resolve a `&self`/`&mut self`
     /// receiver (often a reborrow temp) back to the referent local that carries
@@ -911,13 +574,15 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         });
         if let Some(local) = caller_referent {
             self.inline.deferred_field_writes.push((local, path, value));
-        } else if let Some(local) = self.find_local_by_address(&pointer.z3_term) {
-            if path.is_empty() {
-                self.invalidate_pointer_array(local);
-                self.set_local(local, value);
-            } else {
-                self.set_field_value(local, path, value);
-            }
+            return;
+        }
+        if path.is_empty() && self.write_provenance_allocation(pointer, value.clone()) {
+            return;
+        }
+        if let Some(local) = self.find_local_by_address(&pointer.z3_term) {
+            self.write_local_path(local, path, value);
+        } else if path.is_empty() {
+            self.invalidate_provenance_allocation(pointer);
         }
     }
 
@@ -932,11 +597,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 .filter(|_| matches!(self.body().local_decls[local].ty.kind(), TyKind::Ref(..) | TyKind::RawPtr(..)));
             if let Some(referent) = outer_referent {
                 self.inline.deferred_field_writes.push((referent, path, value));
-            } else if path.is_empty() {
-                self.invalidate_pointer_array(local);
-                self.set_local(local, value);
             } else {
-                self.set_field_value(local, path, value);
+                self.write_local_path(local, path, value);
             }
         }
     }
@@ -1096,106 +758,5 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             })
     }
 
-    /// Apply a `ReturnRange` effect: model `slice::range(range, bounds)`
-    /// returning `Range { start, end }` with `0 <= start <= end <= bounds.end`.
-    /// The `bounds` argument is a `RangeTo<usize>` whose field 0 carries the
-    /// slice length; the returned `Range<usize>` fields are fresh symbols bound
-    /// by the range invariant.
-    pub(crate) fn apply_range_effect(
-        &mut self,
-        bounds_arg: usize,
-        args: &[VmValue<'z3, 'tcx>],
-        caller_arg_locals: &[Option<Local>],
-        dest: Local,
-    ) {
-        let dest_ty = self.body().local_decls[dest].ty;
-        let TyKind::Adt(adt, substs) = dest_ty.kind() else {
-            return;
-        };
-        let variant = adt.non_enum_variant();
-        let field_ty = |idx: usize| -> Ty<'tcx> {
-            variant
-                .fields
-                .iter()
-                .nth(idx)
-                .map(|f| mir_utils::field_ty(self.tcx, f, substs))
-                .unwrap_or(dest_ty)
-        };
 
-        // Resolve `bounds.end` (the slice length): prefer the materialized
-        // field 0 of the `RangeTo<usize>` argument, falling back to the
-        // argument's own term.
-        let mut len_term = None;
-        if let Some(l) = caller_arg_locals.get(bounds_arg).copied().flatten()
-            && let Some(fv) = self.field_value(l, &[0]) {
-                len_term = Some(fv.z3_term.clone());
-            }
-        let len_term = len_term.or_else(|| args.get(bounds_arg).map(|v| v.z3_term.clone()));
-        let Some(len_term) = len_term else {
-            return;
-        };
-
-        let start = self.fresh_int(&format!("range_start_{}", dest.as_usize()));
-        let end = self.fresh_int(&format!("range_end_{}", dest.as_usize()));
-        let zero = Int::from_u64(self.z3_ctx, 0);
-        self.constraints.assertions.push(start.ge(&zero));
-        self.constraints.assertions.push(start.le(&end));
-        self.constraints.assertions.push(end.le(&len_term));
-
-        let start_val = VmValue::new(start, field_ty(0));
-        let end_val = VmValue::new(end, field_ty(1));
-        self.set_field_value(dest, vec![0], start_val);
-        self.set_field_value(dest, vec![1], end_val);
-    }
-
-    /// Compute the `(ptr, cap, len)` field paths of a `Vec`-shaped local, handling
-    /// both the std `Vec<T>` layout `{ buf: RawVec { ptr, cap }, len }` and the
-    /// flat local re-implementation `{ ptr: NonNull, len, cap }` used by the
-    /// std-challenge suites.
-    /// Materialize the `{ptr, cap, len}` field values of a `Vec<T>` aggregate
-    /// at `local`. The backing-buffer pointer is written to the owning raw
-    /// pointer field (located generically via [`Self::container_ptr_field`]);
-    /// the `len`/`cap` are no longer materialized as fields — they are asserted
-    /// as path conditions and tracked by the backing allocation's slice length.
-    ///
-    /// The symbolic invariant `0 <= len <= cap` and `cap * elem_size <=
-    /// isize::MAX` is asserted as a path condition so downstream `len()` /
-    /// `capacity()` / `InBound` / `ValidNum` queries agree.
-    pub(crate) fn materialize_vec_fields(
-        &mut self,
-        local: Local,
-        ptr: VmValue<'z3, 'tcx>,
-        cap: Int<'z3>,
-        len: Int<'z3>,
-    ) {
-        let elem_size = self.size_of_ty(ptr.ty).max(1);
-        let ty = self.body().local_decls[local].ty;
-        let ptr_path = self
-            .container_ptr_field(ty)
-            .expect("materialize_vec_fields: container has no owning pointer field");
-        self.set_field_value(local, ptr_path, ptr);
-        self.materialize_vec_len_cap(cap, len, elem_size);
-    }
-
-    /// Assert the Vec length/capacity invariants `0 <= len <= cap` and
-    /// `cap * elem_size <= isize::MAX` as path conditions.
-    pub(crate) fn materialize_vec_len_cap(
-        &mut self,
-        cap: Int<'z3>,
-        len: Int<'z3>,
-        elem_size: u64,
-    ) {
-        let zero = Int::from_u64(self.z3_ctx, 0);
-        self.constraints.assertions.push(len.ge(&zero));
-        self.constraints.assertions.push(len.le(&cap));
-        self.constraints.assertions.push(cap.ge(&zero));
-        // Language invariant: a Vec's byte length fits in `isize::MAX`, so the
-        // `from_raw_parts`/`from_raw_parts_mut` precondition
-        // `size_of(T) * len <= isize::MAX` is provable from the materialized
-        // fields (`len <= cap` and `cap * elem_size <= isize::MAX`).
-        let isize_max = Int::from_u64(self.z3_ctx, isize::MAX as u64);
-        let elem_term = Int::from_u64(self.z3_ctx, elem_size.max(1));
-        self.constraints.assertions
-            .push(Int::mul(self.z3_ctx, &[&cap, &elem_term]).le(&isize_max));
-    }
 }

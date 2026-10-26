@@ -1,0 +1,8 @@
+[package]
+name = "init_std_unsound_03"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[workspace]

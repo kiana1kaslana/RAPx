@@ -23,18 +23,10 @@ impl PropertyChecker {
         let src = Self::ty_arg(property, 0);
         let dst = Self::ty_arg(property, 1);
         match (src, dst) {
-            (Some(s), Some(d)) if vm_state.size_of_ty(s) == vm_state.size_of_ty(d) => {
-                CheckResult::ProvedByRule
-            }
             (Some(s), Some(d)) => {
                 let ss = vm_state.size_of_ty(s);
                 let ds = vm_state.size_of_ty(d);
-                if ss == 0 || ds == 0 {
-                    // One or both types are generic; sizes are opaque.
-                    // Trust the type system: the call compiles, so
-                    // the transmute is compatible.
-                    CheckResult::ProvedByRule
-                } else if ss == ds {
+                if ss == 0 || ds == 0 || ss == ds {
                     CheckResult::ProvedByRule
                 } else {
                     CheckResult::Failed
@@ -67,7 +59,6 @@ impl PropertyChecker {
             if tcx.type_is_copy_modulo_regions(typing_env, ty) {
                 return CheckResult::ProvedByRule;
             }
-            // Resolve generic param to concrete type via FnDef args
             let resolved = self.instantiate_callsite_ty(vm_state, checkpoint, ty);
             if resolved != ty && tcx.type_is_copy_modulo_regions(typing_env, resolved) {
                 return CheckResult::ProvedByRule;
@@ -152,14 +143,10 @@ impl PropertyChecker {
                     d = *elem;
                 }
 
-                // If the source and destination element types are the same,
-                // transmute is trivially valid.
                 if s == d {
                     return CheckResult::ProvedByRule;
                 }
 
-                // If the destination is a SIMD vector with a matching lane type,
-                // the transmute is valid by the standard library contract.
                 if Self::is_simd_vector(vm_state, d)
                     && let TyKind::Adt(_, args) = d.kind()
                         && args
@@ -204,7 +191,6 @@ impl PropertyChecker {
         if sz > 0 {
             return sz;
         }
-        // Fallback 1: try with the monomorphized environment.
         let typing_env =
             rustc_middle::ty::TypingEnv::post_analysis(vm_state.tcx, vm_state.current_frame.current_def_id);
         let sz = mir_utils::catch_panic(|| {
@@ -222,7 +208,6 @@ impl PropertyChecker {
         if sz > 0 {
             return sz;
         }
-        // Fallback 2: for generic type params, enumerate impl sizes.
         let generic_sz = mir_utils::size_of_generic_param(
             vm_state.tcx,
             vm_state.current_frame.current_def_id,

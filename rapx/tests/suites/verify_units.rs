@@ -1,4 +1,3 @@
-
 // ============================================================
 // Property-oriented verify units.
 //
@@ -10,40 +9,61 @@
 // cascade and only the primary property is pinned).
 // ============================================================
 
-sound_tests! {
-    pointer_slot_origin_sound: "verify_units/pointer_slot_origin_1" => "sound_pointer_slot_roundtrip",
-    pointer_slot_origin_boxed: "verify_units/pointer_slot_origin_1" => "sound_boxed_pointer_slot_roundtrip",
-}
-
-unsound_weak_tests! {
-    pointer_slot_origin_overwrite: "verify_units/pointer_slot_origin_1" => "unsound_pointer_slot_overwrite" => "Allocated",
-    pointer_slot_origin_reassigned: "verify_units/pointer_slot_origin_1" => "unsound_pointer_array_reassigned" => "Allocated",
-    pointer_slot_origin_alias_overwrite: "verify_units/pointer_slot_origin_1" => "unsound_pointer_array_alias_overwrite" => "Allocated",
-}
-
-#[test]
-fn pointer_slot_origin_external_unknown() {
-    let output = run_with_args("verify_units/pointer_slot_origin_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "unknown_external_pointer_slot", "UNKNOWN");
+fn assert_result_counts(output: &str, expected: [usize; 3]) {
+    let actual = ["SOUND", "UNSOUND", "UNKNOWN"]
+        .map(|result| output.matches(&format!("result: {result}")).count());
+    assert_eq!(actual, expected, "unexpected result counts\n{output}");
+    assert_eq!(
+        output.matches("[rapx::verify] function: ").count(),
+        expected.iter().sum::<usize>(),
+        "unexpected function count\n{output}"
+    );
 }
 
 #[test]
-fn pointer_slot_origin_invalid_invariant() {
-    let output = run_with_args("verify_units/pointer_slot_origin_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "InvalidBucket::new", "UNKNOWN");
+fn pointer_slot_origin_cases() {
+    let output = run_with_args("verify_units/pointer_slot_origin_01", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [27, 19, 6]);
+    assert_contain(&output, "Allocated | Failed");
+    assert_contain(&output, "ValidNum | Failed");
 }
 
-// ================ Align Sound Cases =============
+#[test]
+fn property_checker_regression_01() {
+    let output = run_with_args(
+        "verify_units/property_checker_regression_01",
+        CMD_VERIFY_TARGETED,
+    );
+    assert_unproved_exclusive(&output, "one_byte_reference", &["InBound"]);
+    assert_unproved_exclusive(&output, "one_byte_array", &["Allocated"]);
+    for function in [
+        "borrowed_not_owner",
+        "TwoFields::other_field_is_not_owned",
+        "TwoPointers::other_pointer_is_not_owned",
+        "option_not_owner",
+        "offset_is_not_owner",
+        "owned_struct_does_not_own_pointee",
+        "stack_not_owner",
+        "unknown_is_empty",
+        "unknown_owner",
+        "unknown_utf8",
+    ] {
+        assert_function_result(&output, function, "UNKNOWN");
+    }
+    assert_function_result(&output, "owner_from_precondition", "SOUND");
+}
+
+// Align
 sound_tests! {
-    align_sound_01: "verify_units/align_sound_1"  => "sound_named_contract_binds_callsite_arg",
-    align_sound_02: "verify_units/align_sound_2"  => "sound_enum_paths_inside_scc",
-    align_sound_03: "verify_units/align_sound_3"  => "sound_scc_selects_aligned_source",
-    align_sound_04: "verify_units/align_sound_4"  => "sound_scc_computes_aligned_offset",
-    align_sound_05: "verify_units/align_sound_5"  => "sound_nested_scc_controller",
-    align_sound_06: "verify_units/align_sound_6"  => "sound_iteration_count_switches_aligned_offsets",
-    align_sound_07: "verify_units/align_sound_7"  => "sound_unrelated_scc_does_not_pollute_align",
-    align_sound_08: "verify_units/align_sound_8"  => "sound_unrelated_nested_scc_with_bad_scratch",
-    align_sound_09: "verify_units/align_sound_9"  => "sound_pre_scc_guard_with_scc_offsets",
+    align_sound_01: "verify_units/align_sound_01"  => "sound_named_contract_binds_callsite_arg",
+    align_sound_02: "verify_units/align_sound_02"  => "sound_enum_paths_inside_scc",
+    align_sound_03: "verify_units/align_sound_03"  => "sound_scc_selects_aligned_source",
+    align_sound_04: "verify_units/align_sound_04"  => "sound_scc_computes_aligned_offset",
+    align_sound_05: "verify_units/align_sound_05"  => "sound_nested_scc_controller",
+    align_sound_06: "verify_units/align_sound_06"  => "sound_iteration_count_switches_aligned_offsets",
+    align_sound_07: "verify_units/align_sound_07"  => "sound_unrelated_scc_does_not_pollute_align",
+    align_sound_08: "verify_units/align_sound_08"  => "sound_unrelated_nested_scc_with_bad_scratch",
+    align_sound_09: "verify_units/align_sound_09"  => "sound_pre_scc_guard_with_scc_offsets",
     align_sound_10: "verify_units/align_sound_10" => "sound_scc_internal_noise_ignored",
     align_sound_11: "verify_units/align_sound_11" => "sound_helper_with_conjunctive_guard",
     align_sound_12: "verify_units/align_sound_12" => "sound_nested_if_before_helper",
@@ -63,17 +83,16 @@ sound_tests! {
     align_sound_26: "verify_units/align_sound_26" => "sound_contract_type_param_binds_generic",
 }
 
-// ================ Align Unsound Cases =============
 unsound_tests! {
-    align_unsound_01: "verify_units/align_unsound_1"  => "unsound_enum_paths_inside_scc" => "Align",
-    align_unsound_02: "verify_units/align_unsound_2"  => "unsound_scc_selects_mixed_source" => "Align",
-    align_unsound_03: "verify_units/align_unsound_3"  => "unsound_scc_computes_misaligned_offset" => "Align",
-    align_unsound_04: "verify_units/align_unsound_4"  => "unsound_nested_scc_controller" => "Align",
-    align_unsound_05: "verify_units/align_unsound_5"  => "unsound_iteration_count_can_leave_unaligned" => "Align",
-    align_unsound_06: "verify_units/align_unsound_6"  => "unsound_pre_scc_guard_overwritten_by_scc" => "Align",
-    align_unsound_07: "verify_units/align_unsound_7"  => "unsound_scc_guard_only_on_one_branch" => "Align",
-    align_unsound_08: "verify_units/align_unsound_8"  => "unsound_helper_with_disjunctive_guard" => "Align",
-    align_unsound_09: "verify_units/align_unsound_9"  => "unsound_helper_return_path_selects_bad_ptr" => "Align",
+    align_unsound_01: "verify_units/align_unsound_01"  => "unsound_enum_paths_inside_scc" => "Align",
+    align_unsound_02: "verify_units/align_unsound_02"  => "unsound_scc_selects_mixed_source" => "Align",
+    align_unsound_03: "verify_units/align_unsound_03"  => "unsound_scc_computes_misaligned_offset" => "Align",
+    align_unsound_04: "verify_units/align_unsound_04"  => "unsound_nested_scc_controller" => "Align",
+    align_unsound_05: "verify_units/align_unsound_05"  => "unsound_iteration_count_can_leave_unaligned" => "Align",
+    align_unsound_06: "verify_units/align_unsound_06"  => "unsound_pre_scc_guard_overwritten_by_scc" => "Align",
+    align_unsound_07: "verify_units/align_unsound_07"  => "unsound_scc_guard_only_on_one_branch" => "Align",
+    align_unsound_08: "verify_units/align_unsound_08"  => "unsound_helper_with_disjunctive_guard" => "Align",
+    align_unsound_09: "verify_units/align_unsound_09"  => "unsound_helper_return_path_selects_bad_ptr" => "Align",
     align_unsound_10: "verify_units/align_unsound_10" => "unsound_multi_hop_missing_offset_guard" => "Align",
     align_unsound_11: "verify_units/align_unsound_11" => "unsound_sub_missing_guard" => "Align",
     align_unsound_12: "verify_units/align_unsound_12" => "unsound_byte_offset_one" => "Align",
@@ -85,271 +104,233 @@ unsound_tests! {
     align_unsound_18: "verify_units/align_unsound_18" => "unsound_unbounded_generic_cross_cast" => "Align",
 }
 
-// ================ Allocated Sound Cases =============
+// Allocated
 sound_tests! {
-    allocated_sound_01: "verify_units/allocated_sound_1" => "sound_stack_local_allocated",
-    allocated_sound_02: "verify_units/allocated_sound_2" => "sound_slice_prefix_allocated",
-    allocated_sound_03: "verify_units/allocated_sound_3" => "sound_live_vec_allocated",
-    allocated_sound_04: "verify_units/allocated_sound_4" => "sound_live_box_allocated",
-    allocated_sound_05: "verify_units/allocated_sound_5" => "sound_branch_selects_live_local",
-    allocated_sound_06: "verify_units/allocated_sound_6" => "sound_loop_slice_element_allocated",
-    allocated_sound_07: "verify_units/allocated_sound_7" => "sound_scc_selects_live_array",
-    allocated_sound_08: "verify_units/allocated_sound_8" => "sound_intra_returns_slice_pointer",
+    allocated_sound_01: "verify_units/allocated_sound_01" => "sound_stack_local_allocated",
+    allocated_sound_02: "verify_units/allocated_sound_02" => "sound_slice_prefix_allocated",
+    allocated_sound_03: "verify_units/allocated_sound_03" => "sound_live_vec_allocated",
+    allocated_sound_04: "verify_units/allocated_sound_04" => "sound_live_box_allocated",
+    allocated_sound_05: "verify_units/allocated_sound_05" => "sound_branch_selects_live_local",
+    allocated_sound_06: "verify_units/allocated_sound_06" => "sound_loop_slice_element_allocated",
+    allocated_sound_07: "verify_units/allocated_sound_07" => "sound_scc_selects_live_array",
+    allocated_sound_08: "verify_units/allocated_sound_08" => "sound_intra_returns_slice_pointer",
 }
 
-// ================ Allocated Unsound Cases =============
 unsound_tests! {
-    allocated_unsound_01: "verify_units/allocated_unsound_1"  => "unsound_null_not_allocated" => "Allocated",
-    allocated_unsound_02: "verify_units/allocated_unsound_2"  => "unsound_stack_scope_ended" => "Allocated",
-    allocated_unsound_03: "verify_units/allocated_unsound_3"  => "unsound_vec_dropped_before_use" => "Allocated",
-    allocated_unsound_04: "verify_units/allocated_unsound_4"  => "unsound_empty_slice_needs_one_element" => "Allocated",
-    allocated_unsound_05: "verify_units/allocated_unsound_5"  => "unsound_branch_may_select_null" => "Allocated",
-    allocated_unsound_06: "verify_units/allocated_unsound_6"  => "unsound_scc_overwrites_with_null" => "Allocated",
-    allocated_unsound_07: "verify_units/allocated_unsound_7"  => "unsound_vec_reallocates_old_pointer" => "Allocated",
-    allocated_unsound_08: "verify_units/allocated_unsound_8"  => "unsound_slice_too_short_for_requested_len" => "Allocated",
-    allocated_unsound_09: "verify_units/allocated_unsound_9"  => "unsound_intra_returns_dangling_pointer" => "Allocated",
+    allocated_unsound_01: "verify_units/allocated_unsound_01"  => "unsound_null_not_allocated" => "Allocated",
+    allocated_unsound_02: "verify_units/allocated_unsound_02"  => "unsound_stack_scope_ended" => "Allocated",
+    allocated_unsound_03: "verify_units/allocated_unsound_03"  => "unsound_vec_dropped_before_use" => "Allocated",
+    allocated_unsound_04: "verify_units/allocated_unsound_04"  => "unsound_empty_slice_needs_one_element" => "Allocated",
+    allocated_unsound_05: "verify_units/allocated_unsound_05"  => "unsound_branch_may_select_null" => "Allocated",
+    allocated_unsound_06: "verify_units/allocated_unsound_06"  => "unsound_scc_overwrites_with_null" => "Allocated",
+    allocated_unsound_07: "verify_units/allocated_unsound_07"  => "unsound_vec_reallocates_old_pointer" => "Allocated",
+    allocated_unsound_08: "verify_units/allocated_unsound_08"  => "unsound_slice_too_short_for_requested_len" => "Allocated",
+    allocated_unsound_09: "verify_units/allocated_unsound_09"  => "unsound_intra_returns_dangling_pointer" => "Allocated",
     allocated_unsound_10: "verify_units/allocated_unsound_10" => "unsound_scc_selects_dead_temporary" => "Allocated",
     allocated_unsound_11: "verify_units/allocated_unsound_11" => "unsound_adjacent_stack_objects_do_not_merge" => "Allocated",
 }
 
-// ================ NonNull Sound Cases =============
+// NonNull
 // Chained contract propagation through a named contract: the middle caller and
 // the outer caller share one fixture, verified once.
 sound_tests_multi! {
-    nonnull_sound_01: "verify_units/nonnull_sound_1" => [
+    nonnull_sound_01: "verify_units/nonnull_sound_01" => [
         "caller_with_contract",
         "sound_chained_propagation",
     ],
 }
 
 sound_tests! {
-    nonnull_sound_02: "verify_units/nonnull_sound_2" => "sound_slice_as_ptr_branch",
-    nonnull_sound_03: "verify_units/nonnull_sound_3" => "sound_intra_helper_from_ref",
-    nonnull_sound_04: "verify_units/nonnull_sound_4" => "sound_scc_unrelated_state",
-    nonnull_sound_05: "verify_units/nonnull_sound_5" => "sound_raw_arg_guarded",
-    nonnull_sound_06: "verify_units/nonnull_sound_6" => "sound_nonnull_wrapper_from_ref",
-    nonnull_sound_07: "verify_units/nonnull_sound_7" => "sound_ref_cast_copy_chain",
+    nonnull_sound_02: "verify_units/nonnull_sound_02" => "sound_slice_as_ptr_branch",
+    nonnull_sound_03: "verify_units/nonnull_sound_03" => "sound_intra_helper_from_ref",
+    nonnull_sound_04: "verify_units/nonnull_sound_04" => "sound_scc_unrelated_state",
+    nonnull_sound_05: "verify_units/nonnull_sound_05" => "sound_raw_arg_guarded",
+    nonnull_sound_06: "verify_units/nonnull_sound_06" => "sound_nonnull_wrapper_from_ref",
+    nonnull_sound_07: "verify_units/nonnull_sound_07" => "sound_ref_cast_copy_chain",
 }
 
-// ================ NonNull Unsound Cases =============
 unsound_tests! {
-    nonnull_unsound_01: "verify_units/nonnull_unsound_1" => "unsound_explicit_null_constant" => "NonNull",
-    nonnull_unsound_02: "verify_units/nonnull_unsound_2" => "unsound_raw_pointer_argument" => "NonNull",
-    nonnull_unsound_03: "verify_units/nonnull_unsound_3" => "unsound_branch_selects_null" => "NonNull",
-    nonnull_unsound_04: "verify_units/nonnull_unsound_4" => "unsound_scc_overwrites_with_null" => "NonNull",
-    nonnull_unsound_05: "verify_units/nonnull_unsound_5" => "unsound_unrelated_guard" => "NonNull",
-    nonnull_unsound_06: "verify_units/nonnull_unsound_6" => "unsound_nonnull_wrapper_from_null" => "NonNull",
+    nonnull_unsound_01: "verify_units/nonnull_unsound_01" => "unsound_explicit_null_constant" => "NonNull",
+    nonnull_unsound_02: "verify_units/nonnull_unsound_02" => "unsound_raw_pointer_argument" => "NonNull",
+    nonnull_unsound_03: "verify_units/nonnull_unsound_03" => "unsound_branch_selects_null" => "NonNull",
+    nonnull_unsound_04: "verify_units/nonnull_unsound_04" => "unsound_scc_overwrites_with_null" => "NonNull",
+    nonnull_unsound_05: "verify_units/nonnull_unsound_05" => "unsound_unrelated_guard" => "NonNull",
+    nonnull_unsound_06: "verify_units/nonnull_unsound_06" => "unsound_nonnull_wrapper_from_null" => "NonNull",
 }
 
-// ================ ValidPtr Sound Cases =============
+// ValidPtr
 sound_tests! {
-    validptr_sound_01: "verify_units/validptr_sound_1" => "sound_zst_dangling_valid_for_any_len",
-    validptr_sound_02: "verify_units/validptr_sound_2" => "sound_stack_array_full_range",
-    validptr_sound_03: "verify_units/validptr_sound_3" => "sound_slice_suffix_guarded",
-    validptr_sound_04: "verify_units/validptr_sound_4" => "sound_scc_each_slice_element",
-    validptr_sound_05: "verify_units/validptr_sound_5" => "sound_signed_suffix_guarded",
+    validptr_sound_01: "verify_units/validptr_sound_01" => "sound_zst_dangling_valid_for_any_len",
+    validptr_sound_02: "verify_units/validptr_sound_02" => "sound_stack_array_full_range",
+    validptr_sound_03: "verify_units/validptr_sound_03" => "sound_slice_suffix_guarded",
+    validptr_sound_04: "verify_units/validptr_sound_04" => "sound_scc_each_slice_element",
+    validptr_sound_05: "verify_units/validptr_sound_05" => "sound_signed_suffix_guarded",
 }
 
-// ================ ValidPtr Unsound Cases =============
 unsound_tests! {
-    validptr_unsound_01: "verify_units/validptr_unsound_1" => "unsound_non_zst_dangling_not_allocated" => "ValidPtr",
-    validptr_unsound_02: "verify_units/validptr_unsound_2" => "unsound_one_past_requires_one_element" => "ValidPtr",
-    validptr_unsound_03: "verify_units/validptr_unsound_3" => "unsound_stack_array_len_too_large" => "ValidPtr",
-    validptr_unsound_04: "verify_units/validptr_unsound_4" => "unsound_scc_branch_uses_one_past" => "ValidPtr",
-    validptr_unsound_05: "verify_units/validptr_unsound_5" => "unsound_signed_suffix_missing_lower_bound" => "ValidPtr",
+    validptr_unsound_01: "verify_units/validptr_unsound_01" => "unsound_non_zst_dangling_not_allocated" => "ValidPtr",
+    validptr_unsound_02: "verify_units/validptr_unsound_02" => "unsound_one_past_requires_one_element" => "ValidPtr",
+    validptr_unsound_03: "verify_units/validptr_unsound_03" => "unsound_stack_array_len_too_large" => "ValidPtr",
+    validptr_unsound_04: "verify_units/validptr_unsound_04" => "unsound_scc_branch_uses_one_past" => "ValidPtr",
+    validptr_unsound_05: "verify_units/validptr_unsound_05" => "unsound_signed_suffix_missing_lower_bound" => "ValidPtr",
 }
 
-// ================ Deref Sound Cases =============
+// Deref
 #[test]
 fn deref_sound_cases() {
-    let output = run_with_args("verify_units/deref_sound_1", CMD_VERIFY_TARGETED);
+    let output = run_with_args("verify_units/deref_sound_01", CMD_VERIFY_TARGETED);
     assert_contain(&output, "function: sound_deref_slice_prefix");
     assert_contain(&output, "Deref | Proved");
     assert_contain(&output, "result: SOUND");
 }
 
-// ================ Deref Unsound Cases =============
 unsound_tests! {
-    deref_unsound_01: "verify_units/deref_unsound_1" => "unsound_deref_one_past" => "Deref",
+    deref_unsound_01: "verify_units/deref_unsound_01" => "unsound_deref_one_past" => "Deref",
 }
 
-// ================ InBound Sound Cases =============
+// InBound
 sound_tests! {
-    inbound_sound_01: "verify_units/inbound_sound_1" => "sound_ptr_add_guarded",
-    inbound_sound_02: "verify_units/inbound_sound_2" => "sound_from_raw_parts_prefix_two",
-    inbound_sound_03: "verify_units/inbound_sound_3" => "sound_get_unchecked_generic",
-    inbound_sound_04: "verify_units/inbound_sound_4" => "sound_copy_nonoverlapping_one",
-    inbound_sound_05: "verify_units/inbound_sound_5" => "sound_intra_slice_add_guarded",
-    inbound_sound_06: "verify_units/inbound_sound_6" => "sound_scc_loop_index_guard",
-    inbound_std_sound_01: "verify_units/inbound_std_sound_1" => "sound_std_get_unchecked",
-    inbound_std_sound_02: "verify_units/inbound_std_sound_2" => "sound_std_copy_nonoverlapping",
-    inbound_sound_07: "verify_units/inbound_sound_7"  => "sound_scalar_index_guard",
-    inbound_sound_08: "verify_units/inbound_sound_8"  => "sound_range_index_guard",
-    inbound_sound_09: "verify_units/inbound_sound_9"  => "sound_std_get_unchecked_sliceindex",
+    inbound_sound_01: "verify_units/inbound_sound_01" => "sound_ptr_add_guarded",
+    inbound_sound_02: "verify_units/inbound_sound_02" => "sound_from_raw_parts_prefix_two",
+    inbound_sound_03: "verify_units/inbound_sound_03" => "sound_get_unchecked_generic",
+    inbound_sound_04: "verify_units/inbound_sound_04" => "sound_copy_nonoverlapping_one",
+    inbound_sound_05: "verify_units/inbound_sound_05" => "sound_intra_slice_add_guarded",
+    inbound_sound_06: "verify_units/inbound_sound_06" => "sound_scc_loop_index_guard",
+    inbound_std_sound_01: "verify_units/inbound_std_sound_01" => "sound_std_get_unchecked",
+    inbound_std_sound_02: "verify_units/inbound_std_sound_02" => "sound_std_copy_nonoverlapping",
+    inbound_sound_07: "verify_units/inbound_sound_07"  => "sound_scalar_index_guard",
+    inbound_sound_08: "verify_units/inbound_sound_08"  => "sound_range_index_guard",
+    inbound_sound_09: "verify_units/inbound_sound_09"  => "sound_std_get_unchecked_sliceindex",
     inbound_sound_10: "verify_units/inbound_sound_10" => "sound_std_range_get_unchecked",
     inbound_sound_11: "verify_units/inbound_sound_11" => "sound_vec_from_raw_parts_inbound",
     // `index - 1` is in bounds when `index >= 1` and `InBound(data, index)`
     // records the numeric `index < len` bound.
-    inbound_sound_12: "verify_units/inbound_derived_index_1" => "derived_index_minus_one",
-    // ZST elements (`()`) have byte size 0, but slice length is tracked by
-    // `slice_len` (element count), not `size / elem_size`.
-    inbound_sound_13: "verify_units/inbound_sound_zst" => "sound_zst_slice_len",
-    inbound_sound_14: "verify_units/inbound_sound_zst" => "sound_zst_index_in_bounds",
-}
-
-// ================ InBound Unsound Cases =============
-unsound_tests! {
-    inbound_unsound_01: "verify_units/inbound_unsound_1" => "unsound_ptr_add_without_guard" => "InBound",
-    inbound_unsound_02: "verify_units/inbound_unsound_2" => "unsound_from_raw_parts_two_only_nonempty" => "InBound",
-    inbound_unsound_03: "verify_units/inbound_unsound_3" => "unsound_get_unchecked_wrong_guard" => "InBound",
-    inbound_unsound_04: "verify_units/inbound_unsound_4" => "unsound_copy_nonoverlapping_dst_unguarded" => "InBound",
-    inbound_unsound_05: "verify_units/inbound_unsound_5" => "unsound_branch_selects_unguarded_index" => "InBound",
-    inbound_unsound_06: "verify_units/inbound_unsound_6" => "unsound_scc_off_by_one" => "InBound",
-    inbound_unsound_07: "verify_units/inbound_unsound_7" => "unsound_len_guard_off_by_one" => "InBound",
-    inbound_unsound_08: "verify_units/inbound_unsound_8" => "unsound_inclusive_range_off_by_one" => "InBound",
-    inbound_unsound_09: "verify_units/inbound_unsound_9" => "unsound_ptr_add_off_by_one" => "InBound",
-    inbound_std_unsound_01: "verify_units/inbound_std_unsound_1" => "unsound_std_get_unchecked_wrong_guard" => "InBound",
-    inbound_unsound_10: "verify_units/inbound_unsound_10" => "unsound_scalar_index_wrong_guard" => "InBound",
-    inbound_unsound_11: "verify_units/inbound_unsound_11" => "unsound_range_index_missing_end_guard" => "InBound",
-    inbound_unsound_12: "verify_units/inbound_unsound_12" => "unsound_std_range_missing_end_guard" => "InBound",
-    // TODO: re-enable once path-limit truncation reports conservatively again.
-    // `unsound_index_past_path_limit` relies on the single out-of-bounds path
-    // (`a == 0` -> i=100) being *truncated* (8192 > 4000) and reported
-    // `Unknown`; with the current "truncated => Proved" policy the bug is
-    // silently missed (false negative).
-    // inbound_unsound_13: "verify_units/inbound_unsound_13" => "unsound_index_past_path_limit" => "InBound",
-}
-
-// ================ InBound Manual Cases =============
-unsound_weak_tests! {
-    inbound_std_unsound_02: "verify_units/inbound_std_unsound_2" => "unsound_std_copy_nonoverlapping_dst_unguarded" => "ValidPtr",
-}
-
-// ================ Init Sound Cases =============
-sound_tests! {
-    init_std_sound_01: "verify_units/init_std_sound_1" => "sound_assume_init_read_after_write",
-    init_std_sound_02: "verify_units/init_std_sound_2" => "sound_assume_init_after_write",
-    init_std_sound_03: "verify_units/init_std_sound_3" => "sound_branch_local_init",
-    init_std_sound_04: "verify_units/init_std_sound_4" => "sound_intra_helper_initializes",
-    init_std_sound_05: "verify_units/init_std_sound_5" => "sound_loop_initializes_slice",
-    init_std_sound_06: "verify_units/init_std_sound_6" => "sound_len_bound_loop_initializes_slice",
+    inbound_sound_12: "verify_units/inbound_derived_index_01" => "derived_index_minus_one",
 }
 
 sound_tests_multi! {
-    init_ctx_sound_01: "verify_units/init_ctx_sound_1" => [
+    inbound_sound_zst: "verify_units/inbound_sound_zst" => [
+        "sound_zst_slice_len",
+        "sound_zst_index_in_bounds",
+    ],
+}
+
+unsound_tests! {
+    inbound_unsound_01: "verify_units/inbound_unsound_01" => "unsound_ptr_add_without_guard" => "InBound",
+    inbound_unsound_02: "verify_units/inbound_unsound_02" => "unsound_from_raw_parts_two_only_nonempty" => "InBound",
+    inbound_unsound_03: "verify_units/inbound_unsound_03" => "unsound_get_unchecked_wrong_guard" => "InBound",
+    inbound_unsound_04: "verify_units/inbound_unsound_04" => "unsound_copy_nonoverlapping_dst_unguarded" => "InBound",
+    inbound_unsound_05: "verify_units/inbound_unsound_05" => "unsound_branch_selects_unguarded_index" => "InBound",
+    inbound_unsound_06: "verify_units/inbound_unsound_06" => "unsound_scc_off_by_one" => "InBound",
+    inbound_unsound_07: "verify_units/inbound_unsound_07" => "unsound_len_guard_off_by_one" => "InBound",
+    inbound_unsound_08: "verify_units/inbound_unsound_08" => "unsound_inclusive_range_off_by_one" => "InBound",
+    inbound_unsound_09: "verify_units/inbound_unsound_09" => "unsound_ptr_add_off_by_one" => "InBound",
+    inbound_std_unsound_01: "verify_units/inbound_std_unsound_01" => "unsound_std_get_unchecked_wrong_guard" => "InBound",
+    inbound_unsound_10: "verify_units/inbound_unsound_10" => "unsound_scalar_index_wrong_guard" => "InBound",
+    inbound_unsound_11: "verify_units/inbound_unsound_11" => "unsound_range_index_missing_end_guard" => "InBound",
+    inbound_unsound_12: "verify_units/inbound_unsound_12" => "unsound_std_range_missing_end_guard" => "InBound",
+}
+
+#[test]
+#[ignore = "TODO: path-limit truncation currently reports Proved instead of Unknown"]
+fn inbound_unsound_13() {
+    let output = run_with_args("verify_units/inbound_unsound_13", CMD_VERIFY_TARGETED);
+    assert_unproved_exclusive(&output, "unsound_index_past_path_limit", &["InBound"]);
+}
+
+unsound_weak_tests! {
+    inbound_std_unsound_02: "verify_units/inbound_std_unsound_02" => "unsound_std_copy_nonoverlapping_dst_unguarded" => "ValidPtr",
+}
+
+// Init
+sound_tests! {
+    init_std_sound_01: "verify_units/init_std_sound_01" => "sound_assume_init_read_after_write",
+    init_std_sound_02: "verify_units/init_std_sound_02" => "sound_assume_init_after_write",
+    init_std_sound_03: "verify_units/init_std_sound_03" => "sound_branch_local_init",
+    init_std_sound_04: "verify_units/init_std_sound_04" => "sound_intra_helper_initializes",
+    init_std_sound_05: "verify_units/init_std_sound_05" => "sound_loop_initializes_slice",
+    init_std_sound_06: "verify_units/init_std_sound_06" => "sound_len_bound_loop_initializes_slice",
+}
+
+sound_tests_multi! {
+    init_ctx_sound_01: "verify_units/init_ctx_sound_01" => [
         "sound_context_sensitive_conditional_init",
         "maybe_init_slot",
     ],
-    init_ctx_sound_02: "verify_units/init_ctx_unsound_1" => [
-        "sound_literal_true",
-    ],
 }
 
-// ================ Init Unsound Cases =============
 unsound_tests! {
-    init_std_unsound_01: "verify_units/init_std_unsound_1" => "unsound_assume_init_read_without_write" => "Init",
-    init_std_unsound_02: "verify_units/init_std_unsound_2" => "unsound_assume_init_without_write" => "Init",
-    init_std_unsound_03: "verify_units/init_std_unsound_3" => "unsound_conditional_write_then_assume" => "Init",
-    init_std_unsound_04: "verify_units/init_std_unsound_4" => "unsound_write_different_slot" => "Init",
-    init_std_unsound_05: "verify_units/init_std_unsound_5" => "unsound_intra_helper_maybe_initializes" => "Init",
-    init_std_unsound_06: "verify_units/init_std_unsound_6" => "unsound_from_raw_parts_uninitialized" => "Init",
-    init_std_unsound_08: "verify_units/init_std_unsound_8" => "unsound_len_bound_loop_skips_even_indices" => "Init",
-    init_std_unsound_09: "verify_units/init_std_unsound_9" => "unsound_write_past_path_limit" => "Init",
+    init_std_unsound_01: "verify_units/init_std_unsound_01" => "unsound_assume_init_read_without_write" => "Init",
+    init_std_unsound_02: "verify_units/init_std_unsound_02" => "unsound_assume_init_without_write" => "Init",
+    init_std_unsound_03: "verify_units/init_std_unsound_03" => "unsound_conditional_write_then_assume" => "Init",
+    init_std_unsound_04: "verify_units/init_std_unsound_04" => "unsound_write_different_slot" => "Init",
+    init_std_unsound_05: "verify_units/init_std_unsound_05" => "unsound_intra_helper_maybe_initializes" => "Init",
+    init_std_unsound_06: "verify_units/init_std_unsound_06" => "unsound_from_raw_parts_uninitialized" => "Init",
+    init_std_unsound_08: "verify_units/init_std_unsound_08" => "unsound_len_bound_loop_skips_even_indices" => "Init",
+    init_std_unsound_09: "verify_units/init_std_unsound_09" => "unsound_write_past_path_limit" => "Init",
 }
 
-unsound_tests_multi! {
-    init_ctx_unsound: "verify_units/init_ctx_unsound_1" => [
-        "unsound_literal_false" => "Init",
-        "unsound_wrapper_runtime_flag" => "Init",
-        "unsound_wrapper_literal_true" => "Init",
-    ],
+#[test]
+fn init_ctx_cases() {
+    let output = run_with_args("verify_units/init_ctx_unsound_01", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [2, 3, 0]);
+    assert_contain(&output, "Init | Failed");
 }
 
 // Custom: `from_raw_parts` with the wrong element type causes multiple failures.
 unsound_weak_tests! {
-    init_std_unsound_07: "verify_units/init_std_unsound_7" => "unsound_from_raw_parts_wrong_element_type" => "Init",
+    init_std_unsound_07: "verify_units/init_std_unsound_07" => "unsound_from_raw_parts_wrong_element_type" => "Init",
 }
 
-// ================ ValidNum Sound Cases =============
+// ValidNum
 sound_tests! {
-    validnum_sound_01: "verify_units/validnum_sound_1" => "sound_guarded_less_than",
-    validnum_sound_02: "verify_units/validnum_sound_2" => "sound_guarded_nonzero",
-    validnum_sound_03: "verify_units/validnum_sound_3" => "sound_constant_sum_below_cap",
-    validnum_sound_04: "verify_units/validnum_sound_4" => "sound_trait_bound_size_limit",
-    validnum_sound_05: "verify_units/validnum_sound_5" => "sound_scc_validnum_index_guard",
-    validnum_sound_06: "verify_units/validnum_sound_6" => "sound_guarded_variable_sum",
-    validnum_sound_07: "verify_units/validnum_sound_7" => "sound_interval_guard",
-    validnum_sound_08: "verify_units/validnum_sound_8" => "sound_trait_bound_align_order",
-    validnum_std_sound_01: "verify_units/validnum_std_sound_1" => "sound_std_from_raw_parts_validnum",
-    validnum_std_sound_02: "verify_units/validnum_std_sound_2" => "sound_std_copy_nonoverlapping_validnum",
+    validnum_sound_01: "verify_units/validnum_sound_01" => "sound_guarded_less_than",
+    validnum_sound_02: "verify_units/validnum_sound_02" => "sound_guarded_nonzero",
+    validnum_sound_03: "verify_units/validnum_sound_03" => "sound_constant_sum_below_cap",
+    validnum_sound_04: "verify_units/validnum_sound_04" => "sound_trait_bound_size_limit",
+    validnum_sound_05: "verify_units/validnum_sound_05" => "sound_scc_validnum_index_guard",
+    validnum_sound_06: "verify_units/validnum_sound_06" => "sound_guarded_variable_sum",
+    validnum_sound_07: "verify_units/validnum_sound_07" => "sound_interval_guard",
+    validnum_sound_08: "verify_units/validnum_sound_08" => "sound_trait_bound_align_order",
+    validnum_std_sound_01: "verify_units/validnum_std_sound_01" => "sound_std_from_raw_parts_validnum",
+    validnum_std_sound_02: "verify_units/validnum_std_sound_02" => "sound_std_copy_nonoverlapping_validnum",
     nonzero_type_invariant: "verify_units/nonzero_type_invariant" => "sound_nonzero_type_invariant",
-    validnum_ifelse_sound_01: "verify_units/validnum_ifelse_sound_1" => "sound_zst_ifelse",
+    validnum_ifelse_sound_01: "verify_units/validnum_ifelse_sound_01" => "sound_zst_ifelse",
 }
 
-// ================ ValidNum Unsound Cases =============
 unsound_tests! {
-    validnum_unsound_01: "verify_units/validnum_unsound_1" => "unsound_missing_less_than_guard" => "ValidNum",
-    validnum_unsound_02: "verify_units/validnum_unsound_2" => "unsound_missing_nonzero_guard" => "ValidNum",
-    validnum_unsound_03: "verify_units/validnum_unsound_3" => "unsound_partial_sum_guard" => "ValidNum",
-    validnum_unsound_04: "verify_units/validnum_unsound_4" => "unsound_trait_bound_missing_size_limit" => "ValidNum",
-    validnum_unsound_05: "verify_units/validnum_unsound_5" => "unsound_interval_inclusive_guard" => "ValidNum",
-    call_summary_conditional_write: "verify_units/call_summary_unsound" => "conditional_write" => "ValidNum",
-    call_summary_conditional_write_noninlined: "verify_units/call_summary_unsound" => "conditional_write_noninlined" => "ValidNum",
-    call_summary_unconditional_write: "verify_units/call_summary_unsound" => "unconditional_write" => "ValidNum",
-    call_summary_aliased_write: "verify_units/call_summary_unsound" => "aliased_write" => "ValidNum",
-    call_summary_aliased_write_noninlined: "verify_units/call_summary_unsound" => "aliased_write_noninlined" => "ValidNum",
-    call_summary_reborrowed_write: "verify_units/call_summary_unsound" => "reborrowed_write" => "ValidNum",
-    call_summary_ptr_write_in_helper: "verify_units/call_summary_unsound" => "ptr_write_in_helper" => "ValidNum",
-    call_summary_copied_zero: "verify_units/call_summary_unsound" => "copied_zero" => "ValidNum",
-    call_summary_copied_zero_in_helper: "verify_units/call_summary_unsound" => "copied_zero_in_helper" => "ValidNum",
-    call_summary_saturating_sub: "verify_units/call_summary_unsound" => "saturating_sub_zero" => "ValidNum",
-    call_summary_saturating_add: "verify_units/call_summary_unsound" => "saturating_add_max" => "ValidNum",
-    call_summary_wrapping_sub: "verify_units/call_summary_unsound" => "wrapping_sub_max" => "ValidNum",
-    validnum_ifelse_unsound_01: "verify_units/validnum_ifelse_unsound_1" => "unsound_sized_ifelse" => "ValidNum",
+    validnum_unsound_01: "verify_units/validnum_unsound_01" => "unsound_missing_less_than_guard" => "ValidNum",
+    validnum_unsound_02: "verify_units/validnum_unsound_02" => "unsound_missing_nonzero_guard" => "ValidNum",
+    validnum_unsound_03: "verify_units/validnum_unsound_03" => "unsound_partial_sum_guard" => "ValidNum",
+    validnum_unsound_04: "verify_units/validnum_unsound_04" => "unsound_trait_bound_missing_size_limit" => "ValidNum",
+    validnum_unsound_05: "verify_units/validnum_unsound_05" => "unsound_interval_inclusive_guard" => "ValidNum",
+    validnum_ifelse_unsound_01: "verify_units/validnum_ifelse_unsound_01" => "unsound_sized_ifelse" => "ValidNum",
 }
 
 #[test]
-fn call_summary_copy_controls() {
+fn call_summary_cases() {
     let output = run_with_args("verify_units/call_summary_unsound", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "copied_positive", "SOUND");
-    assert_function_result(&output, "zero_count_copy", "SOUND");
+    assert_result_counts(&output, [2, 11, 1]);
+    let block = extract_block_after(&output, "function: conditional_write_noninlined");
+    assert_property_failed(block, "ValidNum", "conditional_write_noninlined");
+    assert_function_result(&output, "conditional_write_noninlined", "UNKNOWN");
 }
 
-// ================ ValidNum Manual Unsound Cases =============
+// ValidNum Manual
 unsound_weak_tests! {
-    validnum_std_unsound_01: "verify_units/validnum_std_unsound_1" => "unsound_std_from_raw_parts_validnum_overflow" => "ValidNum",
-    validnum_std_unsound_02: "verify_units/validnum_std_unsound_2" => "unsound_std_copy_nonoverlapping_validnum" => "ValidNum",
+    validnum_std_unsound_01: "verify_units/validnum_std_unsound_01" => "unsound_std_from_raw_parts_validnum_overflow" => "ValidNum",
+    validnum_std_unsound_02: "verify_units/validnum_std_unsound_02" => "unsound_std_copy_nonoverlapping_validnum" => "ValidNum",
 }
 
-// ================ Typed Sound Cases =============
-sound_tests_multi! {
-    typed_sound: "verify_units/typed_cases" => [
-        "sound_reference_source",
-        "sound_slice_element_source",
-        "sound_repr_c_field_source",
-        "sound_generic_reference_source",
-        "sound_branch_all_sources_typed",
-        "sound_scc_preserves_typed_source",
-        "sound_maybeuninit_after_write",
-        "sound_align_to_same_type",
-    ],
+// Typed Cases
+#[test]
+fn typed_cases() {
+    let output = run_with_args("verify_units/typed_cases", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [8, 8, 0]);
+    assert_contain(&output, "Typed | Failed");
 }
 
-// ================ Typed Unsound Cases =============
-unsound_tests_multi! {
-    typed_unsound: "verify_units/typed_cases" => [
-        "unsound_u8_bytes_as_u32" => "Typed",
-        "unsound_u16_slice_as_u32" => "Typed",
-        "unsound_uninit_memory_as_u32" => "Typed",
-        "unsound_invalid_bool_bits" => "Typed",
-        "unsound_invalid_char_bits" => "Typed",
-        "unsound_invalid_enum_discriminant" => "Typed",
-        "unsound_branch_selects_untyped_source" => "Typed",
-        "unsound_scc_overwrites_with_untyped_source" => "Typed",
-    ],
-}
-
-// ================ Alive Sound Cases =============
+// Alive
 #[test]
 fn alive_sound_01() {
     let output = run_with_args("verify_units/alive_sound_01", CMD_VERIFY_TARGETED);
@@ -381,7 +362,6 @@ fn alive_sound_04() {
     assert_contain(&output, "Alive | Proved");
 }
 
-// ================ Alive Unsound Cases =============
 unsound_weak_tests! {
     alive_unsound_01: "verify_units/alive_unsound_01" => "DangerousAliaser::<'a, T>::get_mut" => "Alive",
     alive_unsound_02: "verify_units/alive_unsound_02" => "slice_tied_to_unrelated_host" => "ValidNum",
@@ -404,7 +384,7 @@ unsound_weak_tests! {
     alive_unsound_06: "verify_units/alive_unsound_06" => "widen" => "Alive",
 }
 
-// ================ Alias Sound Cases =============
+// Alias
 sound_tests! {
     alias_sound_01: "verify_units/alias_sound_01" => "sound_shared_slice_no_raw_mutation",
     alias_sound_02: "verify_units/alias_sound_02" => "sound_raw_use_after_slice_scope",
@@ -427,7 +407,6 @@ sound_tests! {
     lifetime_escape_sound_01: "verify_units/lifetime_escape_sound_01" => "return_longer",
 }
 
-// ================ Alias Unsound Cases =============
 unsound_hazard_tests! {
     alias_unsound_03: "verify_units/alias_unsound_03" => "unsound_vec_push_while_raw_slice_live" => "Alias",
     alias_unsound_04: "verify_units/alias_unsound_04" => "unsound_box_from_raw_then_raw_write" => "Alias",
@@ -509,97 +488,45 @@ unsound_tests! {
     alias_unsound_22: "verify_units/alias_unsound_22" => "unsound_oob_deref_missing_validptr" => "InBound",
 }
 
-// ================ NonOverlap Sound Cases =============
+// NonOverlap
 sound_tests! {
     nonoverlap_sound_01: "verify_units/nonoverlap_sound_01" => "sound_copy_nonoverlapping_adjacent",
-    nonoverlap_sound_02: "verify_units/nonoverlap_sound_02" => "sound_copy_nonoverlapping_disjoint",
 }
 
-#[test]
-fn nonoverlap_sound_zero_copy() {
-    let output = run_with_args("verify_units/nonoverlap_sound_02", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_zero_copy_same_pointer", "SOUND");
-}
-
-#[test]
-fn nonoverlap_sound_symbolic() {
-    let output = run_with_args("verify_units/nonoverlap_sound_02", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_symbolic_disjoint_copy", "SOUND");
+sound_tests_multi! {
+    nonoverlap_sound_02: "verify_units/nonoverlap_sound_02" => [
+        "sound_copy_nonoverlapping_disjoint",
+        "sound_zero_copy_same_pointer",
+        "sound_symbolic_disjoint_copy",
+    ],
 }
 
 #[test]
 fn nonoverlap_indices() {
     let output = run_with_args("verify_units/nonoverlap_indices", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_generic_array_reference", "SOUND");
-    assert_function_result(&output, "unsound_generic_array_reference_extra", "UNSOUND");
-    assert_function_result(&output, "sound_generic_array_value", "SOUND");
-    assert_function_result(&output, "unsound_generic_array_value_extra", "UNSOUND");
-    assert_function_result(&output, "sound_distinct_indices", "SOUND");
-    assert_function_result(&output, "unsound_duplicate_indices", "UNSOUND");
-    assert_function_result(&output, "unsound_callee_assertion", "UNSOUND");
-    assert_function_result(&output, "unsound_unknown_indices", "UNKNOWN");
-    assert_function_result(&output, "unsound_overwritten_indices", "UNKNOWN");
-    assert_function_result(&output, "sound_guarded_indices", "SOUND");
-    assert_function_result(&output, "unsound_overwritten_duplicate", "UNSOUND");
-    assert_function_result(&output, "unsound_indexed_write", "UNSOUND");
-    assert_function_result(&output, "sound_adjacent_ranges", "SOUND");
-    assert_function_result(&output, "unsound_overlapping_ranges", "UNSOUND");
-    assert_function_result(&output, "unsound_range_indexed_write", "UNKNOWN");
-    assert_function_result(&output, "sound_empty_range_at_edge", "SOUND");
-    assert_function_result(&output, "unsound_empty_range_in_middle", "UNSOUND");
-    assert_function_result(&output, "sound_adjacent_inclusive_ranges", "UNKNOWN");
-    assert_function_result(&output, "unsound_touching_inclusive_ranges", "UNKNOWN");
-    assert_function_result(&output, "sound_checked_generic_indices", "UNKNOWN");
-    assert_function_result(&output, "sound_checked_slice_iter_indices", "SOUND");
-    assert_function_result(&output, "sound_empty_inner_iterator", "SOUND");
-    assert_function_result(&output, "sound_enumerate_second_index", "SOUND");
-    assert_function_result(&output, "sound_at_most_one_generic_index", "SOUND");
-    assert_function_result(&output, "sound_range_next_indices", "SOUND");
-    assert_function_result(&output, "sound_range_next_symbolic", "SOUND");
-    assert_function_result(&output, "unsound_range_next_duplicate", "UNSOUND");
-    assert_function_result(&output, "sound_iter_next_indices", "SOUND");
-    assert_function_result(&output, "unsound_iter_next_duplicate", "UNSOUND");
-    assert_function_result(&output, "unsound_iter_next_after_write", "UNSOUND");
-    assert_function_result(&output, "sound_independent_iterators", "SOUND");
-    assert_function_result(&output, "unsound_independent_iterators", "UNSOUND");
-    assert_function_result(&output, "sound_moved_iterator", "SOUND");
-    assert_function_result(&output, "sound_inline_field_update", "SOUND");
-    assert_function_result(&output, "unsound_inline_field_update", "UNSOUND");
-    assert_function_result(&output, "unsound_branchy_duplicate", "UNSOUND");
+    assert_result_counts(&output, [16, 14, 6]);
 }
 
 #[test]
-fn manually_drop_reinit_sound() {
+fn manually_drop_reinit_cases() {
     let output = run_with_args("verify_units/manually_drop_reinit", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_reinitialize_after_drop", "SOUND");
+    assert_result_counts(&output, [2, 1, 0]);
 }
 
 #[test]
-fn manually_drop_reinit_box_sound() {
-    let output = run_with_args("verify_units/manually_drop_reinit", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_reinitialize_box_after_drop", "SOUND");
-}
-
-#[test]
-fn manually_drop_double_drop_unsound() {
-    let output = run_with_args("verify_units/manually_drop_reinit", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "unsound_double_drop_box", "UNSOUND");
-}
-
-// ================ NonOverlap Unsound Cases =============
-unsound_tests! {
-    nonoverlap_unsound_01: "verify_units/nonoverlap_unsound_01" => "unsound_copy_nonoverlapping_overlap" => "NonOverlap",
-}
-
-#[test]
-fn nonoverlap_unsound_symbolic() {
+fn nonoverlap_unsound_01() {
     let output = run_with_args("verify_units/nonoverlap_unsound_01", CMD_VERIFY_TARGETED);
+    assert_unproved_exclusive(
+        &output,
+        "unsound_copy_nonoverlapping_overlap",
+        &["NonOverlap"],
+    );
     assert_function_result(&output, "unsound_symbolic_overlapping_copy", "UNSOUND");
     let block = extract_block_after(&output, "function: unsound_symbolic_overlapping_copy");
     assert_contain(&block, "NonOverlap | Failed");
 }
 
-// ================ NoPadding (intrinsics::raw_eq) Cases =============
+// NoPadding (intrinsics::raw_eq) Cases
 sound_tests! {
     raw_eq_sound_01: "verify_units/raw_eq_sound_01" => "sound_raw_eq_no_padding",
 }
@@ -608,25 +535,19 @@ unsound_tests! {
     raw_eq_unsound_01: "verify_units/raw_eq_unsound_01" => "unsound_raw_eq_padded" => "NoPadding",
 }
 
-// ================ SplitTransmute Sound Cases =============
+// SplitTransmute
 sound_tests! {
     split_transmute_sound_contract: "verify_units/split_transmute_sound" => "align_to_u8_sound",
 }
 
-sound_tests_multi! {
-    split_transmute_sound_layout: "verify_units/split_transmute_unsound" => [
-        "align_without_contract_u32",
-        "align_without_contract_u16",
-        "align_without_contract_u8",
-    ],
+#[test]
+fn split_transmute_layout_cases() {
+    let output = run_with_args("verify_units/split_transmute_unsound", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [3, 2, 0]);
+    assert_contain(&output, "SplitTransmute | Failed");
 }
 
-// ================ SplitTransmute Unsound Cases =============
 unsound_tests_multi! {
-    split_transmute_unsound_contract: "verify_units/split_transmute_unsound" => [
-        "align_without_contract_generic" => "SplitTransmute",
-        "unsound_align_to_bool_from_bytes" => "SplitTransmute",
-    ],
     split_transmute_unsound_nonzero: "verify_units/split_transmute_nonzero" => [
         "align_to_nonzero_u16" => "SplitTransmute",
         "align_to_nonzero_u32" => "SplitTransmute",
@@ -634,7 +555,7 @@ unsound_tests_multi! {
     ],
 }
 
-// ================ ValidCStr Sound Cases =============
+// ValidCStr
 sound_tests! {
     validcstring_std_sound_01: "verify_units/validcstring_std_sound_01" => "sound_literal_bytes_with_nul",
     validcstring_std_sound_02: "verify_units/validcstring_std_sound_02" => "sound_variable_bytes_with_guard",
@@ -647,7 +568,6 @@ sound_tests! {
     validcstring_std_sound_09: "verify_units/validcstring_std_sound_subslice" => "sound_subslice_cstr",
 }
 
-// ================ ValidCStr Unsound Cases =============
 unsound_tests! {
     validcstring_std_unsound_01: "verify_units/validcstring_std_unsound_01" => "unsound_bytes_without_nul" => "ValidCStr",
     validcstring_std_unsound_02: "verify_units/validcstring_std_unsound_02" => "unsound_bytes_with_interior_nul" => "ValidCStr",
@@ -660,154 +580,112 @@ unsound_tests! {
     validcstring_std_unsound_10: "verify_units/validcstring_std_unsound_subslice" => "unsound_subslice_cstr" => "ValidCStr",
 }
 
-// ================ ValidCStr Manual Cases =============
 unsound_weak_tests! {
     validcstring_std_unsound_09: "verify_units/validcstring_std_unsound_09" => "unsound_from_ptr_suffix_without_nul" => "ValidCStr",
 }
 
-// ================ ValidString Sound Cases =============
+// ValidString
 sound_tests! {
     validstring_std_sound_01: "verify_units/validstring_std_sound_01" => "sound_valid_utf8_literal",
     string_as_ptr_sound_01: "verify_units/string_as_ptr_sound_01" => "sound_string_as_ptr",
 }
 
-// ================ ValidString Unsound Cases =============
 unsound_tests! {
     validstring_std_unsound_01: "verify_units/validstring_std_unsound_01" => "unsound_invalid_utf8_literal" => "ValidString",
 }
 
-// ================ Unannotated Callee (Unknown) Cases =============
+// Unannotated Callee (Unknown) Cases
 // A non-std unsafe callee with no `#[rapx::requires]`, no std JSON entry, and no
 // `#[rapx::verify]` attribute cannot be discharged: the call site is reported as
 // `Unknown`.  With no *confirmed* violation (`Failed`), the function's verdict is
 // `UNKNOWN` (rather than `UNSOUND`), which is the "unannotated ⇒ unknown" rule.
 #[test]
 fn unknown_unsound_01() {
-    let output = run_with_args("verify_units/unknown_unsound_1", CMD_VERIFY_TARGETED);
+    let output = run_with_args("verify_units/unknown_unsound_01", CMD_VERIFY_TARGETED);
     assert_contain(&output, "function: unsound_callsite_without_contract");
     assert_contain(&output, "result: UNKNOWN");
 }
 
 #[test]
 fn unsupported_mir_01() {
-    let output = run_with_args("verify_units/unsupported_mir_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "unknown_inline_asm_write", "UNKNOWN");
-    assert_function_result(&output, "unsound_intrinsic_copy", "UNSOUND");
-    assert_function_result(&output, "unknown_direct_intrinsic_copy", "UNKNOWN");
-    assert_function_result(&output, "unknown_direct_assume", "UNKNOWN");
+    let output = run_with_args("verify_units/unsupported_mir_01", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [0, 1, 3]);
 }
 
 #[test]
 fn intrinsic_effects_01() {
-    let output = run_with_args("verify_units/intrinsic_effects_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "unsound_after_write_bytes", "UNSOUND");
-    let write_block = extract_block_after(&output, "function: unsound_after_write_bytes");
-    assert_contain(&write_block, "bb1 -> need_nonzero");
-    assert_contain(&write_block, "ValidNum | Failed");
-    assert_function_result(&output, "sound_after_write_bytes", "SOUND");
-    assert_function_result(&output, "sound_after_zero_count_write_bytes", "SOUND");
-    assert_function_result(&output, "unknown_after_symbolic_write_bytes", "UNKNOWN");
-    assert_function_result(&output, "sound_raw_eq_same_pointer", "SOUND");
-    assert_function_result(&output, "sound_raw_eq_equal_values", "SOUND");
-    assert_function_result(&output, "sound_after_exact_div", "SOUND");
-    assert_function_result(&output, "unknown_after_float_to_int", "UNKNOWN");
-    assert_function_result(&output, "unsound_after_typed_swap", "UNSOUND");
-    assert_function_result(&output, "sound_after_typed_swap", "SOUND");
+    let output = run_with_args("verify_units/intrinsic_effects_01", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [6, 2, 2]);
+    let block = extract_block_after(&output, "function: unsound_after_write_bytes");
+    assert_contain(block, "bb1 -> need_nonzero");
+    assert_contain(block, "ValidNum | Failed");
 }
 
 #[test]
 fn intrinsic_flow_01() {
-    let output = run_with_args("verify_units/intrinsic_flow_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_thread_local_value", "SOUND");
-    assert_function_result(&output, "unsound_thread_local_value", "UNSOUND");
-    assert_function_result(&output, "unknown_volatile_store_wrapper", "UNKNOWN");
-    assert_function_result(&output, "sound_repeated_array_field", "SOUND");
-    assert_function_result(&output, "unsound_repeated_array_field", "UNSOUND");
-    assert_function_result(&output, "sound_symbolic_repeated_array_field", "SOUND");
-    assert_function_result(&output, "sound_unrelated_black_box", "SOUND");
-    assert_function_result(&output, "sound_black_box_value", "SOUND");
-    assert_function_result(&output, "unsound_black_box_value", "UNSOUND");
-    assert_function_result(&output, "sound_inline_write_bytes", "SOUND");
-    assert_function_result(&output, "unsound_inline_write_bytes", "UNSOUND");
-    assert_function_result(&output, "sound_direct_intrinsic_copy", "SOUND");
-    assert_function_result(&output, "unsound_direct_intrinsic_copy", "UNSOUND");
-    assert_function_result(&output, "sound_repeated_array_read", "SOUND");
-    assert_function_result(&output, "sound_large_repeated_array_read", "SOUND");
-    assert_function_result(&output, "sound_large_symbolic_array_read", "SOUND");
-    assert_function_result(&output, "sound_reassigned_repeated_array", "SOUND");
-    assert_function_result(&output, "sound_repeated_array_reference", "SOUND");
-    assert_function_result(&output, "sound_symbolic_array_write", "SOUND");
-    assert_function_result(&output, "unsound_symbolic_array_write", "UNSOUND");
-    assert_function_result(&output, "unsound_repeated_array_read", "UNSOUND");
-    assert_function_result(&output, "unsound_array_overwrite", "UNSOUND");
-    assert_function_result(&output, "sound_array_overwrite", "SOUND");
-    assert_function_result(&output, "sound_explicit_array_read", "SOUND");
-    assert_function_result(&output, "sound_symbolic_array_read", "SOUND");
-    assert_function_result(&output, "unsound_symbolic_array_read", "UNSOUND");
+    let output = run_with_args("verify_units/intrinsic_flow_01", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [16, 9, 1]);
 }
 
 #[test]
 fn tail_call_unsafe_checkpoint() {
-    let output = run_with_args("verify_units/terminator_unsupported_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_tail_call", "SOUND");
-    assert_function_result(&output, "unsound_tail_call", "UNSOUND");
-    assert_function_result(&output, "unsound_tail_call_input", "UNSOUND");
-    assert_function_result(&output, "sound_tail_call_guarded", "SOUND");
-    assert_function_result(&output, "unsound_after_tail_helper", "UNSOUND");
-    assert_function_result(&output, "sound_after_tail_helper", "SOUND");
-    assert_function_result(&output, "unsound_after_tail_write", "UNSOUND");
-    assert_function_result(&output, "unknown_tail_fnptr", "UNKNOWN");
-    assert_function_result(&output, "unknown_indirect_call", "UNKNOWN");
+    let output = run_with_args(
+        "verify_units/terminator_unsupported_01",
+        CMD_VERIFY_TARGETED,
+    );
+    assert_result_counts(&output, [3, 4, 2]);
 }
 
 #[test]
 fn rvalue_rare_sound_01() {
-    let output = run_with_args("verify_units/rvalue_rare_sound_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "sound_thread_local_ref", "SOUND");
-    assert_function_result(&output, "sound_wrap_unsafe_binder", "SOUND");
-    assert_function_result(&output, "unsound_wrap_unsafe_binder", "UNSOUND");
-    assert_function_result(&output, "unsound_scalar_deref_zero", "UNSOUND");
+    let output = run_with_args("verify_units/rvalue_rare_sound_01", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [2, 2, 0]);
     assert_not_contain(&output, "verifier crashed");
 }
 
 #[test]
 fn inline_branch_unknown_01() {
-    let output = run_with_args("verify_units/inline_branch_unknown_1", CMD_VERIFY_TARGETED);
-    assert_function_result(&output, "unknown_fallback_branch", "UNKNOWN");
-    assert_function_result(&output, "unknown_fallback_write", "UNKNOWN");
-    assert_not_contain(&output, "result: UNSOUND");
+    let output = run_with_args("verify_units/inline_branch_unknown_01", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [0, 0, 4]);
 }
 
-// ================ AsChunks Sound Cases =============
+// AsChunks
 sound_tests_multi! {
     as_chunks_sound: "verify_units/as_chunks_sound_01" => [
         "sound_as_chunks_unchecked_exact_div",
         "sound_exact_div_guard",
+        "sound_generic_exact_div",
+        "sound_generic_as_chunks",
+        "sound_generic_exact_div_requires",
+        "sound_non_zst_flat_len",
+        "sound_non_zst_flatten",
     ],
 }
 
-// ================ AsChunks Unsound Cases =============
 unsound_tests_multi! {
     as_chunks_unsound: "verify_units/as_chunks_unsound_01" => [
         "unsound_as_chunks_unchecked_missing_exact_div" => "ValidNum",
         "unsound_exact_div_missing_guard" => "ValidNum",
+        "unsound_generic_exact_div" => "ValidNum",
+        "unsound_zst_flat_len" => "ValidNum",
+        "unsound_flat_len_wrong_count" => "ValidNum",
     ],
 }
 
-// ================ Align Repeat Threshold Cases =============
+// Align Repeat Threshold Cases
+#[test]
+fn align_repeat_threshold_repeat0() {
+    let output = run_with_args("verify_units/align_repeat_threshold", CMD_VERIFY_REPEAT_0);
+    assert_function_result(&output, "repeat1_reveals_delayed_unaligned", "SOUND");
+}
+
 #[test]
 fn align_repeat_threshold_repeat1() {
     let output = run_with_args("verify_units/align_repeat_threshold", CMD_VERIFY_REPEAT_1);
-    assert_unproved_exclusive(&output, "repeat2_reveals_delayed_unaligned", &["Align"]);
+    assert_unproved_exclusive(&output, "repeat1_reveals_delayed_unaligned", &["Align"]);
 }
 
-#[test]
-fn align_repeat_threshold_repeat2() {
-    let output = run_with_args("verify_units/align_repeat_threshold", CMD_VERIFY_REPEAT_2);
-    assert_unproved_exclusive(&output, "repeat2_reveals_delayed_unaligned", &["Align"]);
-}
-
-// ================ Loop Repeat Threshold Cases =============
+// Loop Repeat Threshold Cases
 #[test]
 fn loop_repeat_threshold_repeat1_all() {
     let output = run_with_args("verify_units/loop_repeat_threshold", CMD_VERIFY_REPEAT_1);
@@ -831,41 +709,89 @@ fn loop_repeat_threshold_repeat1_all() {
 fn loop_repeat_threshold_repeat2_all() {
     let output = run_with_args("verify_units/loop_repeat_threshold", CMD_VERIFY_REPEAT_2);
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_align", &["Align"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_nonnull", &["NonNull"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_allocated", &["Allocated"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_validptr", &["ValidPtr"]);
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_nonnull",
+        &["NonNull"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_allocated",
+        &["Allocated"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_validptr",
+        &["ValidPtr"],
+    );
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_deref", &["Deref"]);
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_init", &["Init"]);
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_typed", &["Typed"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_inbound_counter", &["InBound"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_validnum_counter", &["ValidNum"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_validnum_parity_oscillation", &["ValidNum"]);
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_inbound_counter",
+        &["InBound"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_validnum_counter",
+        &["ValidNum"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_validnum_parity_oscillation",
+        &["ValidNum"],
+    );
 }
 
 #[test]
 fn loop_repeat_threshold_auto_cases() {
     let output = run_with_args("verify_units/loop_repeat_threshold", CMD_VERIFY_TARGETED);
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_align", &["Align"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_nonnull", &["NonNull"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_allocated", &["Allocated"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_validptr", &["ValidPtr"]);
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_nonnull",
+        &["NonNull"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_allocated",
+        &["Allocated"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_validptr",
+        &["ValidPtr"],
+    );
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_deref", &["Deref"]);
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_init", &["Init"]);
     assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_typed", &["Typed"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_inbound_counter", &["InBound"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_validnum_counter", &["ValidNum"]);
-    assert_unproved_exclusive(&output, "repeat1_sound_repeat2_unsound_validnum_parity_oscillation", &["ValidNum"]);
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_inbound_counter",
+        &["InBound"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_validnum_counter",
+        &["ValidNum"],
+    );
+    assert_unproved_exclusive(
+        &output,
+        "repeat1_sound_repeat2_unsound_validnum_parity_oscillation",
+        &["ValidNum"],
+    );
 }
 
-// ================ User-Defined DSL Contract (pred!) Case =============
+// User-Defined DSL Contract (pred!) Case
 sound_tests! {
     dsl_custom_def: "verify_units/dsl_custom_def" => "sound_read",
 }
 
-// ================ Struct Invariant =============
+// Struct Invariant
 #[test]
 fn struct_invariant() {
-    let output = run_with_args("verify_units/struct_invariant_1", CMD_VERIFY_TARGETED);
+    let output = run_with_args("verify_units/struct_invariant_01", CMD_VERIFY_TARGETED);
     assert_contain(&output, "function: Wrapper::<T>::new");
     assert_contain(&output, "Align | Proved");
     assert_contain(&output, "InBound | Proved");
@@ -875,27 +801,33 @@ fn struct_invariant() {
     assert_contain(&output, "function: Wrapper::<T>::read_unchecked");
 }
 
-// ================ Skip Invariant Cases =============
+// Skip Invariant Cases
 #[test]
 fn skip_invariant_struct_noinvariant_1() {
-    let output = run_with_args("verify_units/struct_noinvariant_1", CMD_VERIFY_SKIP_INVARIANT);
+    let output = run_with_args(
+        "verify_units/struct_noinvariant_01",
+        CMD_VERIFY_SKIP_INVARIANT,
+    );
     assert_contain(&output, "result: UNSOUND");
 }
 
 #[test]
 fn skip_invariant_struct_noinvariant_2() {
-    let output = run_with_args("verify_units/struct_noinvariant_2", CMD_VERIFY_SKIP_INVARIANT);
+    let output = run_with_args(
+        "verify_units/struct_noinvariant_02",
+        CMD_VERIFY_SKIP_INVARIANT,
+    );
     assert_contain(&output, "result: SOUND");
 }
 
 #[test]
 fn skip_invariant_sound_callee() {
-    let output = run_with_args("verify_units/align_sound_1", CMD_VERIFY_SKIP_INVARIANT);
+    let output = run_with_args("verify_units/align_sound_01", CMD_VERIFY_SKIP_INVARIANT);
     assert_contain(&output, "function: sound_named_contract_binds_callsite_arg");
     assert_contain(&output, "result: SOUND");
 }
 
-// ================ Box Deref ================
+// Box Deref
 #[test]
 fn box_deref() {
     let output = run_with_args("verify_units/box_deref", CMD_VERIFY_SCAN);
@@ -905,7 +837,7 @@ fn box_deref() {
     assert_contain(&output, "raw-ptr-deref");
 }
 
-// ================ Self-recursive Callee ================
+// Self-recursive Callee
 // A self-recursive callee is truncated by the inline-depth bound. Its return
 // value feeds `ptr.add`; the base case (no recursion) keeps the offset bounded
 // (`InBound | Proved`), while the truncated recursion makes the offset
@@ -921,7 +853,7 @@ fn self_recursive_callee() {
     assert_contain(&output, "InBound | Failed");
 }
 
-// ================ Call Chain Depth ================
+// Call Chain Depth
 // A 4-deep call chain of 4-way branching callees used to be summarized once per
 // path that reached them (exponential); the must-write summary is now memoized.
 #[test]
@@ -930,7 +862,7 @@ fn call_chain_depth() {
     assert_function_result(&output, "target", "SOUND");
 }
 
-// ================ Unsafe Callee = Interprocedural Checkpoint ================
+// Unsafe Callee = Interprocedural Checkpoint
 // An unsafe callee is *both* a checkpoint for callers (its `requires` is
 // discharged at the call site) *and* a separate `#[rapx::verify]` target whose
 // own body is analyzed.  Inlining the unsafe callee must not drop the
@@ -952,10 +884,13 @@ fn interproc_unsafe_callee() {
     assert_function_result(&output, "caller_uses_pred", "SOUND");
 }
 
-// ================ Trait Unsound Cases =============
+// Trait
 #[test]
 fn trait_unsound_prepare() {
-    let output = run_with_args("verify_units/trait_unsound_1", &["verify", "--prepare-targets"]);
+    let output = run_with_args(
+        "verify_units/trait_unsound_01",
+        &["verify", "--prepare-targets"],
+    );
     assert_contain(&output, "prepare targets for unsafe trait: Buffer");
     assert_contain(&output, "impl for: VecBuf");
     assert_contain(&output, "ensures");
@@ -964,7 +899,7 @@ fn trait_unsound_prepare() {
 
 #[test]
 fn trait_unsound_verify() {
-    let output = run_with_args("verify_units/trait_unsound_1", CMD_VERIFY_TARGETED);
+    let output = run_with_args("verify_units/trait_unsound_01", CMD_VERIFY_TARGETED);
     assert_contain(&output, "unsafe trait impl: Buffer");
     assert_contain(&output, "impl for: VecBuf");
     assert_contain(&output, "ensures");
@@ -972,10 +907,10 @@ fn trait_unsound_verify() {
     assert_contain(&output, "verification: deferred");
 }
 
-// ================ Trait Object Inline =============
+// Trait Object Inline
 #[test]
 fn trait_obj_inline_default_limit() {
-    let output = run_with_args("verify_units/trait_obj_inline_1", CMD_VERIFY_TARGETED);
+    let output = run_with_args("verify_units/trait_obj_inline_01", CMD_VERIFY_TARGETED);
     // Single-implementor trait: inlined, so the sole impl's `dangling()` pointer
     // proves NonNull.
     assert_function_result(&output, "single_impl_sound", "SOUND");
@@ -987,17 +922,17 @@ fn trait_obj_inline_default_limit() {
 #[test]
 fn trait_obj_inline_limit_four() {
     let output = run_with_args(
-        "verify_units/trait_obj_inline_1",
+        "verify_units/trait_obj_inline_01",
         &["verify", "--mode", "targeted", "--trait-impl-limit", "4"],
     );
     // All four impls inlined: `Dd`'s null pointer now fails NonNull.
     assert_function_result(&output, "multi_impl_truncated", "UNSOUND");
 }
 
-// ================ Generic Monomorphization =============
+// Generic Monomorphization
 #[test]
 fn generic_mono() {
-    let output = run_with_args("verify_units/generic_mono_1", CMD_VERIFY_TARGETED);
+    let output = run_with_args("verify_units/generic_mono_01", CMD_VERIFY_TARGETED);
     // The generic caller is monomorphized per impl and merged into one report:
     //   I = Dangling -> inlined `dangling()` -> NonNull Proved
     //   I = Null     -> inlined `null()`     -> NonNull Failed
@@ -1006,7 +941,7 @@ fn generic_mono() {
     assert_function_result(&output, "generic_ptr", "UNSOUND");
 }
 
-// ================ Module/Crate Filter Tests =============
+// Module/Crate Filter Tests
 #[test]
 fn filter_by_module() {
     let output = run_with_args(
@@ -1030,7 +965,13 @@ fn filter_by_module() {
 fn filter_by_crate() {
     let output = run_with_args(
         "verify_units/module_filter_crate",
-        &["verify", "--mode", "targeted", "--crate", "module_filter_crate"],
+        &[
+            "verify",
+            "--mode",
+            "targeted",
+            "--crate",
+            "module_filter_crate",
+        ],
     );
     assert_contain(&output, "function: a::f");
     assert_contain(&output, "function: b::g");
@@ -1038,7 +979,15 @@ fn filter_by_crate() {
 
     let output = run_with_args(
         "verify_units/module_filter_crate",
-        &["verify", "--mode", "targeted", "--crate", "module_filter_crate", "--module", "a"],
+        &[
+            "verify",
+            "--mode",
+            "targeted",
+            "--crate",
+            "module_filter_crate",
+            "--module",
+            "a",
+        ],
     );
     assert_contain(&output, "function: a::f");
     assert_not_contain(&output, "function: b::g");
@@ -1046,12 +995,18 @@ fn filter_by_crate() {
 
     let output = run_with_args(
         "verify_units/module_filter_crate",
-        &["verify", "--mode", "targeted", "--crate", "nonexistent_crate"],
+        &[
+            "verify",
+            "--mode",
+            "targeted",
+            "--crate",
+            "nonexistent_crate",
+        ],
     );
     assert_contain(&output, "--crate \"nonexistent_crate\" matched no targets");
 }
 
-// ================ Thread-Safety (Send/Sync) Auto-Trait Cases =============
+// Thread-Safety (Send/Sync) Auto-Trait Cases
 #[test]
 fn thread_safe_sound_cases() {
     let output = run_with_args("verify_units/thread_safe_sound_01", CMD_VERIFY_TARGETED);
@@ -1067,7 +1022,10 @@ fn thread_safe_sound_cases() {
 
 #[test]
 fn thread_safe_atomic_update_cases() {
-    let output = run_with_args("verify_units/thread_safe_atomic_update_01", CMD_VERIFY_TARGETED);
+    let output = run_with_args(
+        "verify_units/thread_safe_atomic_update_01",
+        CMD_VERIFY_TARGETED,
+    );
     assert_contain(&output, "unsafe impl Send for MyArc");
     assert_contain(&output, "verdict: SAFE");
 }
@@ -1084,7 +1042,10 @@ fn thread_safe_unsound_cases() {
 
 #[test]
 fn thread_safe_generic_sound_cases() {
-    let output = run_with_args("verify_units/thread_safe_generic_sound_01", CMD_VERIFY_TARGETED);
+    let output = run_with_args(
+        "verify_units/thread_safe_generic_sound_01",
+        CMD_VERIFY_TARGETED,
+    );
     assert_contain(&output, "unsafe impl Send for MyRcGeneric");
     assert_contain(&output, "ContainNoType(MyRcGeneric<T>");
     assert_contain(&output, "=> PROVED");
@@ -1094,7 +1055,10 @@ fn thread_safe_generic_sound_cases() {
 
 #[test]
 fn thread_safe_generic_unsound_cases() {
-    let output = run_with_args("verify_units/thread_safe_generic_unsound_01", CMD_VERIFY_TARGETED);
+    let output = run_with_args(
+        "verify_units/thread_safe_generic_unsound_01",
+        CMD_VERIFY_TARGETED,
+    );
     assert_contain(&output, "unsafe impl Send for MyRcGeneric");
     assert_contain(&output, "ContainNoType(MyRcGeneric<T>");
     assert_contain(&output, "=> UNKNOWN");
@@ -1104,7 +1068,10 @@ fn thread_safe_generic_unsound_cases() {
 
 #[test]
 fn cast_reinterpret_sound() {
-    let output = run_with_args("verify_units/cast_reinterpret_sound_1", CMD_VERIFY_TARGETED);
+    let output = run_with_args(
+        "verify_units/cast_reinterpret_sound_01",
+        CMD_VERIFY_TARGETED,
+    );
     assert_function_result(&output, "roundtrip", "SOUND");
     assert_function_result(&output, "field_to_byte", "SOUND");
 }

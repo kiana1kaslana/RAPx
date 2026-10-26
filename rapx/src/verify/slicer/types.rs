@@ -46,7 +46,7 @@ pub(crate) enum RelevantItem<'tcx> {
     CalleeEntry {
         callee: DefId,
         args: Vec<usize>,
-        consts: Vec<(usize, u64)>,
+        consts: Vec<(usize, crate::analysis::path::graph::InlineConstArg)>,
         field_offsets: Vec<usize>,
     },
     /// Return from an inlined callee: write the callee's `_0` to the caller's

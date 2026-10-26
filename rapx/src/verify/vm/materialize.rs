@@ -1,10 +1,10 @@
 //! Materialize external fields and pointee values in symbolic memory.
 
-use rustc_middle::mir::Local;
+use rustc_middle::mir::{Local, Operand, Place, Rvalue, StatementKind};
 use rustc_middle::ty::{Region, Ty};
 use z3::ast::Int;
 
-use crate::compat::{FxHashMap, FxHashSet};
+use crate::compat::{FxHashMap, FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 
 use super::state::{AllocId, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
@@ -460,8 +460,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     },
                 );
             } else if let TyKind::Array(elem_ty, const_len) = field_ty.kind() {
-                // Array field: allocate its contents so `.len()` / `as_slice()`
-                // resolve to the concrete array length.
                 let n = mir_utils::eval_array_len(self.tcx, const_len).unwrap_or(0);
                 let arr_align = self.align_sym(*elem_ty);
                 let arr_elem_size = self.size_sym(*elem_ty);
@@ -497,4 +495,293 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
+    /// If `operand` is a constant reference to a byte array (e.g. `b"hello\0"`),
+    /// extract the raw bytes and create a tracked allocation. Updates `val`
+    /// in-place with the proper provenance and invariants.
+    pub(crate) fn try_materialize_const_bytes(
+        &mut self,
+        val: &mut VmValue<'z3, 'tcx>,
+        operand: &Operand<'tcx>,
+    ) {
+        let operand_val = self.value_of_operand(operand);
+        let op_ty = operand_val.ty;
+        let (pointee_ty, _is_ref) = match op_ty.kind() {
+            rustc_middle::ty::TyKind::Ref(_, inner_ty, _) => (*inner_ty, true),
+            rustc_middle::ty::TyKind::RawPtr(inner_ty, _) => (*inner_ty, false),
+            _ => {
+                let val_ty = val.ty;
+                match val_ty.kind() {
+                    rustc_middle::ty::TyKind::Ref(_, inner_ty, _) => (*inner_ty, true),
+                    rustc_middle::ty::TyKind::RawPtr(inner_ty, _) => (*inner_ty, false),
+                    _ => return,
+                }
+            }
+        };
+        match pointee_ty.kind() {
+            rustc_middle::ty::TyKind::Array(elem_ty, _)
+            | rustc_middle::ty::TyKind::Slice(elem_ty) => {
+                let is_byte = matches!(
+                    elem_ty.kind(),
+                    rustc_middle::ty::TyKind::Uint(rustc_middle::ty::UintTy::U8)
+                        | rustc_middle::ty::TyKind::Int(rustc_middle::ty::IntTy::I8)
+                );
+                if is_byte {
+                    let bytes_opt =
+                        mir_utils::const_operand_bytes(self.tcx, operand)
+                            .or_else(|| self.trace_to_const_bytes(operand));
+                    if let Some(bytes) = bytes_opt {
+                        let size = z3::ast::Int::from_u64(self.z3_ctx, bytes.len() as u64);
+                        let align = self.align_sym(pointee_ty);
+                        let (alloc_id, base) = self.allocate(size, align, Some(pointee_ty));
+                        self.content_mut(alloc_id).facts.initialized = true;
+                        self.alloc_mut(alloc_id).facts.liveness =
+                            Some(self.tcx.lifetimes.re_static);
+                        for (i, &b) in bytes.iter().enumerate() {
+                            self.record_byte_value(
+                                alloc_id,
+                                i,
+                                z3::ast::Int::from_u64(self.z3_ctx, b as u64),
+                            );
+                        }
+                        val.z3_term = base;
+                        val.provenance = Some(super::state::Provenance {
+                            alloc_id,
+                            offset: z3::ast::Int::from_u64(self.z3_ctx, 0),
+                            offset_kind: None,
+                        });
+                        val.facts = ValueFacts {
+                            non_null: true,
+                            init: true,
+                            in_bounds: false,
+                            align_n: None,
+                        };
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn trace_to_const_bytes(&self, operand: &Operand<'tcx>) -> Option<Vec<u8>> {
+        let place = match operand {
+            Operand::Copy(p) | Operand::Move(p) => p,
+            _ => return None,
+        };
+        let base_local = if place.projection.is_empty()
+            || (place.projection.len() == 1
+                && matches!(
+                    place.projection.first().map(|p| p.kind()),
+                    Some(rustc_middle::mir::ProjectionElem::Deref)
+                ))
+        {
+            place.local
+        } else {
+            return None;
+        };
+        for block in self.body().basic_blocks.iter() {
+            for stmt in &block.statements {
+                if let StatementKind::Assign(assign) = &stmt.kind {
+                    let (dest, rvalue) = &**assign;
+                    if dest.local != base_local || !dest.projection.is_empty() {
+                        continue;
+                    }
+                    match rvalue {
+                        Rvalue::Use(op, ..) => {
+                            return mir_utils::const_operand_bytes(self.tcx, op)
+                                .or_else(|| self.trace_to_const_bytes(op));
+                        }
+                        Rvalue::Ref(_, _, p) => {
+                            let op = Operand::Copy(*p);
+                            return self.trace_to_const_bytes(&op);
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Propagate a source place's per-field values to a reference destination,
+    /// shifting the field path by the source place's `Field` projection prefix.
+    /// E.g. for `_3 = &(_1.0)` where `_1` is a `Handle { node: NodeRef { node:
+    /// NonNull<..>, .. }, .. }`, the nested `NonNull`'s field value stored at
+    /// path `[0, 1]` becomes available at `_3`'s path `[1]`, so an inlined
+    /// callee that dereferences `_3` and reads its `node` field sees the
+    /// provenance of the underlying allocation.
+    pub(crate) fn propagate_field_values_to_ref(&mut self, source_place: &Place<'tcx>, dest: Local) {
+        // Support both `&(local.field...)` (Field projection prefix) and
+        // `&(*local)` (reborrow of a reference, pure Deref).  In the latter
+        // case the reference's own per-field values already describe the
+        // pointee, so they are copied unchanged.
+        let only_field_deref = source_place.projection.iter().all(|p| {
+            matches!(
+                p.kind(),
+                rustc_middle::mir::ProjectionElem::Field(..)
+                    | rustc_middle::mir::ProjectionElem::Deref
+            )
+        });
+        if !only_field_deref {
+            return;
+        }
+        let field_prefix: Vec<usize> = source_place
+            .projection
+            .iter()
+            .filter_map(|p| match p.kind() {
+                rustc_middle::mir::ProjectionElem::Field(fi, _) => Some(fi.as_usize()),
+                _ => None,
+            })
+            .collect();
+        // A bare `&local` (no projection) exposes the pointee's whole field
+        // map. Only propagate fields that carry provenance (pointer leaves);
+        // plain scalar fields (e.g. array elements) must not leak into the
+        // reference or they can corrupt downstream InBound reasoning.
+        let empty_proj = source_place.projection.is_empty();
+        let keys: Vec<Vec<usize>> = self.field_paths(source_place.local);
+        for path in keys {
+            let matches_prefix = field_prefix.is_empty()
+                || (path.len() >= field_prefix.len()
+                    && path[..field_prefix.len()] == field_prefix[..]);
+            if matches_prefix {
+                let rest = if field_prefix.is_empty() {
+                    path.clone()
+                } else {
+                    path[field_prefix.len()..].to_vec()
+                };
+                // `rest == []` means the pointee *is* `source_place` itself
+                // (e.g. `&mut self.v`).  Do not mirror it into the reference's
+                // `path == []`: that slot now holds the reference's whole value
+                // (see M2), so writing the pointee there would clobber it.  The
+                // pointee value stays on the *source* field and is recovered by
+                // `ReturnDerefArg`'s field-map fallback instead.
+                if rest.is_empty() {
+                    continue;
+                }
+                if let Some(v) = self.field_value(source_place.local, &path).cloned() {
+                    if empty_proj && v.provenance.is_none() {
+                        continue;
+                    }
+                    self.set_field_value(dest, rest, v);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn propagate_byte_values_to_ref(
+        &mut self,
+        source_place: &Place<'tcx>,
+        ref_val: &VmValue<'z3, 'tcx>,
+    ) {
+        let Some(src_alloc_id) = self.current_frame.local_alloc.get(&source_place.local).copied() else {
+            return;
+        };
+        let Some(ref_alloc_id) = ref_val.provenance_alloc_id() else {
+            return;
+        };
+        if src_alloc_id == ref_alloc_id {
+            return; // same allocation, bytes already there
+        }
+        self.copy_byte_tracking(src_alloc_id, 0, ref_alloc_id);
+    }
+
+    /// Return the per-field types for an aggregate's operands.
+    pub(crate) fn aggregate_field_tys(&self, ty: Ty<'tcx>) -> Vec<Ty<'tcx>> {
+        match ty.kind() {
+            rustc_middle::ty::TyKind::Array(elem_ty, _len) => {
+                vec![*elem_ty]
+            }
+            rustc_middle::ty::TyKind::Tuple(elems) => elems.iter().collect(),
+            rustc_middle::ty::TyKind::Adt(adt_def, substs) => {
+                if adt_def.is_enum() {
+                    return vec![];
+                }
+                let variant = adt_def.non_enum_variant();
+                variant
+                    .fields
+                    .iter()
+                    .map(|f| mir_utils::field_ty(self.tcx, f, substs))
+                    .collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    pub(crate) fn propagate_const_bytes_to_tracked(&mut self, args: &[Spanned<Operand<'tcx>>]) {
+        let mut const_bytes: Option<(Vec<u8>, usize)> = None;
+        let mut tracked_alloc: Option<AllocId> = None;
+        let mut tracked_offset: usize = 0;
+
+        for (i, arg) in args.iter().enumerate() {
+            let arg_val = self.value_of_operand(&arg.node);
+            if const_bytes.is_none() {
+                let bytes_opt = mir_utils::const_operand_bytes(self.tcx, &arg.node)
+                    .or_else(|| self.trace_to_const_bytes(&arg.node));
+                if let Some(bytes) = bytes_opt {
+                    const_bytes = Some((bytes, i));
+                }
+            }
+            if tracked_alloc.is_none()
+                && let Some(alloc_id) = arg_val.provenance_alloc_id() {
+                    tracked_alloc = Some(alloc_id);
+                    if let Some(ref prov) = arg_val.provenance {
+                        tracked_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
+                    }
+                }
+        }
+
+        if let (Some((bytes, _)), Some(alloc_id)) = (const_bytes, tracked_alloc) {
+            for (j, &b) in bytes.iter().enumerate() {
+                let off = tracked_offset + j;
+                self.record_byte_value(alloc_id, off, Int::from_u64(self.z3_ctx, b as u64));
+            }
+            self.content_mut(alloc_id).facts.initialized = true;
+        }
+    }
+
+    /// Materialize the `{ptr, cap, len}` field values of a `Vec<T>` aggregate
+    /// at `local`. The backing-buffer pointer is written to the owning raw
+    /// pointer field (located generically via [`Self::container_ptr_field`]);
+    /// the `len`/`cap` are no longer materialized as fields — they are asserted
+    /// as path conditions and tracked by the backing allocation's slice length.
+    ///
+    /// The symbolic invariant `0 <= len <= cap` and `cap * elem_size <=
+    /// isize::MAX` is asserted as a path condition so downstream `len()` /
+    /// `capacity()` / `InBound` / `ValidNum` queries agree.
+    pub(crate) fn materialize_vec_fields(
+        &mut self,
+        local: Local,
+        ptr: VmValue<'z3, 'tcx>,
+        cap: Int<'z3>,
+        len: Int<'z3>,
+    ) {
+        let elem_size = self.size_of_ty(ptr.ty).max(1);
+        let ty = self.body().local_decls[local].ty;
+        let ptr_path = self
+            .container_ptr_field(ty)
+            .expect("materialize_vec_fields: container has no owning pointer field");
+        self.set_field_value(local, ptr_path, ptr);
+        self.materialize_vec_len_cap(cap, len, elem_size);
+    }
+
+    /// Assert the Vec length/capacity invariants `0 <= len <= cap` and
+    /// `cap * elem_size <= isize::MAX` as path conditions.
+    pub(crate) fn materialize_vec_len_cap(
+        &mut self,
+        cap: Int<'z3>,
+        len: Int<'z3>,
+        elem_size: u64,
+    ) {
+        let zero = Int::from_u64(self.z3_ctx, 0);
+        self.constraints.assertions.push(len.ge(&zero));
+        self.constraints.assertions.push(len.le(&cap));
+        self.constraints.assertions.push(cap.ge(&zero));
+        // Language invariant: a Vec's byte length fits in `isize::MAX`, so the
+        // `from_raw_parts`/`from_raw_parts_mut` precondition
+        // `size_of(T) * len <= isize::MAX` is provable from the materialized
+        // fields (`len <= cap` and `cap * elem_size <= isize::MAX`).
+        let isize_max = Int::from_u64(self.z3_ctx, isize::MAX as u64);
+        let elem_term = Int::from_u64(self.z3_ctx, elem_size.max(1));
+        self.constraints.assertions
+            .push(Int::mul(self.z3_ctx, &[&cap, &elem_term]).le(&isize_max));
+    }
 }

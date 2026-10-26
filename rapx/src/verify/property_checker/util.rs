@@ -147,8 +147,6 @@ impl PropertyChecker {
                     });
                 }
                 ContractProjection::ForEach => {
-                    // iter() projections: try to resolve the base field and
-                    // return the base value (iterator elements handled elsewhere).
                     if let Some(val) = vm_state.field_value(base_local, &field_path) {
                         return Some(val.clone());
                     }
@@ -171,8 +169,6 @@ impl PropertyChecker {
         if let Some(val) = vm_state.field_value(base_local, &field_path) {
             return Some(val.clone());
         }
-        // Fallback: if the field value is not set (e.g. constructor return
-        // value _0 whose Aggregate was not executed), resolve from MIR.
         if !field_path.is_empty() && base_local == Local::from_usize(0) {
             for bb in vm_state.body().basic_blocks.iter() {
                 for stmt in &bb.statements {
@@ -453,9 +449,7 @@ impl PropertyChecker {
             })
             .filter(|ty| vm_state.size_of_ty(*ty) > 0)
             .or_else(|| {
-                // Two-argument form (`Init(self, n)`, no `T`): derive the
-                // element type from the target's pointee, peeling `[T]` /
-                // `[T; N]` down to `T` so `n * sizeof(elem)` is computed.
+                // `Init(self, n)` infers its element type from the pointee.
                 mir_utils::pointee_ty(value.ty).map(|ty| match ty.kind() {
                     rustc_middle::ty::TyKind::Slice(e) | rustc_middle::ty::TyKind::Array(e, _) => {
                         *e
@@ -569,7 +563,7 @@ impl PropertyChecker {
         vm_state: &VmState<'z3, 'tcx>,
         checkpoint: &Checkpoint<'tcx>,
         index: u32,
-    ) -> Option<u128> {
+    ) -> Option<Int<'z3>> {
         let body = vm_state.body();
         let terminator = body.basic_blocks[checkpoint.block].terminator();
         let TerminatorKind::Call { func, .. } = &terminator.kind else {
@@ -578,17 +572,30 @@ impl PropertyChecker {
         let Operand::Constant(func_constant) = func else {
             return None;
         };
-        let TyKind::FnDef(_, args) = func_constant.const_.ty().kind() else {
+        let TyKind::FnDef(callee_def_id, args) = func_constant.const_.ty().kind() else {
             return None;
         };
         let arg = crate::compat::args_get(args, index as usize)?;
         match arg.kind() {
-            GenericArgKind::Const(actual_const) => actual_const
-                .try_to_target_usize(vm_state.tcx)
-                .map(|value| value as u128)
-                .or_else(|| {
-                    mir_utils::const_int_from_debug(&format!("{actual_const:?}")).map(|v| v as u128)
-                }),
+            GenericArgKind::Const(actual_const) => {
+                let value = actual_const
+                    .try_to_target_usize(vm_state.tcx)
+                    .or_else(|| mir_utils::const_int_from_debug(&format!("{actual_const:?}")));
+                let param = vm_state
+                    .tcx
+                    .generics_of(*callee_def_id)
+                    .param_at(index as usize, vm_state.tcx);
+                let param_ty = vm_state.tcx.type_of(param.def_id).instantiate_identity();
+                #[cfg(rapx_ge_99)]
+                let param_ty = param_ty.skip_norm_wip();
+                Some(match value {
+                    Some(value) => Int::from_u64(vm_state.z3_ctx, value),
+                    None => vm_state.symbolic_const_term(&rustc_middle::mir::Const::Ty(
+                        param_ty,
+                        actual_const,
+                    )),
+                })
+            }
             _ => None,
         }
     }
@@ -742,8 +749,6 @@ impl PropertyChecker {
                 {
                     return None;
                 }
-                // A struct (e.g. `NodeRef`) whose `len()` reads `(*x.field).len`
-                // through a `NonNull` field.
                 if let crate::verify::contract::ContractExpr::Place(cp) = &**inner
                     && let Some(field_path) = cp.plain_field_path()
                 {
@@ -773,10 +778,10 @@ impl PropertyChecker {
                 let receiver = self.eval_contract_expr_to_value(vm_state, checkpoint, inner)?;
                 vm_state.cached_method_result(method, &receiver)
             }
-            ContractExpr::ConstParam { index, name: _ } => self
-                .instantiate_callsite_const(vm_state, checkpoint?, *index)
-                .and_then(|v| u64::try_from(v).ok())
-                .map(|v| Int::from_u64(vm_state.z3_ctx, v)),
+            ContractExpr::ConstParam { index, .. } => match checkpoint {
+                Some(checkpoint) => self.instantiate_callsite_const(vm_state, checkpoint, *index),
+                None => vm_state.const_param_term(*index),
+            },
             ContractExpr::If {
                 cond,
                 then_expr,
@@ -792,10 +797,6 @@ impl PropertyChecker {
                     RelOp::Ge => l.ge(&r),
                     RelOp::Gt => l.gt(&r),
                 };
-                // When the condition is concretely true/false, short-circuit to
-                // the taken branch so the result is a concrete term (otherwise an
-                // `ite(true, a, b)` stays symbolic and downstream `as_u64()`
-                // checks fail, e.g. the `count == 0` fast-path in check_in_bound).
                 match cond_bool.simplify().as_bool() {
                     Some(true) => self.eval_contract_expr(vm_state, checkpoint, then_expr),
                     Some(false) => self.eval_contract_expr(vm_state, checkpoint, else_expr),
@@ -863,9 +864,6 @@ impl PropertyChecker {
         checkpoint: Option<&Checkpoint<'tcx>>,
         cp: &crate::verify::contract::ContractPlace<'tcx>,
     ) -> Option<Int<'z3>> {
-        // Collect numeric field projections.  Any non-field projection (e.g. a
-        // `Downcast` or `ForEach`) cannot be resolved to a scalar, so the
-        // place does not evaluate.
         let field_path = cp.plain_field_path()?;
 
         let base_local: Option<Local> = match cp.base {
@@ -877,8 +875,6 @@ impl PropertyChecker {
                         self.eval_contract_operand(vm_state, op)
                     });
                 }
-                // A field projection of an argument: resolve the argument
-                // operand to its underlying local so the field can be read.
                 checkpoint
                     .and_then(|ck| ck.args.get(n))
                     .and_then(|op| match op {
@@ -936,8 +932,11 @@ impl PropertyChecker {
                         return Some(Int::from_u64(vm_state.z3_ctx, v));
                     }
                 }
-                mir_utils::const_int_from_debug(&const_text)
-                    .map(|v| Int::from_u64(vm_state.z3_ctx, v))
+                Some(
+                    mir_utils::const_int_from_debug(&const_text)
+                        .map(|v| Int::from_u64(vm_state.z3_ctx, v))
+                        .unwrap_or_else(|| vm_state.symbolic_const_term(&c.const_)),
+                )
             }
             Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => {
                 vm_state.local_value(p.local).map(|v| v.z3_term.clone())
@@ -976,30 +975,6 @@ impl PropertyChecker {
             }
         }
         vm_state.value_of_operand(op)
-    }
-
-    pub(super) fn alloc_elem_is_array_of<'tcx>(
-        &self,
-        alloc_elem_ty: Ty<'tcx>,
-        required_ty: Ty<'tcx>,
-    ) -> bool {
-        match alloc_elem_ty.kind() {
-            TyKind::Array(inner_ty, _) => {
-                *inner_ty == required_ty
-                    || matches!(
-                        (inner_ty.kind(), required_ty.kind()),
-                        (TyKind::Param(_), TyKind::Param(_))
-                    )
-            }
-            TyKind::Slice(inner_ty) => {
-                *inner_ty == required_ty
-                    || matches!(
-                        (inner_ty.kind(), required_ty.kind()),
-                        (TyKind::Param(_), TyKind::Param(_))
-                    )
-            }
-            _ => false,
-        }
     }
 }
 

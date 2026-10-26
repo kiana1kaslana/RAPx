@@ -81,10 +81,6 @@ impl<'tcx> VerifyEngine<'tcx> {
 
         let z3_ctx = Self::new_z3_context();
 
-        // Map (def_id, local block) -> global block(s), computed once and reused
-        // by `inject_inline_boundaries` for every checkpoint.  A callee inlined
-        // at several call sites (e.g. `as_mut_ptr` called twice) contributes one
-        // global entry block per site, so the value is a list in path order.
         let mut local_to_global: HashMap<(DefId, usize), Vec<usize>> = HashMap::new();
         for (global, (def_id, local)) in tree.block_fns().iter().enumerate() {
             local_to_global
@@ -93,8 +89,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                 .push(global);
         }
 
-        // Process checkpoints in forward (MIR) order so that facts
-        // collected by earlier calls are available to later checks.
         let backward_items: Vec<_> = backward_items.into_iter().rev().collect();
         for backward in backward_items {
             let path_desc = backward.path.describe_indices();
@@ -113,8 +107,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                 );
             }
             items.extend(backward.items);
-            // Insert inlined-callee boundary markers (argument binding / return
-            // write-back) based on def_id transitions across the path.
             items = Self::inject_inline_boundaries(
                 self.tcx,
                 items,
@@ -335,26 +327,12 @@ impl<'tcx> VerifyEngine<'tcx> {
         caller: DefId,
     ) -> Vec<RelevantItem<'tcx>> {
         let mut out: Vec<RelevantItem<'tcx>> = Vec::new();
-        // Start in the caller so a path that begins inside an inlined callee
-        // still emits its CalleeEntry on the first item.
+        // Begin in the caller to emit the first inlined callee entry.
         let mut prev_def_id: Option<DefId> = Some(caller);
-        // The caller's argument local defined by the previous retained `Assign`
-        // statement. Used to disambiguate a callee inlined at several call sites:
-        // each call site passes a distinct borrow temp, so matching it against the
-        // entry binding's `arg_locals` keeps the positional cursor from mis-binding
-        // when one call site's body is sliced out.
+        // Distinguishes inlined call sites whose other statements were sliced out.
         let mut prev_arg: Option<usize> = None;
-        // Stack of entered callees, innermost last: (def_id, dest_local,
-        // entry global block). The entry block lets us resolve each callee's
-        // parent (`tree.inline_parent`) so a *nested* callee — one whose body
-        // is split around a further-inlined callee (e.g. `next_unchecked`
-        // calling `post_inc_start` and continuing afterwards) — is not popped
-        // from the frame stack until it actually returns.
+        // Active callees, innermost last; entry blocks identify their parents.
         let mut active: Vec<(DefId, usize, usize)> = Vec::new();
-        // How many times each (callee, parent) pair has been entered so far, to
-        // select the correct entry binding when the same callee is inlined at
-        // several call sites — possibly under *different* parents — along a
-        // single (loop-unrolled) path.
         let mut entry_cursor: HashMap<(DefId, DefId), usize> = HashMap::new();
 
         for item in items {
@@ -380,23 +358,12 @@ impl<'tcx> VerifyEngine<'tcx> {
                     && prev != cur
                 {
                     if cur == caller {
-                        // Returning to the root caller: pop *every* still-active
-                        // frame. Nested inlined callees whose return blocks
-                        // produced no items (a plain `return` has no relevant
-                        // use/def) are skipped in the item stream, so the
-                        // transition can jump several levels at once.
+                        // The slice may omit several nested return blocks.
                         while let Some((_, dest, _)) = active.pop() {
                             out.push(RelevantItem::CalleeExit { dest });
                         }
                     } else {
-                        // Distinguish an *ascent* (`prev` returns to an
-                        // already-active `cur`, e.g. `post_inc_start` → the
-                        // split `next_unchecked`) from a *descent* (`cur` is
-                        // a fresh callee). In an ascent we pop frames down to
-                        // `cur` and do NOT re-enter it (it is already active).
-                        // Checking membership (rather than only the top's
-                        // parent) handles multi-level skips where several
-                        // callee return blocks produced no items.
+                        // An active `cur` is an ascent, possibly across omitted returns.
                         let is_ascent = active.iter().any(|(d, _, _)| *d == cur);
                         if is_ascent {
                             while let Some(&(top_def, _, _)) = active.last() {
@@ -410,13 +377,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                             let current_parent =
                                 active.last().map(|(d, _, _)| *d).unwrap_or(caller);
 
-                            // The "effective parent" of an entry block: the
-                            // deepest ancestor (via `inline_parent`) that is
-                            // either the root caller or a currently-active
-                            // frame. Intermediate inlined callees whose blocks
-                            // produced no relevant items are skipped in the
-                            // item stream, so a transition can jump straight
-                            // from a shallow frame to a deep descendant.
+                            // Skip ancestors with no retained slice items.
                             let eff_parent = |g: usize| -> DefId {
                                 let mut p = tree.inline_parent(g);
                                 while let Some(pd) = p {
@@ -431,8 +392,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 caller
                             };
 
-                            // Select `cur`'s entry block whose effective parent
-                            // matches the current innermost frame.
                             let mut cur_entry: Option<usize> = None;
                             if let Some(globals) = local_to_global.get(&(cur, 0)) {
                                 let mut matching: Vec<usize> = globals
@@ -443,16 +402,8 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 if matching.is_empty() {
                                     matching = globals.to_vec();
                                 }
-                                // Disambiguate by the caller's argument local: the
-                                // destination of the most recent relevant `Assign`.
-                                // Applies to single-arg callees (a borrow temp for
-                                // `as_ptr`/`as_mut_ptr`) and to pointer-arithmetic
-                                // callees (the freshly materialized `count` of
-                                // `ptr::add`/`ptr::sub`).  For other multi-arg
-                                // callees (e.g. `ptr::write`, whose `value` aggregate
-                                // temp may be reused across call sites) the local is
-                                // not a reliable discriminator, so the positional
-                                // cursor below decides.
+                                // Match single-arg and pointer-arithmetic calls by argument;
+                                // other calls use the positional cursor.
                                 let all_single_arg = matching.iter().all(|&g| {
                                     tree.inline_binding(g).map(|b| b.arg_locals.len()) == Some(1)
                                 });
@@ -486,8 +437,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 cur_entry = pool.get(idx).copied();
                             }
 
-                            // The frame `cur` connects to, and the inlined
-                            // callees skipped between it and `cur`.
                             let eff = cur_entry.map(eff_parent).unwrap_or(caller);
                             let mut skipped: Vec<(DefId, usize)> = Vec::new();
                             {
@@ -508,8 +457,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 }
                             }
 
-                            // Pop down to the connection frame (`eff`; if it is
-                            // the root caller, pop everything).
                             while let Some(&(top_def, _, _)) = active.last() {
                                 if top_def == eff {
                                     break;
@@ -517,8 +464,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 let (_, dest, _) = active.pop().unwrap();
                                 out.push(RelevantItem::CalleeExit { dest });
                             }
-                            // Enter the skipped frames (farthest first), then
-                            // `cur` itself.
                             for (pd, pe) in skipped.iter().rev() {
                                 if let Some(binding) = tree.inline_binding(*pe) {
                                     out.push(RelevantItem::CalleeEntry {
@@ -545,12 +490,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                     }
                 }
                 prev_def_id = Some(cur);
-                // Track the caller's most recent value-producing `Assign`
-                // destination for argument disambiguation.  A non-value statement
-                // (`StorageLive`/`StorageDead`/`FakeRead`, whose `dest` is `None`)
-                // must not clobber it — the argument local is still the previous
-                // `Assign`'s destination — but a `Terminator` is a control-flow
-                // boundary, so the previous argument is stale there.
+                // Non-value statements retain the last argument local; terminators clear it.
                 if cur_arg.is_some() {
                     prev_arg = cur_arg;
                 } else if cur_is_term {
@@ -747,9 +687,6 @@ impl<'tcx> VerifyEngine<'tcx> {
 
         let z3_ctx = Self::new_z3_context();
 
-        // Map (def_id, local block) -> global block(s), computed once and reused
-        // by `inject_inline_boundaries` for every path (mirrors
-        // `check_callsite_from_tree`).
         let mut local_to_global: HashMap<(DefId, usize), Vec<usize>> = HashMap::new();
         for (global, (def_id, local)) in tree.block_fns().iter().enumerate() {
             local_to_global
@@ -767,8 +704,6 @@ impl<'tcx> VerifyEngine<'tcx> {
                 backward.items = items;
             }
 
-            // Insert inlined-callee boundary markers (argument binding / return
-            // write-back) based on def_id transitions across the path.
             backward.items = Self::inject_inline_boundaries(
                 self.tcx,
                 backward.items,
