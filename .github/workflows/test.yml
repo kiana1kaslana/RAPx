@@ -71,8 +71,8 @@ jobs:
         UNKNOWN_COUNT=$(grep -c 'result: UNKNOWN' /tmp/rapx-verify-output.txt || true)
         UNSOUND_COUNT=$(grep -c 'result: UNSOUND' /tmp/rapx-verify-output.txt || true)
         echo "SOUND: $SOUND_COUNT, UNKNOWN: $UNKNOWN_COUNT, UNSOUND: $UNSOUND_COUNT"
-        if [ "$SOUND_COUNT" -ne 35 ] || [ "$UNKNOWN_COUNT" -ne 3 ] || [ "$UNSOUND_COUNT" -ne 0 ]; then
-          echo "Expected 35 SOUND, 3 UNKNOWN (unavailable generic MIR), and 0 UNSOUND"
+        if [ "$SOUND_COUNT" -ne 36 ] || [ "$UNKNOWN_COUNT" -ne 2 ] || [ "$UNSOUND_COUNT" -ne 0 ]; then
+          echo "Expected 36 SOUND, 2 UNKNOWN (unavailable generic MIR), and 0 UNSOUND"
           echo "---- tail of verify output ----"
           tail -60 /tmp/rapx-verify-output.txt || true
           exit 1

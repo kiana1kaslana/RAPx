@@ -92,6 +92,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
             .collect::<Vec<_>>();
         let path_tree =
             PathExtractor::new_with_body(tcx, target.def_id, allow_repeat, target.body)
+                .with_callee_bodies(target.callee_bodies.clone())
                 .with_checkpoints(&locations)
                 .run();
         Self {
@@ -99,7 +100,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
             target,
             path_tree,
             checkpoints,
-            engine: VerifyEngine::new(tcx, target.def_id, target.body),
+            engine: VerifyEngine::new(tcx, target.def_id, target.body, target.callee_bodies.clone()),
         }
     }
 
@@ -619,6 +620,7 @@ impl<'tcx> VerifyRun<'tcx> {
         FunctionTarget {
             def_id: read_def_id,
             body: read_target.body,
+            callee_bodies: read_target.callee_bodies.clone(),
             owner_struct_def_id: read_target.owner_struct_def_id,
             checkpoints: read_target.checkpoints.clone(),
             callee_requires: read_target.callee_requires.clone(),

@@ -23,6 +23,7 @@ use super::{
 use crate::verify::checkpoint::{Checkpoint, CheckpointLocation};
 
 use super::property_checker::PropertyChecker;
+use super::target::CalleeBodies;
 
 enum LocalAccess {
     None,
@@ -37,6 +38,7 @@ pub(crate) struct VerifyEngine<'tcx> {
     slicer: BackwardSlicer<'tcx>,
     caller_def_id: DefId,
     instance_body: Option<&'tcx Body<'tcx>>,
+    callee_bodies: CalleeBodies<'tcx>,
 }
 
 impl<'tcx> VerifyEngine<'tcx> {
@@ -45,12 +47,14 @@ impl<'tcx> VerifyEngine<'tcx> {
         tcx: TyCtxt<'tcx>,
         caller_def_id: DefId,
         instance_body: Option<&'tcx Body<'tcx>>,
+        callee_bodies: CalleeBodies<'tcx>,
     ) -> Self {
         Self {
             tcx,
-            slicer: BackwardSlicer::new(tcx, caller_def_id, instance_body),
+            slicer: BackwardSlicer::new(tcx, caller_def_id, instance_body, callee_bodies.clone()),
             caller_def_id,
             instance_body,
+            callee_bodies,
         }
     }
 
@@ -289,6 +293,7 @@ impl<'tcx> VerifyEngine<'tcx> {
     /// per path.
     fn inject_inline_boundaries(
         tcx: TyCtxt<'tcx>,
+        callee_bodies: &CalleeBodies<'tcx>,
         items: Vec<RelevantItem<'tcx>>,
         tree: &PathTree,
         local_to_global: &HashMap<(DefId, usize), Vec<usize>>,
@@ -310,7 +315,8 @@ impl<'tcx> VerifyEngine<'tcx> {
                     block,
                     statement_index,
                 } => {
-                    let body = tcx.optimized_mir(*def_id);
+                    let body = callee_bodies.get(def_id).copied()
+                        .unwrap_or_else(|| tcx.optimized_mir(*def_id));
                     let dest = match &body.basic_blocks[*block].statements[*statement_index].kind {
                         StatementKind::Assign(assign) => Some(assign.0.local.as_usize()),
                         _ => None,
@@ -437,6 +443,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 if let Some(binding) = tree.call_binding(*pe) {
                                     out.push(RelevantItem::CalleeEntry {
                                         callee: *pd,
+                                        body: callee_bodies.get(pd).copied(),
                                         args: binding.arg_locals.clone(),
                                         consts: binding.arg_consts.clone(),
                                         field_offsets: binding.arg_field_offsets.clone(),
@@ -449,6 +456,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                             {
                                 out.push(RelevantItem::CalleeEntry {
                                     callee: cur,
+                                    body: callee_bodies.get(&cur).copied(),
                                     args: binding.arg_locals.clone(),
                                     consts: binding.arg_consts.clone(),
                                     field_offsets: binding.arg_field_offsets.clone(),
@@ -706,6 +714,7 @@ impl<'tcx> VerifyEngine<'tcx> {
                 }
                 goal.items = Self::inject_inline_boundaries(
                     self.tcx,
+                    &self.callee_bodies,
                     goal.items,
                     tree,
                     &local_to_global,

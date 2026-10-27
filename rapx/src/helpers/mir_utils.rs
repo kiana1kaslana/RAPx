@@ -371,6 +371,31 @@ pub(crate) fn has_unmodeled_generic_call<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId)
     has_unmodeled_generic_call_rec(tcx, def_id, &mut visited)
 }
 
+/// A callee may need its own MIR instantiated when an immediate trait call
+/// can change target after substituting the caller's type arguments.
+pub(crate) fn has_direct_unmodeled_generic_call<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+) -> bool {
+    if !tcx.is_mir_available(def_id) {
+        return false;
+    }
+    tcx.optimized_mir(def_id).basic_blocks.iter().any(|bb| {
+        let TerminatorKind::Call { func, .. } = &bb.terminator().kind else {
+            return false;
+        };
+        let Some(callee) = dep_callee_def_id(func) else {
+            return false;
+        };
+        tcx.opt_associated_item(callee)
+            .and_then(|item| item.trait_container(tcx))
+            .is_some()
+            && dep_callee_resolved_def_id(tcx, def_id, func)
+                .is_none_or(|target| !tcx.is_mir_available(target))
+            && !crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee))
+    })
+}
+
 fn has_unmodeled_generic_call_rec<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,

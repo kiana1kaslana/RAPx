@@ -2,6 +2,7 @@ use crate::analysis::path::{CallBinding, CallConstArg, PathTree};
 use crate::compat::{FxHashMap, FxHashSet};
 use crate::helpers::mir_utils;
 use crate::limit::{HINTED_CALLEE_BLOCK_LIMIT, LOCAL_CALLEE_BLOCK_LIMIT};
+use crate::verify::target::CalleeBodies;
 #[cfg(rapx_has_attr_ir)]
 use rustc_attr_ir::InlineAttr;
 #[cfg(not(rapx_has_attr_ir))]
@@ -17,12 +18,18 @@ pub(crate) struct CallSiteIndex<'tcx> {
     tcx: TyCtxt<'tcx>,
     blocks: Vec<(DefId, usize)>,
     bodies: FxHashMap<usize, Body<'tcx>>,
+    callee_bodies: CalleeBodies<'tcx>,
     bindings: FxHashMap<usize, CallBinding>,
     pub(crate) entries: FxHashMap<usize, Vec<usize>>,
 }
 
 impl<'tcx> CallSiteIndex<'tcx> {
-    pub(crate) fn new(tcx: TyCtxt<'tcx>, root: DefId, body: Option<Body<'tcx>>) -> Self {
+    pub(crate) fn new(
+        tcx: TyCtxt<'tcx>,
+        root: DefId,
+        body: Option<Body<'tcx>>,
+        callee_bodies: CalleeBodies<'tcx>,
+    ) -> Self {
         let block_count = body
             .as_ref()
             .map(|body| body.basic_blocks.len())
@@ -38,6 +45,7 @@ impl<'tcx> CallSiteIndex<'tcx> {
             tcx,
             blocks,
             bodies,
+            callee_bodies,
             bindings: FxHashMap::default(),
             entries: FxHashMap::default(),
         }
@@ -116,7 +124,14 @@ impl<'tcx> CallSiteIndex<'tcx> {
                 let Some(base_callee) = mir_utils::dep_callee_def_id(func) else {
                     continue;
                 };
-                let caller = self.blocks[block].0;
+                let actual_caller = self.blocks[block].0;
+                // Bodies instantiated under the root retain its unresolved
+                // generic arguments (not the callee's parameter indices).
+                let caller = if self.callee_bodies.contains_key(&actual_caller) {
+                    self.blocks[0].0
+                } else {
+                    actual_caller
+                };
                 let cross_crate = base_callee.as_local().is_none();
                 let is_trait_method = self
                     .tcx
@@ -272,15 +287,21 @@ impl<'tcx> CallSiteIndex<'tcx> {
             arg_field_offsets,
             dest_local: destination.local.as_usize(),
         };
-        let parent = self.blocks[call_block].0;
-        let instantiated_body = instance.map(|instance| {
-            let mir = self.tcx.optimized_mir(instance.def_id());
-            instance.instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                TypingEnv::post_analysis(self.tcx, parent),
-                EarlyBinder::bind(self.tcx, mir.clone()),
-            )
-        });
+        let actual_parent = self.blocks[call_block].0;
+        let parent = if self.callee_bodies.contains_key(&actual_parent) {
+            self.blocks[0].0
+        } else {
+            actual_parent
+        };
+        let instantiated_body = self.callee_bodies.get(&callee).map(|body| (**body).clone())
+            .or_else(|| instance.map(|instance| {
+                let mir = self.tcx.optimized_mir(instance.def_id());
+                instance.instantiate_mir_and_normalize_erasing_regions(
+                    self.tcx,
+                    TypingEnv::post_analysis(self.tcx, parent),
+                    EarlyBinder::bind(self.tcx, mir.clone()),
+                )
+            }));
         let block_count = instantiated_body
             .as_ref()
             .map(|body| body.basic_blocks.len())

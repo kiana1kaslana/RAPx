@@ -46,9 +46,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     let terminator = body.basic_blocks[*block].terminator();
                     crate::verify::vm::rules::exec_terminator(self, terminator, *switch_succ);
                 }
-                RelevantItem::CalleeEntry { callee, args, consts, field_offsets } => {
+                RelevantItem::CalleeEntry { callee, body, args, consts, field_offsets } => {
                     self.active_mir_location = None;
-                    self.handle_callee_entry(*callee, args, consts, field_offsets);
+                    self.handle_callee_entry(*callee, *body, args, consts, field_offsets);
                 }
                 RelevantItem::CalleeExit { dest } => {
                     self.active_mir_location = None;
@@ -68,6 +68,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     fn handle_callee_entry(
         &mut self,
         callee: DefId,
+        body: Option<&'tcx rustc_middle::mir::Body<'tcx>>,
         arg_locals: &[usize],
         arg_consts: &[(usize, crate::analysis::path::CallConstArg)],
         arg_field_offsets: &[usize],
@@ -89,6 +90,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let saved_writes = std::mem::take(&mut self.inline.deferred_field_writes);
         self.inline.path_saved_deferred_writes.push(saved_writes);
         let frame = self.save_frame();
+        self.frame_body = body;
 
         // Collect the caller argument fields from the saved map, so the callee's
         // parameters inherit them (e.g. NonZero's non-zero inner value, and an

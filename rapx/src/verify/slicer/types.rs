@@ -8,6 +8,7 @@
 use crate::verify::{contract, path_extractor::Path};
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::BasicBlock;
+use rustc_middle::mir::Body;
 
 /// A proof goal for one `(checkpoint, path)` item: the set of relevant items
 /// plus the path context needed to verify the target property.
@@ -45,6 +46,7 @@ pub(crate) enum RelevantItem<'tcx> {
     /// `field_offsets` holds callee parameters bound to an `offset_of!` const.
     CalleeEntry {
         callee: DefId,
+        body: Option<&'tcx Body<'tcx>>,
         args: Vec<usize>,
         consts: Vec<(usize, crate::analysis::path::CallConstArg)>,
         field_offsets: Vec<usize>,

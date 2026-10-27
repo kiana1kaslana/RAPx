@@ -17,6 +17,7 @@ use crate::analysis::dataflow::types::DataflowGraph;
 use super::super::{contract, path_extractor::Path, relevance::bind_callsite_roots};
 use crate::helpers::def_use::RelevantPlaces;
 use crate::verify::checkpoint::{Checkpoint, CheckpointKind, CheckpointLocation};
+use crate::verify::target::CalleeBodies;
 
 use crate::analysis::path::{PathNode, PathTree};
 
@@ -34,6 +35,7 @@ pub(crate) struct BackwardSlicer<'tcx> {
     pub(in crate::verify::slicer) tcx: TyCtxt<'tcx>,
     caller_def_id: DefId,
     instance_body: Option<&'tcx Body<'tcx>>,
+    callee_bodies: CalleeBodies<'tcx>,
 }
 
 impl<'tcx> BackwardSlicer<'tcx> {
@@ -42,12 +44,15 @@ impl<'tcx> BackwardSlicer<'tcx> {
         tcx: TyCtxt<'tcx>,
         caller_def_id: DefId,
         instance_body: Option<&'tcx Body<'tcx>>,
+        callee_bodies: CalleeBodies<'tcx>,
     ) -> Self {
-        Self { tcx, caller_def_id, instance_body }
+        Self { tcx, caller_def_id, instance_body, callee_bodies }
     }
 
     pub(in crate::verify::slicer) fn body_for(&self, def_id: DefId) -> &'tcx Body<'tcx> {
         if def_id == self.caller_def_id && let Some(body) = self.instance_body {
+            body
+        } else if let Some(body) = self.callee_bodies.get(&def_id) {
             body
         } else {
             self.tcx.optimized_mir(def_id)
@@ -124,7 +129,10 @@ impl<'tcx> BackwardSlicer<'tcx> {
         let mut def_ids: HashSet<DefId> = tree.block_fns().iter().map(|(d, _)| *d).collect();
         def_ids.insert(caller);
         for d in def_ids {
-            if d == self.caller_def_id && let Some(body) = self.instance_body {
+            if (d == self.caller_def_id && self.instance_body.is_some())
+                || self.callee_bodies.contains_key(&d)
+            {
+                let body = self.body_for(d);
                 bodies.insert(d, body);
                 flows.insert(d, build_dataflow_graph_from_body(d, body));
             } else {

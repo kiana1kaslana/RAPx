@@ -25,7 +25,11 @@ use rustc_hir::{
     def_id::{DefId, LocalDefId},
     intravisit::{FnKind, Visitor},
 };
-use rustc_middle::{hir::nested_filter, ty::Instance, ty::TyCtxt};
+use rustc_middle::{
+    hir::nested_filter,
+    mir::{Body, TerminatorKind},
+    ty::{EarlyBinder, Instance, InstanceKind, TyCtxt, TypingEnv},
+};
 use rustc_span::Span;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -49,6 +53,7 @@ pub(crate) type FnContracts<'tcx> = Vec<Property<'tcx>>;
 
 /// A list of parsed struct invariants.
 pub(crate) type StructInvariants<'tcx> = Vec<Property<'tcx>>;
+pub(crate) type CalleeBodies<'tcx> = FxHashMap<DefId, &'tcx Body<'tcx>>;
 
 /// Collected verification data for a single function under analysis.
 ///
@@ -84,6 +89,8 @@ pub(crate) struct FunctionTarget<'tcx> {
 
     /// Instantiated MIR shared by path extraction, slicing, and symbolic replay.
     pub body: Option<&'tcx rustc_middle::mir::Body<'tcx>>,
+    /// Unique direct generic callees instantiated in the root's parameter environment.
+    pub callee_bodies: CalleeBodies<'tcx>,
 
     /// Owning struct when this function is an associated method (e.g.
     /// `impl MyStruct { fn foo(...) }`).  `None` for free functions.
@@ -723,6 +730,51 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
                 rustc_middle::ty::EarlyBinder::bind(self.tcx, mir.clone()),
             ))
         });
+        let mut callee_bodies = CalleeBodies::default();
+        if let Some(root_body) = body {
+            let mut instances = FxHashMap::default();
+            let mut conflicting = HashSet::new();
+            for block in root_body.basic_blocks.iter() {
+                let TerminatorKind::Call { func, .. } = &block.terminator().kind else {
+                    continue;
+                };
+                let Some(callee) = crate::helpers::mir_utils::dep_callee_resolved_def_id(
+                    self.tcx, def_id, func,
+                ) else {
+                    continue;
+                };
+                if !self.tcx.is_mir_available(callee)
+                    || !crate::helpers::mir_utils::has_direct_unmodeled_generic_call(self.tcx, callee)
+                {
+                    continue;
+                }
+                let Some(inst) = crate::helpers::mir_utils::resolve_callee_instance(
+                    self.tcx, def_id, func,
+                ) else {
+                    continue;
+                };
+                if !matches!(inst.def, InstanceKind::Item(_)) || inst.def_id() != callee {
+                    continue;
+                }
+                if let Some(previous) = instances.insert(callee, inst)
+                    && previous != inst
+                {
+                    conflicting.insert(callee);
+                }
+            }
+            for (callee, inst) in instances {
+                if conflicting.contains(&callee) {
+                    continue;
+                }
+                let mir = self.tcx.optimized_mir(callee).clone();
+                let instantiated = inst.instantiate_mir_and_normalize_erasing_regions(
+                    self.tcx,
+                    TypingEnv::post_analysis(self.tcx, def_id),
+                    EarlyBinder::bind(self.tcx, mir),
+                );
+                callee_bodies.insert(callee, &*self.tcx.arena.alloc(instantiated));
+            }
+        }
         let checkpoints = collect_unsafe_callsites(self.tcx, def_id);
         let unsafe_callees: HashSet<_> = checkpoints
             .iter()
@@ -773,6 +825,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
         FunctionTarget {
             def_id,
             body,
+            callee_bodies,
             owner_struct_def_id,
             checkpoints,
             callee_requires,
@@ -1381,7 +1434,9 @@ impl<'tcx> PrepareTargets<'tcx> {
             return path_map;
         }
 
-        let tree = PathExtractor::new_with_body(self.tcx, target.def_id, 0, target.body).run();
+        let tree = PathExtractor::new_with_body(self.tcx, target.def_id, 0, target.body)
+            .with_callee_bodies(target.callee_bodies.clone())
+            .run();
 
         for checkpoint in &target.checkpoints {
             if let Some(callee_def_id) = checkpoint.callee {

@@ -626,10 +626,12 @@ pub(crate) struct TermCaches<'z3, 'tcx> {
 /// by MIR `Local`, which the callee reuses, so it must be swapped out for the
 /// duration of an inlined callee and swapped back afterwards.
 #[derive(Clone)]
-pub(crate) struct FrameState {
+pub(crate) struct FrameState<'tcx> {
     /// The function whose body we execute (the MIR is derived via
     /// [`VmState::body`]).
     pub(crate) current_def_id: DefId,
+    /// Instantiated MIR associated with this saved frame, if any.
+    pub(crate) body: Option<&'tcx Body<'tcx>>,
 
     /// The stack allocation backing each local's place (lvalue identity). A
     /// local's whole value lives at `path == []` and its field values at
@@ -657,12 +659,10 @@ pub(crate) struct VmState<'z3, 'tcx> {
     instance_body: Option<&'tcx Body<'tcx>>,
     /// MIR for the active frame when it was instantiated at a callsite.
     pub(crate) frame_body: Option<&'tcx Body<'tcx>>,
-    /// Body overrides parked by `save_frame` for path and recursive inlining.
-    saved_frame_bodies: Vec<Option<&'tcx Body<'tcx>>>,
 
     // ── Frame-scoped state (swapped on inline entry/exit; the exact set
     //    captured by [`Self::save_frame`])
-    pub(crate) current_frame: FrameState,
+    pub(crate) current_frame: FrameState<'tcx>,
 
     // ── Path-scoped state (accumulates across the whole path, including
     //    inlined frames)
@@ -670,7 +670,7 @@ pub(crate) struct VmState<'z3, 'tcx> {
     /// (`CalleeEntry`/`CalleeExit` items).  Together with [`Self::current_frame`]
     /// (the current frame) it forms the call stack: entering an inlined callee
     /// moves the current frame here, exiting restores it.
-    pub(crate) caller_frames: Vec<FrameState>,
+    pub(crate) caller_frames: Vec<FrameState<'tcx>>,
 
     pub(crate) active_method_calls: Vec<Option<super::method_cache::MethodSnapshot<'z3, 'tcx>>>,
     pub(crate) method_returns: Vec<super::method_cache::MethodReturn<'z3, 'tcx>>,
@@ -730,9 +730,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             root_def_id: caller_def_id,
             instance_body,
             frame_body: instance_body,
-            saved_frame_bodies: Vec::new(),
             current_frame: FrameState {
                 current_def_id: caller_def_id,
+                body: instance_body,
                 local_alloc: FxHashMap::default(),
             },
             caller_frames: Vec::default(),
@@ -789,18 +789,18 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// [`FrameState`] (function identity, local bindings, and operand sources).
     /// Both inline mechanisms (`handle_callee_entry` in path replay and
     /// `exec_inline_call`) call this, so they can no longer drift apart.
-    pub(crate) fn save_frame(&mut self) -> FrameState {
-        self.saved_frame_bodies.push(self.frame_body.take());
+    pub(crate) fn save_frame(&mut self) -> FrameState<'tcx> {
         FrameState {
             current_def_id: self.current_frame.current_def_id,
+            body: self.frame_body.take(),
             local_alloc: std::mem::take(&mut self.current_frame.local_alloc),
         }
     }
 
     /// Restore the frame-scoped state after an inlined callee returns.
-    pub(crate) fn restore_frame(&mut self, frame: FrameState) {
+    pub(crate) fn restore_frame(&mut self, frame: FrameState<'tcx>) {
+        self.frame_body = frame.body;
         self.current_frame = frame;
-        self.frame_body = self.saved_frame_bodies.pop().expect("saved frame body");
     }
 
     /// Look up the whole value bound to a MIR local (its `path == []` slot in
@@ -1054,14 +1054,21 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     }
 
     /// The declared type of `local` in `frame`'s body.
-    fn frame_local_ty(&self, frame: &FrameState, local: Local) -> Ty<'tcx> {
-        self.body_for(frame.current_def_id).local_decls[local].ty
+    fn frame_local_ty(&self, frame: &FrameState<'tcx>, local: Local) -> Ty<'tcx> {
+        let body = frame.body
+            .or_else(|| {
+                (frame.current_def_id == self.root_def_id)
+                    .then_some(self.instance_body)
+                    .flatten()
+            })
+            .unwrap_or_else(|| self.tcx.optimized_mir(frame.current_def_id));
+        body.local_decls[local].ty
     }
 
     /// Enumerate the field paths materialized for `local` in a saved caller
     /// `frame`. Field values live in the path-scoped [`MemoryContent::values`], so they
     /// are read via `frame`'s `local_alloc` and declared type.
-    pub(crate) fn frame_field_paths(&self, frame: &FrameState, local: Local) -> Vec<Vec<usize>> {
+    pub(crate) fn frame_field_paths(&self, frame: &FrameState<'tcx>, local: Local) -> Vec<Vec<usize>> {
         let Some(&alloc_id) = frame.local_alloc.get(&local) else {
             return Vec::new();
         };
@@ -1078,7 +1085,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Read a field of `local` in a saved caller `frame`.
     pub(crate) fn frame_field_value(
         &self,
-        frame: &FrameState,
+        frame: &FrameState<'tcx>,
         local: Local,
         path: &[usize],
     ) -> Option<&VmValue<'z3, 'tcx>> {
@@ -1092,7 +1099,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// while the name → allocation binding lives in the saved `frame`.
     pub(crate) fn frame_local_value(
         &self,
-        frame: &FrameState,
+        frame: &FrameState<'tcx>,
         local: Local,
     ) -> Option<&VmValue<'z3, 'tcx>> {
         let alloc_id = *frame.local_alloc.get(&local)?;

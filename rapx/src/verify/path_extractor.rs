@@ -19,6 +19,7 @@ use rustc_middle::{
 };
 
 use super::call_index::CallSiteIndex;
+use super::target::CalleeBodies;
 use crate::analysis::path::{
     PathTree,
     graph::{PathEnumerator, PathGraph},
@@ -47,6 +48,7 @@ pub(crate) struct PathExtractor<'tcx> {
     allow_repeat: usize,
     /// Instantiated caller MIR, shared with the slicer and VM when available.
     body: Option<&'tcx rustc_middle::mir::Body<'tcx>>,
+    callee_bodies: CalleeBodies<'tcx>,
     coverage_targets: FxHashSet<usize>,
 }
 impl<'tcx> PathExtractor<'tcx> {
@@ -69,8 +71,14 @@ impl<'tcx> PathExtractor<'tcx> {
             def_id,
             allow_repeat,
             body,
+            callee_bodies: CalleeBodies::default(),
             coverage_targets: FxHashSet::default(),
         }
+    }
+
+    pub(crate) fn with_callee_bodies(mut self, bodies: CalleeBodies<'tcx>) -> Self {
+        self.callee_bodies = bodies;
+        self
     }
 
     pub(crate) fn with_checkpoints(mut self, checkpoints: &[CheckpointLocation]) -> Self {
@@ -93,7 +101,12 @@ impl<'tcx> PathExtractor<'tcx> {
         let caller_paths = PathEnumerator::new(&caller_graph)
             .with_coverage_targets(self.coverage_targets)
             .enumerate_paths_repeat(self.allow_repeat);
-        let mut call_index = CallSiteIndex::new(self.tcx, self.def_id, self.body.cloned());
+        let mut call_index = CallSiteIndex::new(
+            self.tcx,
+            self.def_id,
+            self.body.cloned(),
+            self.callee_bodies,
+        );
         call_index.collect();
         let mut tree = PathComposer::new(&call_index, self.allow_repeat).compose(&caller_paths);
         tree.mark_structural();
