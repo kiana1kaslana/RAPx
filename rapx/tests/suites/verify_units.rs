@@ -629,6 +629,7 @@ fn unsupported_mir_01() {
     let block = extract_block_after(&output, "function: unknown_inline_asm_write");
     assert_contain(block, "  unsupported operations:");
     assert_contain(block, "TerminatorKind::InlineAsm");
+    assert_contain(block, "asm!(\"xor {0:e}, {0:e}\"");
     let block = extract_block_after(&output, "function: unknown_external_call_without_mir");
     assert_contain(block, "Unknown (MIR unavailable)");
     assert_contain(block, "  unsupported operations:");

@@ -45,12 +45,18 @@ pub(super) fn exec_statement<'z3, 'tcx>(state: &mut VmState<'z3, 'tcx>, stmt: &S
         kind if mir_support::ignored_statement(kind) => "Ignored",
         _ => {
             let rendered = format!("{:?}", stmt.kind);
-            state.record_unsupported(&format!("StatementKind::{}", mir_variant(&rendered)));
+            state.record_unsupported(&format!(
+                "StatementKind::{}: {rendered}",
+                mir_variant(&rendered)
+            ));
             "Unsupported"
         }
     };
     if !was_unsupported && state.unsupported_mir && state.unsupported_details.is_empty() {
-        state.record_unsupported(&format!("StatementKind::{name} (model incomplete)"));
+        state.record_unsupported(&format!(
+            "StatementKind::{name} (model incomplete): {:?}",
+            stmt.kind
+        ));
     }
     log::trace!("vm statement rule: {name}");
 }
@@ -93,7 +99,10 @@ pub(super) fn exec_terminator<'z3, 'tcx>(
         kind if mir_support::ignored_terminator(kind) => "Ignored",
         _ => {
             let rendered = format!("{:?}", term.kind);
-            state.record_unsupported(&format!("TerminatorKind::{}", mir_variant(&rendered)));
+            state.record_unsupported(&format!(
+                "TerminatorKind::{}: {rendered}",
+                mir_variant(&rendered)
+            ));
             "Unsupported"
         }
     };
@@ -102,7 +111,10 @@ pub(super) fn exec_terminator<'z3, 'tcx>(
         && state.unsupported_details.is_empty()
         && state.missing_mir.len() == previous_missing_mir
     {
-        state.record_unsupported(&format!("TerminatorKind::{name} (model incomplete)"));
+        state.record_unsupported(&format!(
+            "TerminatorKind::{name} (model incomplete): {:?}",
+            term.kind
+        ));
     }
     log::trace!("vm terminator rule: {name}");
 }
@@ -155,7 +167,7 @@ pub(super) fn eval_rvalue<'z3, 'tcx>(
         Rvalue::Reborrow(_, _, source) => ("Reborrow", rvalue::eval_reborrow(state, place, source)),
         _ => {
             let rendered = format!("{rv:?}");
-            state.record_unsupported(&format!("Rvalue::{}", mir_variant(&rendered)));
+            state.record_unsupported(&format!("Rvalue::{}: {rendered}", mir_variant(&rendered)));
             (
                 "Unsupported",
                 rvalue::eval_fresh_value(state, place, "unsupported_rvalue"),
@@ -163,7 +175,7 @@ pub(super) fn eval_rvalue<'z3, 'tcx>(
         }
     };
     if !was_unsupported && state.unsupported_mir && state.unsupported_details.is_empty() {
-        state.record_unsupported(&format!("Rvalue::{name} (model incomplete)"));
+        state.record_unsupported(&format!("Rvalue::{name} (model incomplete): {rv:?}"));
     }
     log::trace!("vm rvalue rule: {name}");
     value
