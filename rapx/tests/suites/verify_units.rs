@@ -663,6 +663,9 @@ fn intrinsic_effects_01() {
     let block = extract_block_after(&output, "function: unsound_after_write_bytes");
     assert_contain(block, "bb1 -> need_nonzero");
     assert_contain(block, "ValidNum | Failed");
+    let block = extract_block_after(&output, "function: unknown_after_float_to_int");
+    assert_contain(block, "Unknown (opaque call controls branch)");
+    assert_contain(block, "opaque call result controls SwitchInt");
 }
 
 #[test]

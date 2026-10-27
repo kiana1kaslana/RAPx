@@ -219,9 +219,15 @@ impl PropertyChecker {
             details.sort();
             let mut missing_mir: Vec<_> = vm_state.missing_mir.iter().cloned().collect();
             missing_mir.sort();
+            let mut opaque_control_flow: Vec<_> =
+                vm_state.opaque_control_flow.iter().cloned().collect();
+            opaque_control_flow.sort();
             let mut reasons = Vec::new();
             if !missing_mir.is_empty() {
                 reasons.push(UnknownReason::MissingMir(missing_mir));
+            }
+            if !opaque_control_flow.is_empty() {
+                reasons.push(UnknownReason::OpaqueControlFlow(opaque_control_flow));
             }
             if details.is_empty() && reasons.is_empty() {
                 details.push("MIR operation could not be modeled (location unavailable)".to_string());

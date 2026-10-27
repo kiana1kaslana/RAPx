@@ -687,11 +687,13 @@ pub(crate) struct VmState<'z3, 'tcx> {
     /// pushed/popped on inline entry/exit).
     pub(crate) inline: InlineCtx<'z3, 'tcx>,
 
-    /// A retained MIR operation with a possible state effect has no transfer rule.
+    /// A retained operation or branch depends on behavior the VM cannot prove.
     pub(crate) unsupported_mir: bool,
     /// MIR forms or call effects that this execution could not model.
     pub(crate) unsupported_details: FxHashSet<String>,
     pub(crate) missing_mir: FxHashSet<String>,
+    /// Branches that depend on a deliberately opaque call result.
+    pub(crate) opaque_control_flow: FxHashSet<String>,
     pub(crate) active_mir_location: Option<String>,
     pub(crate) path_infeasible: bool,
 
@@ -743,6 +745,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             unsupported_mir: false,
             unsupported_details: FxHashSet::default(),
             missing_mir: FxHashSet::default(),
+            opaque_control_flow: FxHashSet::default(),
             active_mir_location: None,
             path_infeasible: false,
             incomplete_inline_branch: false,
@@ -781,6 +784,13 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     pub(crate) fn record_missing_mir(&mut self, callee: DefId) {
         self.unsupported_mir = true;
         self.missing_mir.insert(self.tcx.def_path_str(callee));
+    }
+
+    pub(crate) fn record_opaque_control_flow(&mut self, operation: &str) {
+        self.unsupported_mir = true;
+        let location = self.active_mir_location.as_deref().unwrap_or("unknown location");
+        self.opaque_control_flow
+            .insert(format!("{location}: opaque call result controls {operation}"));
     }
 
     /// Capture the frame-scoped state before switching to an inlined callee.

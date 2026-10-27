@@ -110,6 +110,7 @@ pub(super) fn exec_terminator<'z3, 'tcx>(
         && state.unsupported_mir
         && state.unsupported_details.is_empty()
         && state.missing_mir.len() == previous_missing_mir
+        && state.opaque_control_flow.is_empty()
     {
         state.record_unsupported(&format!(
             "TerminatorKind::{name} (model incomplete): {:?}",

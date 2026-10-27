@@ -30,7 +30,7 @@ pub(crate) fn exec_switch_int<'z3, 'tcx>(
         }
     }
     if VmState::term_involves(&state.inline.opaque_intrinsic_terms, &discr_val.z3_term) {
-        state.unsupported_mir = true;
+        state.record_opaque_control_flow("SwitchInt");
     }
 
     // If the discriminator is a comparison result, record the direct boolean
@@ -87,7 +87,7 @@ pub(crate) fn exec_assert<'z3, 'tcx>(
 ) {
     let cond_val = state.value_of_operand(cond);
     if VmState::term_involves(&state.inline.opaque_intrinsic_terms, &cond_val.z3_term) {
-        state.unsupported_mir = true;
+        state.record_opaque_control_flow("Assert");
     }
     // If the asserted operand is a comparison result, record the direct boolean
     // condition (`idx < len`) alongside the ite-encoded fact, so the SMT solver

@@ -22,6 +22,7 @@ pub(crate) enum UnknownReason {
     InlineDepthExceeded,
     UnsupportedMir(Vec<String>),
     MissingMir(Vec<String>),
+    OpaqueControlFlow(Vec<String>),
     IncompleteInlineBranch,
     UnmodeledIntrinsic(String),
     UnresolvedUnsafeCall,
@@ -48,6 +49,7 @@ impl UnknownReason {
             Self::InlineDepthExceeded => "inline depth".to_string(),
             Self::UnsupportedMir(_) => "unsupported MIR".to_string(),
             Self::MissingMir(_) => "MIR unavailable".to_string(),
+            Self::OpaqueControlFlow(_) => "opaque call controls branch".to_string(),
             Self::IncompleteInlineBranch => "incomplete inline branch".to_string(),
             Self::UnmodeledIntrinsic(_) => "unmodeled intrinsic".to_string(),
             Self::UnresolvedUnsafeCall => "unresolved unsafe call".to_string(),
@@ -72,6 +74,7 @@ impl UnknownReason {
                         .map(|callee| format!("MIR unavailable: {callee}")),
                 );
             }
+            Self::OpaqueControlFlow(details) => out.extend(details.iter().cloned()),
             Self::UnmodeledIntrinsic(name) => out.push(format!("intrinsic: {name}")),
             Self::Multiple(reasons) => {
                 for reason in reasons {
