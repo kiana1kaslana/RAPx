@@ -315,10 +315,7 @@ fn is_fn_solvable<'tcx>(fn_did: DefId, tcx: TyCtxt<'tcx>) -> bool {
         let pred = pred.skip_norm_wip();
         if let Some(pred) = pred.as_trait_clause() {
             let trait_did = pred.skip_binder().trait_ref.def_id;
-            if lang_api::matches(tcx, trait_did, LangItem::Fn)
-                || lang_api::matches(tcx, trait_did, LangItem::FnMut)
-                || lang_api::matches(tcx, trait_did, LangItem::FnOnce)
-            {
+            if lang_api::is_fn_trait(tcx, trait_did) {
                 return false;
             }
         }

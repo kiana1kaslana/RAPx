@@ -14,6 +14,13 @@ pub(crate) fn matches(tcx: TyCtxt<'_>, def_id: DefId, item: LangItem) -> bool {
     tcx.is_lang_item(def_id, item)
 }
 
+/// Whether this is one of the three callable traits.
+pub(crate) fn is_fn_trait(tcx: TyCtxt<'_>, trait_id: DefId) -> bool {
+    matches(tcx, trait_id, LangItem::Fn)
+        || matches(tcx, trait_id, LangItem::FnMut)
+        || matches(tcx, trait_id, LangItem::FnOnce)
+}
+
 /// The plain `panic!` entry point, which only consumes a static message.
 pub(crate) fn is_panic_exit(tcx: TyCtxt<'_>, callee: DefId) -> bool {
     matches(tcx, callee, LangItem::Panic)
