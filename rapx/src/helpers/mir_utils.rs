@@ -380,8 +380,9 @@ pub(crate) fn has_direct_unmodeled_generic_call<'tcx>(
     if !tcx.is_mir_available(def_id) {
         return false;
     }
-    tcx.optimized_mir(def_id).basic_blocks.iter().any(|bb| {
-        let TerminatorKind::Call { func, .. } = &bb.terminator().kind else {
+    let body = tcx.optimized_mir(def_id);
+    body.basic_blocks.iter().any(|bb| {
+        let TerminatorKind::Call { func, destination, .. } = &bb.terminator().kind else {
             return false;
         };
         let Some(callee) = dep_callee_def_id(func) else {
@@ -392,6 +393,7 @@ pub(crate) fn has_direct_unmodeled_generic_call<'tcx>(
             .is_some()
             && dep_callee_resolved_def_id(tcx, def_id, func)
                 .is_none_or(|target| !tcx.is_mir_available(target))
+            && !has_callback_effect(tcx, callee, body.local_decls[destination.local].ty)
             && !crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee))
     })
 }
@@ -409,7 +411,7 @@ fn has_unmodeled_generic_call_rec<'tcx>(
         let Some(term) = &bb.terminator else {
             continue;
         };
-        let TerminatorKind::Call { func, .. } = &term.kind else {
+        let TerminatorKind::Call { func, destination, .. } = &term.kind else {
             continue;
         };
         let Some(callee) = dep_callee_def_id(func) else {
@@ -425,6 +427,7 @@ fn has_unmodeled_generic_call_rec<'tcx>(
             // executable MIR after resolving this call.
             if dep_callee_resolved_def_id(tcx, def_id, func)
                 .is_none_or(|target| !tcx.is_mir_available(target))
+                && !has_callback_effect(tcx, callee, body.local_decls[destination.local].ty)
                 && !crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee))
             {
                 return true;
@@ -438,6 +441,12 @@ fn has_unmodeled_generic_call_rec<'tcx>(
         }
     }
     false
+}
+
+fn has_callback_effect(tcx: TyCtxt<'_>, callee: DefId, result_ty: Ty<'_>) -> bool {
+    tcx.trait_of_assoc(callee)
+        .is_some_and(|trait_id| lang_api::is_fn_trait(tcx, trait_id))
+        && crate::verify::call_summary::callback::supports_result(result_ty)
 }
 
 /// Resolve a trait-method callee to its concrete impl `DefId`. Returns `None`

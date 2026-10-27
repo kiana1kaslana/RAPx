@@ -316,6 +316,13 @@ impl PropertyChecker {
                     PropertyArg::Expr(ContractExpr::Const(index)) => usize::try_from(*index).ok(),
                     _ => None,
                 });
+                if self
+                    .target_value(vm_state, checkpoint, property)
+                    .and_then(|value| value.provenance_alloc_id())
+                    .is_some_and(|id| vm_state.callback_may_drop.contains(&vm_state.root_alloc(id)))
+                {
+                    return CheckResult::Unknown(UnknownReason::CallbackMayInvalidate);
+                }
                 if atom.kind == PropertyKind::Init
                     && (self
                         .target_value(vm_state, checkpoint, property)

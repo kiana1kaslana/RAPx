@@ -2,7 +2,7 @@
 //! arguments stay relevant) and forward effect (what facts a call adds).
 pub(crate) mod effects;
 pub(crate) mod dependencies;
-mod callback;
+pub(crate) mod callback;
 
 use rustc_middle::{
     mir::{Body, Operand},

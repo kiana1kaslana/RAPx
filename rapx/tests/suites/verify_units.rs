@@ -623,7 +623,11 @@ fn invariant_unknown_01() {
 #[test]
 fn unsupported_mir_01() {
     let output = run_with_args("verify_units/unsupported_mir_01", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [0, 1, 5]);
+    assert_result_counts(&output, [1, 2, 6]);
+    assert_function_result(&output, "callback_bool_may_zero_argument", "UNSOUND");
+    assert_function_result(&output, "callback_bool_preserves_private_local", "SOUND");
+    assert_function_result(&output, "callback_may_drop_unborrowed", "UNKNOWN");
+    assert_contain(&output, "Unknown (callback may invalidate allocation)");
     assert_contain(&output, "Unknown (unsupported MIR)");
     assert_contain(&output, "Unknown (unresolved unsafe call)");
     let block = extract_block_after(&output, "function: unknown_inline_asm_write");

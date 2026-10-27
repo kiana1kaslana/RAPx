@@ -2,8 +2,8 @@
 //!
 //! Rust-call bundles the callable's arguments in a tuple. Inspect the actual
 //! call operands rather than the generic `FnMut::call_mut` signature so nested
-//! `&mut T` arguments are included. This is only a dependency estimate: the
-//! forward VM must still report the missing implementation as UNKNOWN.
+//! `&mut T` arguments are included. The forward VM models supported scalar
+//! returns separately and keeps unresolved argument shapes as UNKNOWN.
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
@@ -13,8 +13,14 @@ use rustc_middle::{
 
 use crate::compat::Spanned;
 use crate::def_ids::lang_api;
+use crate::verify::api_classify;
 
 use super::CallDependencySummary;
+
+pub(crate) fn supports_result(ty: Ty<'_>) -> bool {
+    matches!(ty.kind(), TyKind::Bool)
+        || matches!(ty.kind(), TyKind::Adt(def, _) if api_classify::is_std_ordering(def.did()))
+}
 
 pub(super) fn estimate<'tcx>(
     tcx: TyCtxt<'tcx>,

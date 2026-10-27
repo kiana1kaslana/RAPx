@@ -700,6 +700,9 @@ pub(crate) struct VmState<'z3, 'tcx> {
 
     pub(crate) incomplete_inline_branch: bool,
     pub(crate) possible_uninit_allocs: FxHashSet<AllocId>,
+    /// A callback may have dropped an owned allocation reachable through its
+    /// captures. Such an allocation cannot discharge later pointer checks.
+    pub(crate) callback_may_drop: FxHashSet<AllocId>,
 
     /// Root allocations of the `Alias` sources the caller's contract declares
     /// (a hazard like `Alias(self, ret)`, or a `Ptr2Ref` precondition like
@@ -750,6 +753,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             path_infeasible: false,
             incomplete_inline_branch: false,
             possible_uninit_allocs: FxHashSet::default(),
+            callback_may_drop: FxHashSet::default(),
             constraints,
             alias_hazard_allocs: FxHashSet::default(),
         }

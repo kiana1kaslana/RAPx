@@ -257,7 +257,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         } else if let Some(c) = callee {
             // `assert!` panic exits contain this diverging call. It cannot
             // change the caller's state before the unwind invariant check.
-            if !crate::def_ids::lang_api::is_panic_exit(self.tcx, c) {
+            if self.tcx.trait_of_assoc(c).is_some_and(|trait_id| {
+                crate::def_ids::lang_api::is_fn_trait(self.tcx, trait_id)
+            }) {
+                self.apply_callback_effect(&arg_values, &caller_arg_locals, destination, c);
+            } else if !crate::def_ids::lang_api::is_panic_exit(self.tcx, c) {
                 self.record_missing_mir(c);
             }
         }
