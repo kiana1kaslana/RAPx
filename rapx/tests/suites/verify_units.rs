@@ -623,7 +623,7 @@ fn invariant_unknown_01() {
 #[test]
 fn unsupported_mir_01() {
     let output = run_with_args("verify_units/unsupported_mir_01", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [0, 1, 4]);
+    assert_result_counts(&output, [0, 1, 5]);
     assert_contain(&output, "Unknown (unsupported MIR)");
     assert_contain(&output, "Unknown (unresolved unsafe call)");
     let block = extract_block_after(&output, "function: unknown_inline_asm_write");
@@ -634,6 +634,9 @@ fn unsupported_mir_01() {
     assert_contain(block, "Unknown (MIR unavailable)");
     assert_contain(block, "  unsupported operations:");
     assert_contain(block, "MIR unavailable: external_clobber");
+    let block = extract_block_after(&output, "function: unknown_fnmut_writes_argument");
+    assert_contain(block, "Unknown (MIR unavailable)");
+    assert_contain(block, "FnMut::call_mut");
 }
 
 #[test]

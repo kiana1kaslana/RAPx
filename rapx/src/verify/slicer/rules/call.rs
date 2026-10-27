@@ -44,7 +44,7 @@ pub(crate) fn visit<'tcx>(
         }
     }
 
-    let summary = call_summary::dependency_summary(tcx, def_id, func, destination.local, args.len());
+    let summary = call_summary::dependency_summary(tcx, def_id, func, destination.local, args, body);
 
     if call_summary::effects::is_unmodeled_intrinsic(
         tcx,

@@ -26,6 +26,13 @@ pub fn unknown_external_call_without_mir() {
 }
 
 #[rapx::verify]
+pub fn unknown_fnmut_writes_argument<F: FnMut(&mut u32)>(mut callback: F) {
+    let mut value = 1_u32;
+    callback(&mut value);
+    unsafe { need_nonzero(value); }
+}
+
+#[rapx::verify]
 pub fn unsound_intrinsic_copy() {
     let source = 0_u32;
     let mut destination = 1_u32;

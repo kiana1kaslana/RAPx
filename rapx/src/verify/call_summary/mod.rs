@@ -2,12 +2,14 @@
 //! arguments stay relevant) and forward effect (what facts a call adds).
 pub(crate) mod effects;
 pub(crate) mod dependencies;
+mod callback;
 
 use rustc_middle::{
-    mir::Operand,
+    mir::{Body, Operand},
     ty::TyCtxt,
 };
 
+use crate::compat::Spanned;
 use crate::helpers::mir_utils;
 use crate::verify::api_classify::is_branch;
 
@@ -262,13 +264,18 @@ pub(crate) fn dependency_summary<'tcx>(
     caller: rustc_hir::def_id::DefId,
     func: &Operand<'tcx>,
     destination: rustc_middle::mir::Local,
-    arg_count: usize,
+    args: &[Spanned<Operand<'tcx>>],
+    body: &Body<'tcx>,
 ) -> CallDependencySummary {
+    let arg_count = args.len();
     let callee = mir_utils::dep_callee_def_id(func);
 
     // MIR dataflow first: works for local and cross-crate (`#[inline]`)
     // callees alike, no hand-written table needed.
     if let Some(callee) = callee {
+        if let Some(summary) = callback::estimate(tcx, callee, args, body) {
+            return summary;
+        }
         if arg_count > 0
             && (crate::verify::api_classify::is_iter_next(Some(callee))
                 || crate::verify::api_classify::is_range_next(Some(callee))

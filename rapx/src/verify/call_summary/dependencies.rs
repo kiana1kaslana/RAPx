@@ -19,31 +19,32 @@ use crate::analysis::path::graph::{PathEnumerator, PathGraph};
 use crate::helpers::mir_utils as helpers;
 
 /// Trace backward from an operand (inner call arg) through Copy/Move/Cast/
-/// Ref/RawPtr assignments to the outer callee's argument local, returning its
-/// index. `Ref`/`RawPtr` are treated as data-flow too, which is an
+/// Ref/RawPtr/tuple assignments to the outer callee's argument locals.
+/// `Ref`/`RawPtr` are treated as data-flow too, which is an
 /// approximation (taking a reference is not a pure copy) but is adequate for
 /// wrapper recognition.
-fn trace_to_callee_arg<'tcx>(
-    body: &rustc_middle::mir::Body<'tcx>,
+fn trace_to_callee_args(
+    body: &rustc_middle::mir::Body<'_>,
     operand: &Operand<'_>,
-) -> Option<usize> {
-    let local = match operand {
-        Operand::Copy(place) | Operand::Move(place) => place.local,
-        _ => return None,
-    };
-    trace_local_to_callee_arg(body, local)
+) -> HashSet<usize> {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) => trace_local_to_callee_args(body, place.local),
+        _ => HashSet::new(),
+    }
 }
 
-fn trace_local_to_callee_arg(
+fn trace_local_to_callee_args(
     body: &rustc_middle::mir::Body<'_>,
     local: rustc_middle::mir::Local,
-) -> Option<usize> {
+) -> HashSet<usize> {
     let mut queue = VecDeque::from([local]);
     let mut seen = HashSet::from([local]);
+    let mut outer_args = HashSet::new();
     while let Some(current) = queue.pop_front() {
         let cidx = current.as_usize();
         if cidx >= 1 && cidx <= body.arg_count {
-            return Some(cidx - 1);
+            outer_args.insert(cidx - 1);
+            continue;
         }
         for bb in body.basic_blocks.iter() {
             for stmt in &bb.statements {
@@ -54,19 +55,27 @@ fn trace_local_to_callee_arg(
                 if dest != current {
                     continue;
                 }
-                let source = match &assign.1 {
+                let sources: Vec<_> = match &assign.1 {
                     Rvalue::Use(Operand::Copy(place), ..)
                     | Rvalue::Use(Operand::Move(place), ..)
                     | Rvalue::Cast(_, Operand::Copy(place), _)
                     | Rvalue::Cast(_, Operand::Move(place), _)
                     | Rvalue::Ref(_, _, place)
                     | Rvalue::RawPtr(_, place)
-                    | Rvalue::CopyForDeref(place) => place.local,
-                    _ => continue,
+                    | Rvalue::CopyForDeref(place) => vec![place.local],
+                    Rvalue::Aggregate(_, operands) => operands
+                        .iter()
+                        .filter_map(|operand| match operand {
+                            Operand::Copy(place) | Operand::Move(place) => Some(place.local),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
                 };
-                if !seen.contains(&source) {
-                    seen.insert(source);
-                    queue.push_back(source);
+                for source in sources {
+                    if seen.insert(source) {
+                        queue.push_back(source);
+                    }
                 }
             }
             let Some(terminator) = &bb.terminator else {
@@ -113,7 +122,7 @@ fn trace_local_to_callee_arg(
             }
         }
     }
-    None
+    outer_args
 }
 
 /// Use the existing dataflow graph to approximate callee return deps.
@@ -234,18 +243,16 @@ fn write_args_on_path<'tcx>(
         for stmt in &data.statements {
             if let StatementKind::Intrinsic(intrinsic) = &stmt.kind
                 && let NonDivergingIntrinsic::CopyNonOverlapping(copy) = &**intrinsic
-                && let Some(arg) = trace_to_callee_arg(body, &copy.dst)
             {
-                writes.insert(arg);
+                writes.extend(trace_to_callee_args(body, &copy.dst));
             }
             let StatementKind::Assign(assign) = &stmt.kind else {
                 continue;
             };
             let dest = &assign.0;
             if dest.projection.first() == Some(&ProjectionElem::Deref)
-                && let Some(arg) = trace_local_to_callee_arg(body, dest.local)
             {
-                writes.insert(arg);
+                writes.extend(trace_local_to_callee_args(body, dest.local));
             }
         }
 
@@ -267,21 +274,15 @@ fn write_args_on_path<'tcx>(
 
         // `ptr::write`-style writes: trace the pointer arg to a callee arg.
         if crate::verify::api_classify::is_ptr_write(helpers::dep_callee_def_id(func)) {
-            if let Some(pointer_arg) = args
-                .first()
-                .and_then(|arg| trace_to_callee_arg(body, &arg.node))
-            {
-                writes.insert(pointer_arg);
+            if let Some(pointer_arg) = args.first() {
+                writes.extend(trace_to_callee_args(body, &pointer_arg.node));
             }
             continue;
         }
 
         if crate::verify::api_classify::is_ptr_copy(helpers::dep_callee_def_id(func)) {
-            if let Some(destination_arg) = args
-                .get(1)
-                .and_then(|arg| trace_to_callee_arg(body, &arg.node))
-            {
-                writes.insert(destination_arg);
+            if let Some(destination_arg) = args.get(1) {
+                writes.extend(trace_to_callee_args(body, &destination_arg.node));
             }
             continue;
         }
@@ -298,13 +299,15 @@ fn write_args_on_path<'tcx>(
                 args.len(),
             )
             .map(|summary| summary.write_args.into_iter().collect::<HashSet<_>>())
+            .or_else(|| {
+                super::callback::estimate(tcx, nested, args, body)
+                    .map(|summary| summary.write_args.into_iter().collect::<HashSet<_>>())
+            })
             .or_else(|| write_args_rec(tcx, nested, depth + 1, memo))
         {
             for (i, arg) in args.iter().enumerate() {
-                if nested_writes.contains(&i)
-                    && let Some(outer) = trace_to_callee_arg(body, &arg.node)
-                {
-                    writes.insert(outer);
+                if nested_writes.contains(&i) {
+                    writes.extend(trace_to_callee_args(body, &arg.node));
                 }
             }
         }
