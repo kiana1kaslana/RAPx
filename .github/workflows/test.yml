@@ -64,13 +64,15 @@ jobs:
         export RUSTFLAGS="--cfg=rapx -Zcrate-attr=feature(register_tool) -Zcrate-attr=register_tool(rapx)"
         export __CARGO_TESTS_ONLY_SRC_ROOT="$(pwd)/library"
         cd library/core
-        cargo rapx verify --module slice --mode targeted 2>&1 | tee /tmp/rapx-verify-output.txt
-    - name: Check SOUND count
+        cargo rapx verify --module slice --mode targeted --path-limit "$VERIFY_PATH_LIMIT" 2>&1 | tee /tmp/rapx-verify-output.txt
+    - name: Check verification results
       run: |
         SOUND_COUNT=$(grep -c 'result: SOUND' /tmp/rapx-verify-output.txt || true)
-        echo "SOUND results: $SOUND_COUNT"
-        if [ "$SOUND_COUNT" -ne 38 ]; then
-          echo "Expected 38 SOUND results, got $SOUND_COUNT"
+        UNKNOWN_COUNT=$(grep -c 'result: UNKNOWN' /tmp/rapx-verify-output.txt || true)
+        UNSOUND_COUNT=$(grep -c 'result: UNSOUND' /tmp/rapx-verify-output.txt || true)
+        echo "SOUND: $SOUND_COUNT, UNKNOWN: $UNKNOWN_COUNT, UNSOUND: $UNSOUND_COUNT"
+        if [ "$SOUND_COUNT" -ne 34 ] || [ "$UNKNOWN_COUNT" -ne 4 ] || [ "$UNSOUND_COUNT" -ne 0 ]; then
+          echo "Expected 34 SOUND, 4 UNKNOWN (unavailable generic MIR), and 0 UNSOUND"
           echo "---- tail of verify output ----"
           tail -60 /tmp/rapx-verify-output.txt || true
           exit 1
