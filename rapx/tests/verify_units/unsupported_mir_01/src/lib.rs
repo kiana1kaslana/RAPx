@@ -4,6 +4,10 @@
 
 use std::arch::asm;
 
+unsafe extern "C" {
+    safe fn external_clobber(value: &mut u32);
+}
+
 #[rapx::requires(ValidNum(value != 0))]
 unsafe fn need_nonzero(value: u32) {}
 
@@ -11,6 +15,13 @@ unsafe fn need_nonzero(value: u32) {}
 pub fn unknown_inline_asm_write() {
     let mut value = 1_u32;
     unsafe { asm!("xor {reg:e}, {reg:e}", reg = inout(reg) value); }
+    unsafe { need_nonzero(value); }
+}
+
+#[rapx::verify]
+pub fn unknown_external_call_without_mir() {
+    let mut value = 1_u32;
+    external_clobber(&mut value);
     unsafe { need_nonzero(value); }
 }
 

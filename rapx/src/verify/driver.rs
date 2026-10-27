@@ -128,7 +128,12 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                     property_index: 0,
                     property: Property::new(self.tcx, self.target.def_id, "Unknown", &[]),
                     result: CheckResult::Unknown(if unmodeled_intrinsic {
-                        UnknownReason::UnmodeledIntrinsic
+                        UnknownReason::UnmodeledIntrinsic(
+                            view.checkpoint
+                                .callee
+                                .map(|id| self.tcx.def_path_str(id))
+                                .unwrap_or_else(|| "<unresolved>".to_string()),
+                        )
                     } else {
                         UnknownReason::UnresolvedUnsafeCall
                     }),

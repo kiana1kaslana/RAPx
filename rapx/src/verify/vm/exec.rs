@@ -26,22 +26,36 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     block,
                     statement_index,
                 } => {
+                    self.active_mir_location = Some(format!(
+                        "{} bb{} statement {}",
+                        self.tcx.def_path_str(*def_id),
+                        block.as_usize(),
+                        statement_index,
+                    ));
                     let body = self.tcx.optimized_mir(*def_id);
                     let statement = &body.basic_blocks[*block].statements[*statement_index];
                     crate::verify::vm::rules::exec_statement(self, statement);
                 }
                 RelevantItem::Terminator { def_id, block, switch_succ } => {
+                    self.active_mir_location = Some(format!(
+                        "{} bb{} terminator",
+                        self.tcx.def_path_str(*def_id),
+                        block.as_usize(),
+                    ));
                     let body = self.tcx.optimized_mir(*def_id);
                     let terminator = body.basic_blocks[*block].terminator();
                     crate::verify::vm::rules::exec_terminator(self, terminator, *switch_succ);
                 }
                 RelevantItem::CalleeEntry { callee, args, consts, field_offsets } => {
+                    self.active_mir_location = None;
                     self.handle_callee_entry(*callee, args, consts, field_offsets);
                 }
                 RelevantItem::CalleeExit { dest } => {
+                    self.active_mir_location = None;
                     self.handle_callee_exit(*dest);
                 }
                 RelevantItem::ContractFact { property } => {
+                    self.active_mir_location = None;
                     self.assert_contract_fact(property);
                 }
             }

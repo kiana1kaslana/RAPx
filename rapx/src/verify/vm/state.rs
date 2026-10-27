@@ -683,6 +683,10 @@ pub(crate) struct VmState<'z3, 'tcx> {
 
     /// A retained MIR operation with a possible state effect has no transfer rule.
     pub(crate) unsupported_mir: bool,
+    /// MIR forms or call effects that this execution could not model.
+    pub(crate) unsupported_details: FxHashSet<String>,
+    pub(crate) missing_mir: FxHashSet<String>,
+    pub(crate) active_mir_location: Option<String>,
     pub(crate) path_infeasible: bool,
 
 
@@ -722,6 +726,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             units: Vec::default(),
             inline: InlineCtx::default(),
             unsupported_mir: false,
+            unsupported_details: FxHashSet::default(),
+            missing_mir: FxHashSet::default(),
+            active_mir_location: None,
             path_infeasible: false,
             incomplete_inline_branch: false,
             possible_uninit_allocs: FxHashSet::default(),
@@ -733,6 +740,18 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// The MIR body of the current function, derived from `current_def_id`.
     pub(crate) fn body(&self) -> &'tcx Body<'tcx> {
         self.tcx.optimized_mir(self.current_frame.current_def_id)
+    }
+
+    pub(crate) fn record_unsupported(&mut self, operation: &str) {
+        self.unsupported_mir = true;
+        let location = self.active_mir_location.as_deref().unwrap_or("unknown location");
+        self.unsupported_details
+            .insert(format!("{location}: {operation}"));
+    }
+
+    pub(crate) fn record_missing_mir(&mut self, callee: DefId) {
+        self.unsupported_mir = true;
+        self.missing_mir.insert(self.tcx.def_path_str(callee));
     }
 
     /// Capture the frame-scoped state before switching to an inlined callee.

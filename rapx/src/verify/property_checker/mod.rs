@@ -215,7 +215,25 @@ impl PropertyChecker {
             return CheckResult::ProvedByRule;
         }
         if vm_state.unsupported_mir {
-            return CheckResult::Unknown(UnknownReason::UnsupportedMir);
+            let mut details: Vec<_> = vm_state.unsupported_details.iter().cloned().collect();
+            details.sort();
+            let mut missing_mir: Vec<_> = vm_state.missing_mir.iter().cloned().collect();
+            missing_mir.sort();
+            let mut reasons = Vec::new();
+            if !missing_mir.is_empty() {
+                reasons.push(UnknownReason::MissingMir(missing_mir));
+            }
+            if details.is_empty() && reasons.is_empty() {
+                details.push("MIR operation could not be modeled (location unavailable)".to_string());
+            }
+            if !details.is_empty() {
+                reasons.push(UnknownReason::UnsupportedMir(details));
+            }
+            return CheckResult::Unknown(if reasons.len() == 1 {
+                reasons.pop().unwrap()
+            } else {
+                UnknownReason::Multiple(reasons)
+            });
         }
         let result = self.check_inner(vm_state, checkpoint, property);
         if !structural || result.is_proved() {
@@ -319,7 +337,7 @@ impl PropertyChecker {
                     ),
                     (
                         &vm_state.inline.opaque_intrinsic_terms,
-                        UnknownReason::UnmodeledIntrinsic,
+                        UnknownReason::UnmodeledIntrinsic("opaque intrinsic result".to_string()),
                     ),
                 ] {
                     if self.atom_depends_on_inline_terms(vm_state, checkpoint, property, terms) {

@@ -11,7 +11,7 @@ use crate::compat::FxHashMap;
 use crate::helpers::fn_info::get_cons;
 use indexmap::IndexMap;
 
-use super::report::PropertyCheckResult;
+use super::report::{CheckResult, PropertyCheckResult};
 use crate::verify::checkpoint::CheckpointLocation;
 use crate::verify::contract::render::display_expr_user_friendly;
 
@@ -454,6 +454,21 @@ pub(crate) fn emit_results_and_verdict<'tcx>(
         rap_warn!("  result: UNSOUND ({failed} failed, {unknown} unknown)");
     } else {
         rap_warn!("  result: UNKNOWN ({unknown} unproved)");
+    }
+
+    let mut unsupported = Vec::new();
+    for item in all_results {
+        if let CheckResult::Unknown(reason) = &item.result {
+            reason.unsupported_details(&mut unsupported);
+        }
+    }
+    unsupported.sort();
+    unsupported.dedup();
+    if !unsupported.is_empty() {
+        rap_info!("  unsupported operations:");
+        for detail in unsupported {
+            rap_info!("    - {detail}");
+        }
     }
 }
 

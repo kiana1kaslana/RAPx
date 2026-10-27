@@ -189,7 +189,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
 
         if call_summary::effects::is_unmodeled_intrinsic(self.tcx, callee) {
-            self.unsupported_mir = true;
+            let name = callee
+                .map(|id| self.tcx.def_path_str(id))
+                .unwrap_or_else(|| "<unresolved>".to_string());
+            self.record_unsupported(&format!("intrinsic {name}"));
             return;
         }
 
@@ -214,6 +217,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }
         } else if let Some(c) = callee && self.tcx.is_mir_available(c) {
             self.exec_inline_call(c, &arg_values, &caller_arg_locals, destination);
+        } else if let Some(c) = callee {
+            self.record_missing_mir(c);
         }
         let result = self.local_value(destination).cloned();
         self.finish_method_call(method_call, result.as_ref());

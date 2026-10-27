@@ -20,9 +20,10 @@ pub(crate) enum UnknownReason {
     /// The inline recursion limit was reached, so the callee's body was not
     /// executed and the memory state is incomplete.
     InlineDepthExceeded,
-    UnsupportedMir,
+    UnsupportedMir(Vec<String>),
+    MissingMir(Vec<String>),
     IncompleteInlineBranch,
-    UnmodeledIntrinsic,
+    UnmodeledIntrinsic(String),
     UnresolvedUnsafeCall,
     MissingContract,
     UnsupportedProperty,
@@ -45,9 +46,10 @@ impl UnknownReason {
             Self::SmtUnknown(reason) if reason == "timeout" => "timeout".to_string(),
             Self::SmtUnknown(reason) => format!("SMT: {reason}"),
             Self::InlineDepthExceeded => "inline depth".to_string(),
-            Self::UnsupportedMir => "unsupported MIR".to_string(),
+            Self::UnsupportedMir(_) => "unsupported MIR".to_string(),
+            Self::MissingMir(_) => "MIR unavailable".to_string(),
             Self::IncompleteInlineBranch => "incomplete inline branch".to_string(),
-            Self::UnmodeledIntrinsic => "unmodeled intrinsic".to_string(),
+            Self::UnmodeledIntrinsic(_) => "unmodeled intrinsic".to_string(),
             Self::UnresolvedUnsafeCall => "unresolved unsafe call".to_string(),
             Self::MissingContract => "missing safety contract".to_string(),
             Self::UnsupportedProperty => "unsupported property".to_string(),
@@ -57,6 +59,22 @@ impl UnknownReason {
                 .map(Self::description)
                 .collect::<Vec<_>>()
                 .join("; "),
+        }
+    }
+
+    pub(crate) fn unsupported_details(&self, out: &mut Vec<String>) {
+        match self {
+            Self::UnsupportedMir(details) => out.extend(details.iter().cloned()),
+            Self::MissingMir(callees) => {
+                out.extend(callees.iter().map(|callee| format!("MIR unavailable: {callee}")));
+            }
+            Self::UnmodeledIntrinsic(name) => out.push(format!("intrinsic: {name}")),
+            Self::Multiple(reasons) => {
+                for reason in reasons {
+                    reason.unsupported_details(out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -236,7 +254,7 @@ mod tests {
         let timeout = CheckResult::Unknown(UnknownReason::SmtUnknown("timeout".into()));
         assert_eq!(timeout.label(), "Unknown (timeout)");
 
-        let combined = UnknownReason::UnsupportedMir
+        let combined = UnknownReason::UnsupportedMir(Vec::new())
             .merge(UnknownReason::SmtUnknown("incomplete".into()));
         assert_eq!(
             CheckResult::Unknown(combined).label(),
