@@ -1,13 +1,8 @@
 //! Hand-written effect models for standard-library APIs: a matcher + effect
 //! builder per API, looked up by [`lookup_effect`].
 
+use crate::def_ids::lang_api::{self, LangItem};
 use crate::helpers::mir_utils;
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
@@ -15,8 +10,8 @@ use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 use super::{
     BoundedArithmeticOp, CallDependencySummary, CallEffect, CallEffectSummary, OverflowOp,
 };
-use crate::def_ids::{intrinsic_api, nomir_api};
 use crate::def_ids::other_api;
+use crate::def_ids::{intrinsic_api, nomir_api};
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
 use crate::verify::api_classify;
 
@@ -73,22 +68,13 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
     ED!(intrinsic_api::is_integer_min, eff_cmp_min),
     ED!(intrinsic_api::is_integer_max, eff_return_max),
-    ED!(
-        intrinsic_api::is_saturating_add,
-        eff_saturating_add
-    ),
-    ED!(
-        intrinsic_api::is_saturating_sub,
-        eff_saturating_sub
-    ),
+    ED!(intrinsic_api::is_saturating_add, eff_saturating_add),
+    ED!(intrinsic_api::is_saturating_sub, eff_saturating_sub),
     ED!(intrinsic_api::is_unchecked_add, eff_return_add),
     ED!(intrinsic_api::is_unchecked_mul, eff_return_mul),
     ED!(intrinsic_api::is_wrapping_sub, eff_wrapping_sub),
     ED!(api_classify::is_ptr_copy, eff_copy_memory),
-    ED!(
-        intrinsic_api::is_typed_swap_nonoverlapping,
-        eff_swap_memory
-    ),
+    ED!(intrinsic_api::is_typed_swap_nonoverlapping, eff_swap_memory),
     ED!(intrinsic_api::is_write_bytes, eff_fill_bytes),
     ED!(
         api_classify::is_intrinsic_nonzero_preserving,
@@ -106,7 +92,10 @@ static REGISTRY: &[Entry] = &[
     // `slice::to_vec` copies the slice; model like `into_vec` so
     // `String::from(&str)`'s Vec buffer gets provenance.
     ED!(nomir_api::is_slice_to_vec, eff_vec_from_box),
-    ED!(api_classify::is_vec_with_capacity, eff_new_allocation_from_cap),
+    ED!(
+        api_classify::is_vec_with_capacity,
+        eff_new_allocation_from_cap
+    ),
     ED!(api_classify::is_into_boxed_slice, eff_box_from_vec),
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
@@ -165,7 +154,8 @@ pub(crate) fn is_symbolically_modeled(callee: Option<DefId>) -> bool {
 }
 
 pub(crate) fn is_unmodeled_intrinsic(tcx: TyCtxt<'_>, callee: Option<DefId>) -> bool {
-    callee.is_some_and(|id| intrinsic_api::is_intrinsic(tcx, id)) && !is_symbolically_modeled(callee)
+    callee.is_some_and(|id| intrinsic_api::is_intrinsic(tcx, id))
+        && !is_symbolically_modeled(callee)
 }
 
 pub(crate) fn intrinsic_dependency_summary<'tcx>(
@@ -590,10 +580,10 @@ fn layout_constant_effect<'tcx>(
 ) -> Option<CallEffect> {
     let ty = layout_call_ty(func)?;
     let callee = mir_utils::dep_callee_def_id(func)?;
-    let is_align = other_api::mem_align_of() == Some(callee)
-        || intrinsic_api::is_align_of(Some(callee));
-    let is_size = other_api::mem_size_of() == Some(callee)
-        || intrinsic_api::is_size_of(Some(callee));
+    let is_align =
+        other_api::mem_align_of() == Some(callee) || intrinsic_api::is_align_of(Some(callee));
+    let is_size =
+        other_api::mem_size_of() == Some(callee) || intrinsic_api::is_size_of(Some(callee));
     if !is_size && !is_align {
         return None;
     }
@@ -634,10 +624,10 @@ fn transparent_deref_peel<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> Opti
         return None;
     };
     let did = adt_def.did();
-    if tcx.is_lang_item(did, LangItem::ManuallyDrop) {
+    if lang_api::matches(tcx, did, LangItem::ManuallyDrop) {
         return Some(2);
     }
-    if tcx.is_lang_item(did, LangItem::MaybeDangling) {
+    if lang_api::matches(tcx, did, LangItem::MaybeDangling) {
         return Some(1);
     }
     None

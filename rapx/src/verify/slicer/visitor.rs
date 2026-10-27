@@ -14,11 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::analysis::dataflow::graph::build_dataflow_graph;
 use crate::analysis::dataflow::types::DataflowGraph;
 
-use super::super::{
-    contract,
-    path_extractor::{Path, PathStep},
-    relevance::bind_callsite_roots,
-};
+use super::super::{contract, path_extractor::Path, relevance::bind_callsite_roots};
 use crate::helpers::def_use::RelevantPlaces;
 use crate::verify::checkpoint::{Checkpoint, CheckpointKind, CheckpointLocation};
 
@@ -135,15 +131,10 @@ impl<'tcx> BackwardSlicer<'tcx> {
         for (block_path, backward_items, _relevant, _) in leaf_results {
             let mut items = backward_items;
             items.reverse();
-            let steps: Vec<PathStep> = block_path
-                .iter()
-                .map(|&b| PathStep::Block(BasicBlock::from(b)))
-                .chain(std::iter::once(PathStep::Checkpoint(checkpoint_loc)))
-                .collect();
             results.push(ProofGoal {
                 path: Path {
                     target: checkpoint_loc,
-                    steps,
+                    blocks: block_path,
                 },
                 items,
             });
@@ -326,9 +317,11 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 // locals back to the caller's argument locals so the caller's
                 // argument-producing statements stay relevant.
                 if let Some(binding) = tree.call_binding(node.block) {
-                    let (_, frame_arg_locals, parked) = frames
-                        .pop()
-                        .unwrap_or((def_id, binding.arg_locals.clone(), RelevantPlaces::new()));
+                    let (_, frame_arg_locals, parked) = frames.pop().unwrap_or((
+                        def_id,
+                        binding.arg_locals.clone(),
+                        RelevantPlaces::new(),
+                    ));
                     let mut caller_relevant = parked;
                     for (i, arg_local) in frame_arg_locals.iter().enumerate() {
                         if relevant.locals.contains(&Local::from_usize(i + 1)) {
@@ -399,7 +392,6 @@ impl<'tcx> BackwardSlicer<'tcx> {
             }
         }
     }
-
 }
 
 // ── property helpers ──────────────────────────────────────────────────

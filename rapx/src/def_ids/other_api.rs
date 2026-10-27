@@ -30,13 +30,8 @@
 //!   (`rap_warn!`) instead of panicking, so an entry with no matching path
 //!   simply yields `None`.
 
+use super::lang_api::{self, LangItem};
 use indexmap::IndexMap;
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
 use rustc_public::{CrateDef, rustc_internal};
@@ -65,7 +60,10 @@ pub fn is_slice_get(callee: Option<DefId>) -> bool {
 }
 
 pub fn is_ub_check(tcx: TyCtxt<'_>, callee: DefId) -> bool {
-    if !matches!(tcx.crate_name(callee.krate).as_str(), "core" | "alloc" | "std") {
+    if !matches!(
+        tcx.crate_name(callee.krate).as_str(),
+        "core" | "alloc" | "std"
+    ) {
         return false;
     }
     let path = tcx.def_path_str(callee);
@@ -185,8 +183,9 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             // sugar): matched by lang-item trait container, not by def_path.
             if let Some(assoc) = tcx.opt_associated_item(did)
                 && let Some(trait_id) = assoc.trait_container(tcx)
-                && (tcx.is_lang_item(trait_id, LangItem::Index) && assoc.name().as_str() == "index"
-                    || tcx.is_lang_item(trait_id, LangItem::IndexMut)
+                && (lang_api::matches(tcx, trait_id, LangItem::Index)
+                    && assoc.name().as_str() == "index"
+                    || lang_api::matches(tcx, trait_id, LangItem::IndexMut)
                         && assoc.name().as_str() == "index_mut")
             {
                 methods.index_fns.push(did);
@@ -309,31 +308,70 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             if name.ends_with("::gcd") {
                 methods.gcd.push(did);
             }
-            if matches!(name.as_str(), "std::ptr::null" | "std::ptr::null_mut"
-                | "core::ptr::null" | "core::ptr::null_mut"
-                | "ptr::null" | "ptr::null_mut") {
+            if matches!(
+                name.as_str(),
+                "std::ptr::null"
+                    | "std::ptr::null_mut"
+                    | "core::ptr::null"
+                    | "core::ptr::null_mut"
+                    | "ptr::null"
+                    | "ptr::null_mut"
+            ) {
                 methods.null_ptr.push(did);
             }
         }
     }
 
     methods.as_ptr_like = [
-        slice_as_ptr(), slice_as_mut_ptr(), str_as_ptr(), str_as_mut_ptr(),
-        vec_as_ptr(), vec_as_mut_ptr(), cstr_as_ptr(), nonnull_as_ptr(),
-        nonnull_slice_as_mut_ptr(), box_as_ptr(), box_as_mut_ptr(),
-        maybe_uninit_as_ptr(), maybe_uninit_as_mut_ptr(), arc_as_ptr(), rc_as_ptr(),
-        const_ptr_slice_as_ptr(), mut_ptr_slice_as_mut_ptr(),
-    ].into_iter().flatten().collect();
-    methods.ptr_add = [
-        const_ptr_byte_add(), mut_ptr_byte_add(), nonnull_byte_add(),
-    ].into_iter().flatten().collect();
+        slice_as_ptr(),
+        slice_as_mut_ptr(),
+        str_as_ptr(),
+        str_as_mut_ptr(),
+        vec_as_ptr(),
+        vec_as_mut_ptr(),
+        cstr_as_ptr(),
+        nonnull_as_ptr(),
+        nonnull_slice_as_mut_ptr(),
+        box_as_ptr(),
+        box_as_mut_ptr(),
+        maybe_uninit_as_ptr(),
+        maybe_uninit_as_mut_ptr(),
+        arc_as_ptr(),
+        rc_as_ptr(),
+        const_ptr_slice_as_ptr(),
+        mut_ptr_slice_as_mut_ptr(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    methods.ptr_add = [const_ptr_byte_add(), mut_ptr_byte_add(), nonnull_byte_add()]
+        .into_iter()
+        .flatten()
+        .collect();
     methods.known_nonnull = [
-        slice_as_ptr(), slice_as_mut_ptr(), str_as_ptr(), str_as_mut_ptr(),
-        vec_as_ptr(), vec_as_mut_ptr(), cstr_as_ptr(), nonnull_as_ptr(),
-        nonnull_slice_as_mut_ptr(), box_as_ptr(), box_as_mut_ptr(),
-        maybe_uninit_as_ptr(), maybe_uninit_as_mut_ptr(), arc_as_ptr(), rc_as_ptr(),
-        box_into_raw(), cstring_into_raw(), arc_into_raw(), rc_into_raw(),
-    ].into_iter().flatten().collect();
+        slice_as_ptr(),
+        slice_as_mut_ptr(),
+        str_as_ptr(),
+        str_as_mut_ptr(),
+        vec_as_ptr(),
+        vec_as_mut_ptr(),
+        cstr_as_ptr(),
+        nonnull_as_ptr(),
+        nonnull_slice_as_mut_ptr(),
+        box_as_ptr(),
+        box_as_mut_ptr(),
+        maybe_uninit_as_ptr(),
+        maybe_uninit_as_mut_ptr(),
+        arc_as_ptr(),
+        rc_as_ptr(),
+        box_into_raw(),
+        cstring_into_raw(),
+        arc_into_raw(),
+        rc_into_raw(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
     methods
 }

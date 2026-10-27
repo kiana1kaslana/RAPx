@@ -9,17 +9,19 @@
 //! Otherwise it falls back to the summary-based approach.
 
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::{BasicBlock, Local, Operand, Rvalue, StatementKind, Terminator, TerminatorKind};
+use rustc_middle::mir::{
+    BasicBlock, Local, Operand, Rvalue, StatementKind, Terminator, TerminatorKind,
+};
 use rustc_middle::ty::TyKind;
 use z3::ast::{Ast, Bool, Int};
 use z3::{SatResult, Solver};
 
+use super::state::{AllocId, MemoryContent, VmState, VmValue};
 use crate::compat::{FxHashSet, Spanned};
 use crate::helpers::mir_utils;
 use crate::limit::MAX_INLINE_DEPTH;
 use crate::verify::api_classify;
 use crate::verify::call_summary;
-use super::state::{AllocId, MemoryContent, VmState, VmValue};
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     pub(crate) fn eval_contract_method(
@@ -38,9 +40,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return None;
         }
         let mut values = vec![receiver];
-        values.extend(args.into_iter().zip(inputs[1..].iter()).map(|(term, ty)| {
-            VmValue::new(term, *ty)
-        }));
+        values.extend(
+            args.into_iter()
+                .zip(inputs[1..].iter())
+                .map(|(term, ty)| VmValue::new(term, *ty)),
+        );
         self.eval_contract_method_paths(method, &values, receiver_local)
     }
 
@@ -110,7 +114,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 TerminatorKind::SwitchInt { targets, .. } => {
                     for target in targets.all_targets().iter().copied() {
                         let mut branch = state.clone();
-                        crate::verify::vm::rules::exec_terminator(&mut branch, terminator, Some(target));
+                        crate::verify::vm::rules::exec_terminator(
+                            &mut branch,
+                            terminator,
+                            Some(target),
+                        );
                         if !branch.path_infeasible {
                             pending.push((branch, target, visited.clone()));
                         }
@@ -167,7 +175,13 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             .collect();
         let callee = mir_utils::dep_callee_resolved_def_id(self.tcx, caller_def_id, func);
         let method_call = callee.and_then(|method| {
-            arg_values.first().and_then(|receiver| self.begin_method_call(method, receiver, caller_arg_locals.first().copied().flatten()))
+            arg_values.first().and_then(|receiver| {
+                self.begin_method_call(
+                    method,
+                    receiver,
+                    caller_arg_locals.first().copied().flatten(),
+                )
+            })
         });
 
         if api_classify::is_eq_call(callee) {
@@ -197,9 +211,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
 
         // Registry summary, else the transparent-deref / unknown fallback.
-        let summary = if callee.is_some_and(|id| {
-            crate::def_ids::other_api::iterator_next_trait_fns().contains(&id)
-        }) && arg_values.first().is_some_and(|value| self.is_slice_iter_next_receiver(value)) {
+        let summary = if callee
+            .is_some_and(|id| crate::def_ids::other_api::iterator_next_trait_fns().contains(&id))
+            && arg_values
+                .first()
+                .is_some_and(|value| self.is_slice_iter_next_receiver(value))
+        {
             Some(vec![call_summary::CallEffect::ReturnIterNext])
         } else {
             crate::verify::call_summary::effects::lookup_effect(
@@ -208,17 +225,31 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 callee,
                 func,
                 destination,
-            ).or_else(|| call_summary::effects::effect_summary(self.tcx, func))
+            )
+            .or_else(|| call_summary::effects::effect_summary(self.tcx, func))
         };
 
         if let Some(effects) = summary {
             for effect in &effects {
-                self.apply_call_effect(effect, &arg_values, &caller_arg_locals, destination, callee, func);
+                self.apply_call_effect(
+                    effect,
+                    &arg_values,
+                    &caller_arg_locals,
+                    destination,
+                    callee,
+                    func,
+                );
             }
-        } else if let Some(c) = callee && self.tcx.is_mir_available(c) {
+        } else if let Some(c) = callee
+            && self.tcx.is_mir_available(c)
+        {
             self.exec_inline_call(c, &arg_values, &caller_arg_locals, destination);
         } else if let Some(c) = callee {
-            self.record_missing_mir(c);
+            // `assert!` panic exits contain this diverging call. It cannot
+            // change the caller's state before the unwind invariant check.
+            if !crate::def_ids::lang_api::is_panic_exit(self.tcx, c) {
+                self.record_missing_mir(c);
+            }
         }
         let result = self.local_value(destination).cloned();
         self.finish_method_call(method_call, result.as_ref());
@@ -244,7 +275,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             // report `Unknown` instead of failing on an unconstrained term.
             let dest_ty = self.body().local_decls[dest].ty;
             let truncated_term = self.fresh_int("inline_truncated");
-            self.inline.inline_truncated_terms.insert(truncated_term.clone());
+            self.inline
+                .inline_truncated_terms
+                .insert(truncated_term.clone());
             self.set_local(dest, VmValue::new(truncated_term, dest_ty));
             return false;
         }
@@ -294,9 +327,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             // callee (Iter::next).  Excludes field reborrows.
             let mut source_locals = vec![*caller_arg];
             if let Some(r) = reborrow_referents.get(i).copied().flatten()
-                && r != *caller_arg {
-                    source_locals.push(r);
-                }
+                && r != *caller_arg
+            {
+                source_locals.push(r);
+            }
             for src in source_locals {
                 let caller_field_keys: Vec<Vec<usize>> = self.frame_field_paths(&frame, src);
                 for fields in caller_field_keys {
@@ -307,9 +341,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }
         }
 
-        let pre_uninit: Vec<AllocId> = caller_referents.iter()
+        let pre_uninit: Vec<AllocId> = caller_referents
+            .iter()
             .flatten()
-            .filter(|local| api_classify::is_maybe_uninit_ty(before_inline.body().local_decls[**local].ty))
+            .filter(|local| {
+                api_classify::is_maybe_uninit_ty(before_inline.body().local_decls[**local].ty)
+            })
             .filter_map(|local| before_inline.current_frame.local_alloc.get(local).copied())
             .filter(|id| !before_inline.content(*id).facts.initialized)
             .collect();
@@ -329,14 +366,19 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             let unknown_term = self.fresh_int("inline_branch_unknown");
             self.inline.inline_branch_terms.insert(unknown_term.clone());
             if may_recurse {
-                self.inline.inline_truncated_terms.insert(unknown_term.clone());
+                self.inline
+                    .inline_truncated_terms
+                    .insert(unknown_term.clone());
             }
             self.set_local(dest, VmValue::new(unknown_term, dest_ty));
             let mut unknown_effect =
                 self.tcx.fn_sig(callee_def_id).skip_binder().safety() == rustc_hir::Safety::Unsafe;
             for (arg, referent) in arg_values.iter().zip(&caller_referents) {
                 match arg.ty.kind() {
-                    TyKind::Bool | TyKind::Char | TyKind::Int(_) | TyKind::Uint(_)
+                    TyKind::Bool
+                    | TyKind::Char
+                    | TyKind::Int(_)
+                    | TyKind::Uint(_)
                     | TyKind::Float(_) => {}
                     TyKind::Ref(..) | TyKind::RawPtr(..) => {
                         if let Some(local) = referent {
@@ -532,12 +574,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 TerminatorKind::Goto { target, .. } => {
                     queue.push(*target);
                 }
-                TerminatorKind::Return => {
-                }
-                TerminatorKind::Assert {
-                    target,
-                    ..
-                } => {
+                TerminatorKind::Return => {}
+                TerminatorKind::Assert { target, .. } => {
                     crate::verify::vm::rules::exec_terminator(self, terminator, None);
                     queue.push(*target);
                 }
@@ -554,24 +592,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     // A `debug_assert!`/`assert!` switch or a drop-flag dispatch
                     // has its non-otherwise edges dead on the normal path, so
                     // follow only `otherwise`.
-                    let trivial = mir_utils::switch_targets_unreachable(
-                        self.tcx,
-                        self.body(),
-                        targets,
-                    );
+                    let trivial =
+                        mir_utils::switch_targets_unreachable(self.tcx, self.body(), targets);
                     if trivial {
                         queue.push(targets.otherwise());
                         continue;
                     }
-                    self.possible_uninit_allocs.extend(
-                        self.find_uninit_witness(terminator, pre_uninit)
-                    );
+                    self.possible_uninit_allocs
+                        .extend(self.find_uninit_witness(terminator, pre_uninit));
                     return false;
                 }
-                TerminatorKind::Call {
-                    target,
-                    ..
-                } => {
+                TerminatorKind::Call { target, .. } => {
                     crate::verify::vm::rules::exec_terminator(self, terminator, None);
                     if let Some(t) = target {
                         queue.push(*t);
@@ -638,7 +669,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     for target in targets.all_targets().iter().copied() {
                         let mut branch = state.clone();
                         crate::verify::vm::rules::exec_terminator(
-                            &mut branch, terminator, Some(target)
+                            &mut branch,
+                            terminator,
+                            Some(target),
                         );
                         stack.push((branch, target, visited.clone()));
                     }
@@ -647,7 +680,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     crate::verify::vm::rules::exec_terminator(&mut state, terminator, None);
                     stack.push((state, *target, visited));
                 }
-                TerminatorKind::Call { func, target: Some(target), .. } => {
+                TerminatorKind::Call {
+                    func,
+                    target: Some(target),
+                    ..
+                } => {
                     let callee = mir_utils::dep_callee_resolved_def_id(
                         state.tcx,
                         state.current_frame.current_def_id,
@@ -697,8 +734,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     if crate::verify::api_classify::is_maybe_uninit_type(def.did())
                         && path.is_empty()
                         && prov.offset.simplify().as_u64() == Some(0)
-                        && value.facts.init => {
-                    args.first().and_then(|arg| arg.as_type()).filter(|inner| *inner == value.ty)
+                        && value.facts.init =>
+                {
+                    args.first()
+                        .and_then(|arg| arg.as_type())
+                        .filter(|inner| *inner == value.ty)
                         .map(|inner| (prov.alloc_id, inner))
                 }
                 _ => None,
@@ -707,12 +747,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if let Some(prov) = &pointer.provenance {
             self.clear_write_evidence(prov.alloc_id);
         }
-        let caller_referent = self.inline.arg_referents.iter().enumerate().find_map(|(i, referent)| {
-            let param = Local::from_usize(i + 1);
-            self.local_value(param)
-                .filter(|arg| arg.z3_term == pointer.z3_term)
-                .and_then(|_| *referent)
-        });
+        let caller_referent =
+            self.inline
+                .arg_referents
+                .iter()
+                .enumerate()
+                .find_map(|(i, referent)| {
+                    let param = Local::from_usize(i + 1);
+                    self.local_value(param)
+                        .filter(|arg| arg.z3_term == pointer.z3_term)
+                        .and_then(|_| *referent)
+                });
         if let Some(local) = caller_referent {
             self.inline.deferred_field_writes.push((local, path, value));
             if let Some((id, ty)) = full_inner_write {
@@ -744,9 +789,16 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             let arg_idx = local.as_usize().checked_sub(1);
             let outer_referent = arg_idx
                 .and_then(|i| self.inline.arg_referents.get(i).copied().flatten())
-                .filter(|_| matches!(self.body().local_decls[local].ty.kind(), TyKind::Ref(..) | TyKind::RawPtr(..)));
+                .filter(|_| {
+                    matches!(
+                        self.body().local_decls[local].ty.kind(),
+                        TyKind::Ref(..) | TyKind::RawPtr(..)
+                    )
+                });
             if let Some(referent) = outer_referent {
-                self.inline.deferred_field_writes.push((referent, path, value));
+                self.inline
+                    .deferred_field_writes
+                    .push((referent, path, value));
             } else {
                 self.write_local_path(local, path, value);
             }
@@ -768,13 +820,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             for stmt in &bb.statements {
                 if let StatementKind::Assign(assign) = &stmt.kind {
                     let (dest, rvalue) = &**assign;
-                    if dest.local == local && dest.projection.is_empty()
+                    if dest.local == local
+                        && dest.projection.is_empty()
                         && let Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) = rvalue
-                            && place.projection.len() == 1
-                                && matches!(place.projection[0].kind(), ProjectionElem::Deref)
-                            {
-                                return Some(place.local);
-                            }
+                        && place.projection.len() == 1
+                        && matches!(place.projection[0].kind(), ProjectionElem::Deref)
+                    {
+                        return Some(place.local);
+                    }
                 }
             }
         }
@@ -783,35 +836,33 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// Resolve a *field* reborrow (`_7 = &mut (*_x).field`, projection
     /// `[Deref, Field(..)*]`) back to its referent local plus the field path.
-    pub(crate) fn find_field_reborrow_referent(
-        &self,
-        local: Local,
-    ) -> Option<(Local, Vec<usize>)> {
+    pub(crate) fn find_field_reborrow_referent(&self, local: Local) -> Option<(Local, Vec<usize>)> {
         use rustc_middle::mir::{ProjectionElem, Rvalue, StatementKind};
         for bb in self.body().basic_blocks.iter() {
             for stmt in &bb.statements {
                 if let StatementKind::Assign(assign) = &stmt.kind {
                     let (dest, rvalue) = &**assign;
-                    if dest.local == local && dest.projection.is_empty()
-                        && let Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) = rvalue {
-                            let mut proj = place.projection.iter();
-                            if !matches!(proj.next().map(|p| p.kind()), Some(ProjectionElem::Deref))
-                            {
-                                continue;
-                            }
-                            let mut fields = Vec::new();
-                            for p in proj {
-                                if let ProjectionElem::Field(f, _) = p.kind() {
-                                    fields.push(f.as_usize());
-                                } else {
-                                    fields.clear();
-                                    break;
-                                }
-                            }
-                            if !fields.is_empty() {
-                                return Some((place.local, fields));
+                    if dest.local == local
+                        && dest.projection.is_empty()
+                        && let Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) = rvalue
+                    {
+                        let mut proj = place.projection.iter();
+                        if !matches!(proj.next().map(|p| p.kind()), Some(ProjectionElem::Deref)) {
+                            continue;
+                        }
+                        let mut fields = Vec::new();
+                        for p in proj {
+                            if let ProjectionElem::Field(f, _) = p.kind() {
+                                fields.push(f.as_usize());
+                            } else {
+                                fields.clear();
+                                break;
                             }
                         }
+                        if !fields.is_empty() {
+                            return Some((place.local, fields));
+                        }
+                    }
                 }
             }
         }
@@ -901,12 +952,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if api_classify::is_std_iter_or_itermut(adt.did()) {
             return true;
         }
-        self.tcx.is_diagnostic_item(rustc_span::Symbol::intern("Enumerate"), adt.did())
+        self.tcx
+            .is_diagnostic_item(rustc_span::Symbol::intern("Enumerate"), adt.did())
             && args.types().next().is_some_and(|inner| {
                 matches!(inner.kind(), TyKind::Adt(iter, _)
                     if api_classify::is_std_iter_or_itermut(iter.did()))
             })
     }
-
-
 }

@@ -5,12 +5,8 @@
 //! `collect_*` functions scan MIR for them; the rest of the verifier consumes
 //! the resulting records.
 
-#[cfg(all(rapx_has_attr_ir, not(rapx_box_deref_transmute)))]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100), not(rapx_box_deref_transmute)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100, not(rapx_box_deref_transmute)))]
-use rustc_hir::attrs::lang_items::LangItem;
+#[cfg(not(rapx_box_deref_transmute))]
+use crate::def_ids::lang_api::{self, LangItem};
 use rustc_hir::{Safety, def_id::DefId};
 #[cfg(rapx_box_deref_transmute)]
 use rustc_middle::mir::CastKind;
@@ -321,7 +317,7 @@ fn is_box_deref_cast(tcx: TyCtxt<'_>, body: &Body<'_>, rvalue: &Rvalue<'_>) -> b
         let base_ty = body.local_decls[p.local].ty;
         matches!(
             base_ty.kind(),
-            TyKind::Adt(adt, _) if tcx.is_lang_item(adt.did(), LangItem::OwnedBox)
+            TyKind::Adt(adt, _) if lang_api::matches(tcx, adt.did(), LangItem::OwnedBox)
         )
     }
 }

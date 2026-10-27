@@ -11,20 +11,15 @@ use crate::analysis::safety_flow::root::{
 };
 use crate::cli::VerifyMode;
 use crate::compat::FxHashMap;
+use crate::def_ids::lang_api::{self, LangItem};
 use crate::helpers::name::short_fn_name;
 use crate::verify::checkpoint::{collect_raw_ptr_deref_info, collect_static_mut_access_info};
 #[cfg(rapx_attr_requires_ext)]
 use rustc_ast::attr::AttributeExt;
 #[cfg(rapx_has_attr_ir)]
 use rustc_attr_ir::Attribute;
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
 #[cfg(not(rapx_has_attr_ir))]
 use rustc_hir::Attribute;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::{
     BodyId, FnDecl, ItemKind,
     def_id::{DefId, LocalDefId},
@@ -159,14 +154,14 @@ pub(crate) struct FunctionTarget<'tcx> {
 
 impl<'tcx> FunctionTarget<'tcx> {
     pub(crate) fn has_checkable_checkpoint(&self) -> bool {
-        self.all_checkpoints().into_iter().any(|checkpoint| {
+        self.all_checkpoints().any(|checkpoint| {
             !self.properties_for_callsite(checkpoint).is_empty()
                 || (checkpoint.kind == crate::verify::checkpoint::CheckpointKind::UnsafeCall
                     && checkpoint.callee.is_none())
         })
     }
 
-    pub(crate) fn all_checkpoints(&self) -> Vec<&Checkpoint<'tcx>> {
+    pub(crate) fn all_checkpoints(&self) -> impl Iterator<Item = &Checkpoint<'tcx>> + '_ {
         self.checkpoints
             .iter()
             .chain(
@@ -179,7 +174,6 @@ impl<'tcx> FunctionTarget<'tcx> {
                     .iter()
                     .map(|(checkpoint, _)| checkpoint),
             )
-            .collect()
     }
 
     pub(crate) fn properties_for_callsite(
@@ -1912,5 +1906,5 @@ fn is_drop_impl(tcx: TyCtxt<'_>, fn_did: DefId) -> bool {
         return false;
     };
     let trait_did = tcx.impl_trait_id(impl_id);
-    tcx.is_lang_item(trait_did, LangItem::Drop)
+    lang_api::matches(tcx, trait_did, LangItem::Drop)
 }

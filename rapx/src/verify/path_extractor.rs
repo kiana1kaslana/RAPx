@@ -18,6 +18,7 @@ use rustc_middle::{
     ty::{EarlyBinder, Instance, TyCtxt, TypingEnv},
 };
 
+use super::call_index::CallSiteIndex;
 use crate::analysis::path::{
     PathTree,
     graph::{PathEnumerator, PathGraph},
@@ -25,7 +26,6 @@ use crate::analysis::path::{
 use crate::compat::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::rc::Rc;
-use super::call_index::CallSiteIndex;
 
 use crate::verify::checkpoint::CheckpointLocation;
 
@@ -50,7 +50,6 @@ pub(crate) struct PathExtractor<'tcx> {
     instance: Option<Instance<'tcx>>,
     coverage_targets: FxHashSet<usize>,
 }
-
 impl<'tcx> PathExtractor<'tcx> {
     /// Create a path extractor that verifies `def_id`, optionally against a
     /// monomorphized instance body (when `instance` is `Some`).
@@ -76,9 +75,10 @@ impl<'tcx> PathExtractor<'tcx> {
     }
 
     pub(crate) fn with_checkpoints(mut self, checkpoints: &[CheckpointLocation]) -> Self {
-        self.coverage_targets.extend(checkpoints.iter().filter_map(|location| {
-            (location.caller == self.def_id).then_some(location.block.as_usize())
-        }));
+        self.coverage_targets
+            .extend(checkpoints.iter().filter_map(|location| {
+                (location.caller == self.def_id).then_some(location.block.as_usize())
+            }));
         self
     }
 
@@ -164,7 +164,8 @@ impl<'g, 'tcx> PathComposer<'g, 'tcx> {
                 break;
             }
         }
-        if self.truncated || caller_paths.is_truncated()
+        if self.truncated
+            || caller_paths.is_truncated()
             || pending.iter().any(|paths| !paths.is_empty())
         {
             result.mark_truncated();
@@ -184,7 +185,8 @@ impl<'g, 'tcx> PathComposer<'g, 'tcx> {
             if path.get(position + 1).copied() != self.call_index.normal_successor(block) {
                 continue;
             }
-            let choices = entries.into_iter()
+            let choices = entries
+                .into_iter()
                 .map(|entry| self.callee_paths(entry))
                 .collect::<Vec<_>>();
             let mut next_paths = Vec::new();
@@ -221,14 +223,16 @@ impl<'g, 'tcx> PathComposer<'g, 'tcx> {
             PathGraph::new(self.call_index.tcx(), callee)
         };
         local_graph.find_scc();
-        let local_paths = PathEnumerator::new(&local_graph)
-            .enumerate_paths_repeat(self.allow_repeat);
+        let local_paths =
+            PathEnumerator::new(&local_graph).enumerate_paths_repeat(self.allow_repeat);
         self.truncated |= local_paths.is_truncated();
         let mut result = Vec::new();
         for path in local_paths.to_vecs() {
             let Some(&last) = path.last() else { continue };
-            if !matches!(body.basic_blocks[BasicBlock::from(last)].terminator().kind,
-                TerminatorKind::Return | TerminatorKind::TailCall { .. }) {
+            if !matches!(
+                body.basic_blocks[BasicBlock::from(last)].terminator().kind,
+                TerminatorKind::Return | TerminatorKind::TailCall { .. }
+            ) {
                 continue;
             }
             result.extend(self.expand(&path.iter().map(|block| entry + block).collect::<Vec<_>>()));
@@ -248,44 +252,38 @@ impl<'g, 'tcx> PathComposer<'g, 'tcx> {
 /// represented as an ordered sequence of MIR basic blocks.
 ///
 /// Built by the [`BackwardSlicer`](super::slicer::BackwardSlicer) from the
-/// [`PathTree`] produced by [`PathExtractor`]; the VM later consumes it to
-/// know which MIR instructions are relevant and in what order.
+/// [`PathTree`] produced by [`PathExtractor`].
 ///
 /// The VM checks whether each composed path is reachable.
 #[derive(Clone, Debug)]
 pub(crate) struct Path {
-    /// The [`CheckpointLocation`] (function + basic block) reached by this
-    /// path, also recorded as the final `PathStep::Checkpoint`.
+    /// The [`CheckpointLocation`] (function + basic block) reached by this path.
     pub target: CheckpointLocation,
-    /// Ordered block sequence from function entry to `target`, terminated by a
-    /// `PathStep::Checkpoint`.
-    pub steps: Vec<PathStep>,
+    /// Ordered global block numbers from function entry to `target`.
+    pub blocks: Vec<usize>,
 }
 
 impl Path {
-    /// Render this path as a compact array of block indices.
-    pub(crate) fn describe_indices(&self) -> String {
-        let mut indices: Vec<usize> = Vec::new();
-        for step in &self.steps {
-            match step {
-                PathStep::Block(b) => indices.push(b.as_usize()),
-                PathStep::Checkpoint(l) => {
-                    let bb = l.block.as_usize();
-                    if indices.last() != Some(&bb) {
-                        indices.push(bb);
-                    }
-                }
-            }
-        }
-        format!("{:?}", indices)
+    /// Render only the caller's local blocks, excluding inlined callee blocks.
+    pub(crate) fn describe_caller_indices(&self, tree: &PathTree) -> String {
+        format!(
+            "{:?}",
+            caller_blocks(tree, self.target.caller, self.blocks.iter().copied())
+        )
     }
 }
 
-/// One step in a finite verification path.
-#[derive(Clone, Debug)]
-pub(crate) enum PathStep {
-    /// A normal MIR basic block.
-    Block(BasicBlock),
-    /// The target checkpoint that terminates the path.
-    Checkpoint(CheckpointLocation),
+/// Map composed-tree block numbers back to local blocks of `caller`.
+pub(crate) fn caller_blocks(
+    tree: &PathTree,
+    caller: DefId,
+    blocks: impl IntoIterator<Item = usize>,
+) -> Vec<usize> {
+    blocks
+        .into_iter()
+        .filter_map(|global| {
+            let (def_id, local) = tree.block_fn_of(global).unwrap_or((caller, global));
+            (def_id == caller).then_some(local)
+        })
+        .collect()
 }

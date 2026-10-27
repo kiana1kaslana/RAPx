@@ -14,19 +14,14 @@
 //! `std-trait-ensures.json` + `std-compound-properties.rs`; this module only
 //! implements the primitive type-level checks.
 
+use crate::def_ids::lang_api::{self, LangItem};
 use crate::helpers::mir_utils;
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::{ClauseKind, GenericArgKind, ParamTy, Ty, TyCtxt, TyKind};
 
-use crate::def_ids::type_ids;
 use crate::compat::FxHashMap;
+use crate::def_ids::type_ids;
 use crate::verify::checkpoint::{Checkpoint, has_atomic_call, has_raw_ptr_write};
 use crate::verify::vm::state::VmState;
 use crate::verify::{
@@ -506,7 +501,7 @@ fn find_unsynchronized_mutation<'tcx>(
             if type_ids::sync_primitive_types().contains(&did) {
                 return Contains::No;
             }
-            if tcx.is_lang_item(did, LangItem::UnsafeCell) {
+            if lang_api::matches(tcx, did, LangItem::UnsafeCell) {
                 return Contains::Yes;
             }
             let mut result = Contains::No;

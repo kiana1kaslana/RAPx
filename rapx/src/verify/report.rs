@@ -66,7 +66,11 @@ impl UnknownReason {
         match self {
             Self::UnsupportedMir(details) => out.extend(details.iter().cloned()),
             Self::MissingMir(callees) => {
-                out.extend(callees.iter().map(|callee| format!("MIR unavailable: {callee}")));
+                out.extend(
+                    callees
+                        .iter()
+                        .map(|callee| format!("MIR unavailable: {callee}")),
+                );
             }
             Self::UnmodeledIntrinsic(name) => out.push(format!("intrinsic: {name}")),
             Self::Multiple(reasons) => {
@@ -118,7 +122,38 @@ pub(crate) enum CheckResult {
     Unknown(UnknownReason),
 }
 
+/// Soundness of a group of required checks. The order defines conjunction:
+/// a failure wins over an incomplete proof, which wins over a proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Soundness {
+    Sound,
+    Unknown,
+    Failed,
+}
+
+impl Soundness {
+    pub(crate) fn join(self, other: Self) -> Self {
+        self.max(other)
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Sound => "SOUND",
+            Self::Unknown => "UNKNOWN",
+            Self::Failed => "FAILED",
+        }
+    }
+}
+
 impl CheckResult {
+    pub(crate) fn soundness(&self) -> Soundness {
+        match self {
+            Self::ProvedByRule | Self::ProvedBySmt => Soundness::Sound,
+            Self::Unknown(_) => Soundness::Unknown,
+            Self::Failed => Soundness::Failed,
+        }
+    }
+
     /// Whether this result counts as "proved" (by rule or by SMT).
     pub(crate) fn is_proved(&self) -> bool {
         matches!(self, CheckResult::ProvedByRule | CheckResult::ProvedBySmt)
@@ -137,14 +172,21 @@ impl CheckResult {
     /// `Unknown`; only all-proved → proved (`Rule` when every conjunct was a
     /// rule, otherwise `Smt`).
     pub(crate) fn and(self, other: CheckResult) -> CheckResult {
-        match (self, other) {
-            (CheckResult::Failed, _) | (_, CheckResult::Failed) => CheckResult::Failed,
-            (CheckResult::Unknown(a), CheckResult::Unknown(b)) => {
-                CheckResult::Unknown(a.merge(b))
-            }
-            (CheckResult::Unknown(a), _) | (_, CheckResult::Unknown(a)) => CheckResult::Unknown(a),
-            (CheckResult::ProvedByRule, CheckResult::ProvedByRule) => CheckResult::ProvedByRule,
-            _ => CheckResult::ProvedBySmt,
+        match self.soundness().join(other.soundness()) {
+            Soundness::Failed => CheckResult::Failed,
+            Soundness::Unknown => match (self, other) {
+                (CheckResult::Unknown(a), CheckResult::Unknown(b)) => {
+                    CheckResult::Unknown(a.merge(b))
+                }
+                (CheckResult::Unknown(a), _) | (_, CheckResult::Unknown(a)) => {
+                    CheckResult::Unknown(a)
+                }
+                _ => unreachable!(),
+            },
+            Soundness::Sound => match (self, other) {
+                (CheckResult::ProvedByRule, CheckResult::ProvedByRule) => CheckResult::ProvedByRule,
+                _ => CheckResult::ProvedBySmt,
+            },
         }
     }
 
@@ -159,9 +201,7 @@ impl CheckResult {
                 CheckResult::ProvedBySmt
             }
             (CheckResult::Failed, CheckResult::Failed) => CheckResult::Failed,
-            (CheckResult::Unknown(a), CheckResult::Unknown(b)) => {
-                CheckResult::Unknown(a.merge(b))
-            }
+            (CheckResult::Unknown(a), CheckResult::Unknown(b)) => CheckResult::Unknown(a.merge(b)),
             (CheckResult::Unknown(a), _) | (_, CheckResult::Unknown(a)) => CheckResult::Unknown(a),
         }
     }
@@ -208,11 +248,6 @@ impl<'tcx> VerificationReport<'tcx> {
         }
     }
 
-    /// Add one path/property check result to this report.
-    pub(crate) fn push(&mut self, result: PropertyCheckResult<'tcx>) {
-        self.results.push(result);
-    }
-
     /// Render the whole report as a readable multi-line diagnostic.
     pub(crate) fn describe(&self) -> String {
         let mut out = String::new();
@@ -247,7 +282,24 @@ impl<'tcx> VerificationReport<'tcx> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckResult, UnknownReason};
+    use super::{CheckResult, Soundness, UnknownReason};
+
+    #[test]
+    fn soundness_join_uses_failed_unknown_sound_priority() {
+        assert_eq!(Soundness::Sound.join(Soundness::Sound), Soundness::Sound);
+        assert_eq!(
+            Soundness::Sound.join(Soundness::Unknown),
+            Soundness::Unknown
+        );
+        assert_eq!(
+            Soundness::Unknown.join(Soundness::Failed),
+            Soundness::Failed
+        );
+        assert_eq!(
+            Soundness::Failed.join(Soundness::Unknown),
+            Soundness::Failed
+        );
+    }
 
     #[test]
     fn unknown_labels_preserve_solver_reason_and_multiple_causes() {

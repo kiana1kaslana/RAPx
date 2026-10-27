@@ -85,19 +85,15 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         target: &'target FunctionTarget<'tcx>,
         allow_repeat: usize,
     ) -> Self {
-        let checkpoints: Vec<_> = target.all_checkpoints().into_iter().cloned().collect();
+        let checkpoints: Vec<_> = target.all_checkpoints().cloned().collect();
         let locations = checkpoints
             .iter()
             .map(Checkpoint::location)
             .collect::<Vec<_>>();
-        let path_tree = PathExtractor::new_with_instance(
-            tcx,
-            target.def_id,
-            allow_repeat,
-            target.instance,
-        )
-        .with_checkpoints(&locations)
-        .run();
+        let path_tree =
+            PathExtractor::new_with_instance(tcx, target.def_id, allow_repeat, target.instance)
+                .with_checkpoints(&locations)
+                .run();
         Self {
             tcx,
             target,
@@ -112,8 +108,6 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         let mut report = VerificationReport::new(self.target.def_id);
 
         for view in self.iter_callsite_checks() {
-            let mut view_results: Vec<PropertyCheckResult<'tcx>> = Vec::new();
-
             let unresolved_call = view.checkpoint.kind == CheckpointKind::UnsafeCall
                 && view.checkpoint.callee.is_none();
             let unmodeled_intrinsic = crate::verify::call_summary::effects::is_unmodeled_intrinsic(
@@ -121,7 +115,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                 view.checkpoint.callee,
             );
             if unresolved_call || unmodeled_intrinsic {
-                view_results.push(PropertyCheckResult {
+                report.results.push(PropertyCheckResult {
                     checkpoint: view.checkpoint.location(),
                     checkpoint_index: view.checkpoint_index,
                     path_index: 0,
@@ -146,38 +140,35 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                     callee_name: view.checkpoint.callee_name(self.tcx),
                 });
                 if unresolved_call {
-                    for item in view_results {
-                        report.push(item);
-                    }
                     continue;
                 }
             }
 
             for (property_index, property) in view.properties.iter().enumerate() {
                 let bulk = self.check_property_paths(&view, property);
-                for (path_index, (result, path_desc)) in bulk.iter().enumerate() {
-                    let item = PropertyCheckResult {
+                let path_count = bulk.len();
+                for (path_index, (result, path_desc)) in bulk.into_iter().enumerate() {
+                    report.results.push(PropertyCheckResult {
                         checkpoint: view.checkpoint.location(),
                         checkpoint_index: view.checkpoint_index,
                         path_index,
                         property_index,
                         property: property.clone(),
-                        result: result.clone(),
-                        diagnostics: Some(format!("vm-check: {:?}", result)),
-                        path_description: path_desc.clone(),
+                        diagnostics: Some(format!("vm-check: {result:?}")),
+                        result,
+                        path_description: path_desc,
                         callee_name: view.checkpoint.callee_name(self.tcx),
-                    };
-                    view_results.push(item);
+                    });
                 }
                 // Paths past the enumeration limit were never checked.  Treat
                 // them as proved rather than unknown: hitting the enumeration
                 // limit is a *precision* bound (a false negative), and the
                 // enumerated paths already discharged the obligation.
                 if view.tree.is_truncated() {
-                    view_results.push(PropertyCheckResult {
+                    report.results.push(PropertyCheckResult {
                         checkpoint: view.checkpoint.location(),
                         checkpoint_index: view.checkpoint_index,
-                        path_index: bulk.len(),
+                        path_index: path_count,
                         property_index,
                         property: property.clone(),
                         result: CheckResult::ProvedByRule,
@@ -186,10 +177,6 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                         callee_name: view.checkpoint.callee_name(self.tcx),
                     });
                 }
-            }
-
-            for item in view_results {
-                report.push(item);
             }
         }
 
@@ -256,26 +243,13 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
         per_path.into_iter().map(|x| x.unwrap()).collect()
     }
 
-    /// Return the required properties for a concrete unsafe checkpoint.
-    ///
-    /// Dispatches on [`CheckpointKind`]: synthetic checkpoints (raw pointer
-    /// dereference, static mut access) carry their properties in
-    /// `target.raw_ptr_deref_checks` / `target.static_mut_checks`; real
-    /// unsafe calls look up `target.callee_requires` by callee `DefId`.
-    pub(crate) fn properties_for_callsite(
-        &self,
-        checkpoint: &Checkpoint<'tcx>,
-    ) -> &'target [Property<'tcx>] {
-        self.target.properties_for_callsite(checkpoint)
-    }
-
     /// Iterate over checkpoints together with the shared path tree and properties.
     pub(crate) fn iter_callsite_checks(
         &self,
     ) -> impl Iterator<Item = CheckpointCheckView<'_, 'target, 'tcx>> + '_ {
         let mut checkpoint_index = 0usize;
         self.checkpoints.iter().filter_map(move |checkpoint| {
-            let properties = self.properties_for_callsite(checkpoint);
+            let properties = self.target.properties_for_callsite(checkpoint);
             if properties.is_empty()
                 && !(checkpoint.kind == CheckpointKind::UnsafeCall && checkpoint.callee.is_none())
             {
@@ -400,7 +374,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                     entry_facts,
                 );
 
-                for (path_index, (result, _path_desc)) in check_results.iter().enumerate() {
+                for (path_index, (result, _path_desc)) in check_results.into_iter().enumerate() {
                     if label == "type"
                         && paths.get(path_index).is_some_and(|path| {
                             type_invariant_subject(invariant).is_some_and(|local| {
@@ -418,11 +392,15 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                     }
                     let path_description = paths
                         .get(path_index)
-                        .map(|p| {
-                            p.iter()
-                                .map(|b| b.to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                        .map(|path| {
+                            format!(
+                                "{:?}",
+                                super::path_extractor::caller_blocks(
+                                    &tree,
+                                    self.target.def_id,
+                                    path.iter().copied(),
+                                )
+                            )
                         })
                         .unwrap_or_default();
                     results.push(PropertyCheckResult {
@@ -431,8 +409,8 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
                         path_index,
                         property_index,
                         property: invariant.clone(),
-                        result: result.clone(),
-                        diagnostics: Some(format!("vm-{label}-invariant: {:?}", result)),
+                        diagnostics: Some(format!("vm-{label}-invariant: {result:?}")),
+                        result,
                         path_description,
                         callee_name: format!(
                             "{label}-invariant(bb{})",
@@ -566,8 +544,7 @@ impl<'tcx> VerifyRun<'tcx> {
         match self.repeat_strategy {
             RepeatStrategy::Fixed(n) => (n, (0..=n).collect()),
             RepeatStrategy::Auto => {
-                let plan = LoopSensitivityAnalyzer::new(self.tcx).analyze(target);
-                let repeat = plan.repeat;
+                let repeat = LoopSensitivityAnalyzer::new(self.tcx).analyze(target);
                 (repeat, (0..=repeat).collect())
             }
         }
@@ -621,21 +598,15 @@ impl<'tcx> VerifyRun<'tcx> {
             .collect();
         accumulated_requires.extend(con_contracts);
 
-        if !mut_ids.is_empty() {
-            let mut mutated_fields: Vec<usize> = Vec::new();
-            for &mut_id in mut_ids {
-                for field_idx in get_mutated_fields(self.tcx, mut_id) {
-                    if !mutated_fields.contains(&field_idx) {
-                        mutated_fields.push(field_idx);
-                    }
-                }
-            }
-            if !mutated_fields.is_empty() {
-                accumulated_requires.retain(|prop| {
-                    let prop_fields = property_field_indices(prop);
-                    !prop_fields.iter().any(|f| mutated_fields.contains(f))
-                });
-            }
+        let mutated_fields: FxHashSet<_> = mut_ids
+            .iter()
+            .flat_map(|&mut_id| get_mutated_fields(self.tcx, mut_id))
+            .collect();
+        if !mutated_fields.is_empty() {
+            accumulated_requires.retain(|prop| {
+                let prop_fields = property_field_indices(prop);
+                !prop_fields.iter().any(|f| mutated_fields.contains(f))
+            });
         }
 
         // Also include the read method's own caller requires (which already
@@ -773,7 +744,6 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
                 match mir_utils::catch_panic(|| driver.verify_struct_invariants()) {
                     Ok(struct_report) => {
                         rap_debug!("{}", struct_report.describe());
-                        all_results.extend(struct_report.results.clone());
                         if let Some(struct_id) = target.owner_struct_def_id {
                             let verdict = struct_report
                                 .results
@@ -786,6 +756,7 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
                                 .and_modify(|v| *v = v.clone().and(verdict.clone()))
                                 .or_insert(verdict);
                         }
+                        all_results.extend(struct_report.results);
                     }
                     Err(msg) => {
                         rap_warn!("Skipping struct invariants for {} : {msg}", target_path);
@@ -800,7 +771,7 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
                 match mir_utils::catch_panic(|| driver.verify_type_invariants()) {
                     Ok(type_report) => {
                         rap_debug!("{}", type_report.describe());
-                        all_results.extend(type_report.results.clone());
+                        all_results.extend(type_report.results);
                     }
                     Err(msg) => {
                         rap_warn!("Skipping type invariants for {} : {msg}", target_path);

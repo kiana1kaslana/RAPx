@@ -672,6 +672,7 @@ fn intrinsic_flow_01() {
     let block = extract_block_after(&output, "function: unknown_volatile_store_wrapper");
     assert_contain(block, "  unsupported operations:");
     assert_contain(block, "volatile_store");
+    assert_contain(block, " | UNKNOWN:");
 }
 
 #[test]
@@ -703,6 +704,10 @@ fn caller_path_priority_01() {
     assert_function_result(&output, "sound_unreachable_branch", "SOUND");
     assert_contain(&output, "ValidNum | Failed");
     assert_eq!(output.matches("unsafe checkpoint: bb").count(), 3, "{output}");
+    let block = extract_block_after(&output, "function: caller_branch_after_helper");
+    assert_eq!(block.matches("        path [").count(), 2, "{block}");
+    assert_contain(block, "path [0, 1, 2] | SOUND:");
+    assert_contain(block, "path [0, 4, 5] | FAILED:");
 }
 
 #[test]

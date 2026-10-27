@@ -17,11 +17,11 @@ use crate::analysis::path::PathTree;
 use super::{
     contract::{AndProperty, AtomProperty, OrProperty, Property},
     report::{CheckResult, UnknownReason},
-    slicer::{BackwardSlicer, RelevantItem},
+    slicer::{BackwardSlicer, ProofGoal, RelevantItem},
 };
 use crate::verify::checkpoint::{Checkpoint, CheckpointLocation};
 
-use super::{property_checker::PropertyChecker, vm::SymbolicVm};
+use super::property_checker::PropertyChecker;
 
 enum LocalAccess {
     None,
@@ -29,13 +29,11 @@ enum LocalAccess {
     Reinitialized,
 }
 
-/// The three verification stages: a backward [`BackwardSlicer`], a
-/// [`SymbolicVm`], and a [`PropertyChecker`].
+/// The three verification stages: a backward [`BackwardSlicer`], symbolic MIR
+/// execution, and a [`PropertyChecker`].
 pub(crate) struct VerifyEngine<'tcx> {
     tcx: TyCtxt<'tcx>,
     slicer: BackwardSlicer<'tcx>,
-    vm: SymbolicVm,
-    checker: PropertyChecker,
 }
 
 impl<'tcx> VerifyEngine<'tcx> {
@@ -44,8 +42,6 @@ impl<'tcx> VerifyEngine<'tcx> {
         Self {
             tcx,
             slicer: BackwardSlicer::new(tcx),
-            vm: SymbolicVm::new(),
-            checker: PropertyChecker,
         }
     }
 
@@ -72,63 +68,24 @@ impl<'tcx> VerifyEngine<'tcx> {
         caller_contracts: &[Property<'tcx>],
     ) -> Vec<(CheckResult, String)> {
         let target_block = checkpoint.block.as_usize();
-        let mut results = Vec::new();
-        let backward_items = self
+        let goals = self
             .slicer
             .visit_path_tree(tree, target_block, checkpoint, property);
-
         let bound_property = Self::bind_property_to_checkpoint(property, checkpoint);
-
-        let z3_ctx = Self::new_z3_context();
-
-        let mut local_to_global: HashMap<(DefId, usize), Vec<usize>> = HashMap::new();
-        for (global, (def_id, local)) in tree.block_fns().iter().enumerate() {
-            local_to_global
-                .entry((*def_id, *local))
-                .or_default()
-                .push(global);
-        }
-
-        let backward_items: Vec<_> = backward_items.into_iter().rev().collect();
-        for backward in backward_items {
-            let path_desc = backward.path.describe_indices();
-
-            let mut items = Vec::new();
-            if !caller_contracts.is_empty() {
-                items.extend(
-                    caller_contracts
-                        .iter()
-                        .filter(|c| {
-                            !matches!(c.kind(), Some(super::contract::PropertyKind::Unknown))
-                        })
-                        .map(|c| RelevantItem::ContractFact {
-                            property: c.clone(),
-                        }),
-                );
-            }
-            items.extend(backward.items);
-            items = Self::inject_inline_boundaries(
-                self.tcx,
-                items,
-                tree,
-                &local_to_global,
-                checkpoint.caller,
-            );
-
-            let wrapped = crate::verify::slicer::ProofGoal {
-                path: backward.path,
-                items,
-            };
-
-            let vm_state = self.vm.run(&z3_ctx, self.tcx, wrapped);
-
-            let result = self
-                .checker
-                .check(&vm_state, checkpoint, &bound_property, tree.is_structural());
-            results.push((result, path_desc));
-        }
-
-        results
+        let entry_facts: Vec<_> = caller_contracts
+            .iter()
+            .filter(|c| !matches!(c.kind(), Some(super::contract::PropertyKind::Unknown)))
+            .map(|c| RelevantItem::ContractFact {
+                property: c.clone(),
+            })
+            .collect();
+        self.check_goals(
+            tree,
+            goals.into_iter().rev(),
+            checkpoint,
+            &bound_property,
+            &entry_facts,
+        )
     }
 
     /// Path-sensitive forward scan for the `Drop` hazard.
@@ -409,8 +366,9 @@ impl<'tcx> VerifyEngine<'tcx> {
                                 let all_single_arg = matching.iter().all(|&g| {
                                     tree.call_binding(g).map(|b| b.arg_locals.len()) == Some(1)
                                 });
-                                let is_ptr_arith = crate::verify::api_classify::is_pointer_add(Some(cur))
-                                    || crate::verify::api_classify::is_pointer_sub(Some(cur));
+                                let is_ptr_arith =
+                                    crate::verify::api_classify::is_pointer_add(Some(cur))
+                                        || crate::verify::api_classify::is_pointer_sub(Some(cur));
                                 if (all_single_arg || is_ptr_arith)
                                     && let Some(arg) = prev_arg
                                 {
@@ -617,13 +575,18 @@ impl<'tcx> VerifyEngine<'tcx> {
                     *method,
                 )
             }
-            super::contract::ContractExpr::MethodCall { receiver, method, args } => {
-                super::contract::ContractExpr::MethodCall {
-                    receiver: Box::new(Self::rebind_contract_expr(receiver, checkpoint)),
-                    method: *method,
-                    args: args.iter().map(|arg| Self::rebind_contract_expr(arg, checkpoint)).collect(),
-                }
-            }
+            super::contract::ContractExpr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => super::contract::ContractExpr::MethodCall {
+                receiver: Box::new(Self::rebind_contract_expr(receiver, checkpoint)),
+                method: *method,
+                args: args
+                    .iter()
+                    .map(|arg| Self::rebind_contract_expr(arg, checkpoint))
+                    .collect(),
+            },
             super::contract::ContractExpr::IsEmpty(inner, method) => {
                 super::contract::ContractExpr::IsEmpty(
                     Box::new(Self::rebind_contract_expr(inner, checkpoint)),
@@ -685,17 +648,36 @@ impl<'tcx> VerifyEngine<'tcx> {
         entry_facts: &[RelevantItem<'tcx>],
     ) -> Vec<(CheckResult, String)> {
         let target_block = checkpoint.block.as_usize();
-        let mut results = Vec::new();
-        let backward_items = self.slicer.visit_path_tree_for_checkpoint(
+        let goals = self.slicer.visit_path_tree_for_checkpoint(
             tree,
             target_block,
             def_id,
             checkpoint,
             invariant,
         );
+        let fake_checkpoint = Checkpoint {
+            caller: def_id,
+            callee: None,
+            block: checkpoint.block,
+            args: Vec::new(),
+            kind: crate::verify::checkpoint::CheckpointKind::UnsafeCall,
+            destination: None,
+            is_mut_ref: false,
+            statement_index: 0,
+        };
+        self.check_goals(tree, goals, &fake_checkpoint, invariant, entry_facts)
+    }
 
+    /// Replay sliced paths and check one property, shared by callsite and invariant checks.
+    fn check_goals(
+        &self,
+        tree: &PathTree,
+        goals: impl IntoIterator<Item = ProofGoal<'tcx>>,
+        checkpoint: &Checkpoint<'tcx>,
+        property: &Property<'tcx>,
+        entry_facts: &[RelevantItem<'tcx>],
+    ) -> Vec<(CheckResult, String)> {
         let z3_ctx = Self::new_z3_context();
-
         let mut local_to_global: HashMap<(DefId, usize), Vec<usize>> = HashMap::new();
         for (global, (def_id, local)) in tree.block_fns().iter().enumerate() {
             local_to_global
@@ -704,41 +686,27 @@ impl<'tcx> VerifyEngine<'tcx> {
                 .push(global);
         }
 
-        for mut backward in backward_items {
-            let path_desc = backward.path.describe_indices();
-
-            if !entry_facts.is_empty() {
-                let mut items: Vec<RelevantItem<'tcx>> = entry_facts.to_vec();
-                items.append(&mut backward.items);
-                backward.items = items;
-            }
-
-            backward.items = Self::inject_inline_boundaries(
-                self.tcx,
-                backward.items,
-                tree,
-                &local_to_global,
-                def_id,
-            );
-
-            let vm_state = self.vm.run(&z3_ctx, self.tcx, backward);
-
-            let fake_checkpoint = Checkpoint {
-                caller: def_id,
-                callee: None,
-                block: checkpoint.block,
-                args: Vec::new(),
-                kind: crate::verify::checkpoint::CheckpointKind::UnsafeCall,
-                destination: None,
-                is_mut_ref: false,
-                statement_index: 0,
-            };
-            let result = self
-                .checker
-                .check(&vm_state, &fake_checkpoint, invariant, tree.is_structural());
-            results.push((result, path_desc));
-        }
-
-        results
+        goals
+            .into_iter()
+            .map(|mut goal| {
+                let path_desc = goal.path.describe_caller_indices(tree);
+                if !entry_facts.is_empty() {
+                    let mut items = entry_facts.to_vec();
+                    items.append(&mut goal.items);
+                    goal.items = items;
+                }
+                goal.items = Self::inject_inline_boundaries(
+                    self.tcx,
+                    goal.items,
+                    tree,
+                    &local_to_global,
+                    checkpoint.caller,
+                );
+                let vm_state = super::vm::execute_goal(&z3_ctx, self.tcx, goal);
+                let result =
+                    PropertyChecker.check(&vm_state, checkpoint, property, tree.is_structural());
+                (result, path_desc)
+            })
+            .collect()
     }
 }

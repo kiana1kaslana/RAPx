@@ -3,20 +3,15 @@
 use super::graph::TyWrapper;
 use super::utils::{self, fn_sig_with_generic_args};
 use crate::compat;
-use crate::limit::MAX_STEP_SET_SIZE;
 #[cfg(not(rapx_has_skip_norm_wip))]
 use crate::compat::SkipNormWip;
 use crate::helpers::def_path::path_str_def_id;
+use crate::limit::MAX_STEP_SET_SIZE;
 use crate::{rap_debug, rap_trace};
 use rand::Rng;
 use rand::seq::SliceRandom;
 
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
+use crate::def_ids::lang_api::{self, LangItem};
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::DefineOpaqueTypes;
 use rustc_infer::infer::{InferCtxt, TyCtxtInferExt};
@@ -320,9 +315,9 @@ fn is_fn_solvable<'tcx>(fn_did: DefId, tcx: TyCtxt<'tcx>) -> bool {
         let pred = pred.skip_norm_wip();
         if let Some(pred) = pred.as_trait_clause() {
             let trait_did = pred.skip_binder().trait_ref.def_id;
-            if tcx.is_lang_item(trait_did, LangItem::Fn)
-                || tcx.is_lang_item(trait_did, LangItem::FnMut)
-                || tcx.is_lang_item(trait_did, LangItem::FnOnce)
+            if lang_api::matches(tcx, trait_did, LangItem::Fn)
+                || lang_api::matches(tcx, trait_did, LangItem::FnMut)
+                || lang_api::matches(tcx, trait_did, LangItem::FnOnce)
             {
                 return false;
             }
@@ -464,8 +459,8 @@ fn solve_unbound_type_generics<'tcx>(
 
             let trait_def_id = trait_pred.trait_ref.def_id;
             // ignore Sized trait
-            if tcx.is_lang_item(trait_def_id, LangItem::Sized)
-                || tcx.is_lang_item(trait_def_id, LangItem::Copy)
+            if lang_api::matches(tcx, trait_def_id, LangItem::Sized)
+                || lang_api::matches(tcx, trait_def_id, LangItem::Copy)
             {
                 continue;
             }

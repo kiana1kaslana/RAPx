@@ -2,14 +2,9 @@ use super::graph::ApiDependencyGraph;
 use super::graph::{DepEdge, DepNode};
 use super::is_def_id_public;
 use crate::analysis::api_dependency::mono;
+use crate::def_ids::lang_api::{self, LangItem};
 use crate::helpers::path::{PathResolver, get_path_resolver};
 use crate::{rap_debug, rap_trace};
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::{
     BodyId, BodyOwnerKind, FnDecl,
     def_id::{DefId, LocalDefId},
@@ -103,7 +98,7 @@ pub fn has_const_generics(generics: &ty::Generics, tcx: TyCtxt<'_>) -> bool {
 fn is_drop_impl(tcx: TyCtxt<'_>, fn_did: DefId) -> bool {
     if let Some(impl_id) = tcx.trait_impl_of_assoc(fn_did) {
         let trait_did = tcx.impl_trait_id(impl_id);
-        if tcx.is_lang_item(trait_did, LangItem::Drop) {
+        if lang_api::matches(tcx, trait_did, LangItem::Drop) {
             return true;
         }
     }

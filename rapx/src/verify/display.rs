@@ -11,7 +11,7 @@ use crate::compat::FxHashMap;
 use crate::helpers::fn_info::get_cons;
 use indexmap::IndexMap;
 
-use super::report::{CheckResult, PropertyCheckResult};
+use super::report::{CheckResult, PropertyCheckResult, Soundness};
 use crate::verify::checkpoint::CheckpointLocation;
 use crate::verify::contract::render::display_expr_user_friendly;
 
@@ -294,7 +294,10 @@ pub(crate) fn fmt_contract_expanded<'tcx>(
                     "{ptr} points to a live allocation of size: size_of({}) * {}",
                     args[1], args[2]
                 ),
-                2 => format!("{ptr} points to a live allocation of size: size_of({})", args[1]),
+                2 => format!(
+                    "{ptr} points to a live allocation of size: size_of({})",
+                    args[1]
+                ),
                 _ => format!("{ptr} points to a live allocation"),
             }
         }
@@ -351,8 +354,8 @@ pub(crate) fn emit_results_counts_and_checkpoints<'tcx>(
     tcx: TyCtxt<'tcx>,
     all_results: &[PropertyCheckResult<'tcx>],
 ) -> (usize, usize) {
-    use crate::verify::contract::ContractKind;
     use super::report::CheckResult;
+    use crate::verify::contract::ContractKind;
 
     // Distinguish a *confirmed* violation (`Failed`) from an *incomplete* proof
     // (`Unknown`).  A `Failed` makes the function UNSOUND; a lone `Unknown`
@@ -361,8 +364,7 @@ pub(crate) fn emit_results_counts_and_checkpoints<'tcx>(
     let failed = all_results
         .iter()
         .filter(|r| {
-            r.property.contract_kind() != ContractKind::Option_
-                && r.result == CheckResult::Failed
+            r.property.contract_kind() != ContractKind::Option_ && r.result == CheckResult::Failed
         })
         .count();
     let unknown = all_results
@@ -483,7 +485,16 @@ pub(crate) fn emit_property_rows<'tcx>(_tcx: TyCtxt<'tcx>, results: &[&PropertyC
         entries
     };
     for (path_desc, props) in &path_groups {
-        rap_info!("        path {path_desc}:");
+        if *path_desc == super::report::PATH_LIMIT_DESCRIPTION {
+            continue;
+        }
+        let verdict = props
+            .iter()
+            .filter(|r| {
+                r.property.contract_kind() != crate::verify::contract::ContractKind::Option_
+            })
+            .fold(Soundness::Sound, |acc, r| acc.join(r.result.soundness()));
+        rap_info!("        path {path_desc} | {}:", verdict.label());
         let mut counts: Vec<CountEntry> = Vec::new();
         for r in props.iter() {
             let result = r.result.clone();

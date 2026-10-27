@@ -1,11 +1,6 @@
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
+use crate::def_ids::lang_api::{self, LangItem};
 #[cfg(rapx_attr_requires_ext)]
 use rustc_ast::attr::AttributeExt;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::{
     ItemKind,
     def_id::{DefId, LocalDefId},
@@ -68,13 +63,7 @@ pub(crate) fn is_drop_in_place(def_id: DefId) -> bool {
 /// Whether `def_id` is a diverging call target: a `panic*` lang item or the
 /// `unreachable`/`abort` intrinsics.
 fn is_diverging_call(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    tcx.is_lang_item(def_id, LangItem::Panic)
-        || tcx.is_lang_item(def_id, LangItem::PanicNounwind)
-        || tcx.is_lang_item(def_id, LangItem::PanicFmt)
-        || tcx.is_lang_item(def_id, LangItem::PanicDisplay)
-        || tcx.is_lang_item(def_id, LangItem::ConstPanicFmt)
-        || tcx.is_lang_item(def_id, LangItem::PanicBoundsCheck)
-        || tcx.is_lang_item(def_id, LangItem::PanicMisalignedPointerDereference)
+    crate::def_ids::lang_api::is_panic_family(tcx, def_id)
         || tcx.intrinsic(def_id).is_some_and(|i| {
             i.name == rustc_span::sym::unreachable || i.name == rustc_span::sym::abort
         })
@@ -153,13 +142,13 @@ pub(crate) enum RangeKind {
 
 /// Classify a `DefId` as one of the `core::ops::Range*` structs.
 pub(crate) fn range_kind(tcx: TyCtxt<'_>, def_id: DefId) -> RangeKind {
-    if tcx.is_lang_item(def_id, LangItem::RangeTo) {
+    if lang_api::matches(tcx, def_id, LangItem::RangeTo) {
         RangeKind::RangeTo
-    } else if tcx.is_lang_item(def_id, LangItem::RangeFrom) {
+    } else if lang_api::matches(tcx, def_id, LangItem::RangeFrom) {
         RangeKind::RangeFrom
-    } else if tcx.is_lang_item(def_id, LangItem::RangeInclusiveStruct) {
+    } else if lang_api::matches(tcx, def_id, LangItem::RangeInclusiveStruct) {
         RangeKind::RangeInclusive
-    } else if tcx.is_lang_item(def_id, LangItem::Range) {
+    } else if lang_api::matches(tcx, def_id, LangItem::Range) {
         RangeKind::Range
     } else {
         RangeKind::Other
@@ -169,8 +158,8 @@ pub(crate) fn range_kind(tcx: TyCtxt<'_>, def_id: DefId) -> RangeKind {
 /// Whether `def_id` is any `core::ops::Range*` struct.
 pub(crate) fn is_range_type(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     !matches!(range_kind(tcx, def_id), RangeKind::Other)
-        || tcx.is_lang_item(def_id, LangItem::RangeToInclusive)
-        || tcx.is_lang_item(def_id, LangItem::RangeFull)
+        || lang_api::matches(tcx, def_id, LangItem::RangeToInclusive)
+        || lang_api::matches(tcx, def_id, LangItem::RangeFull)
 }
 
 /// Resolve a `FnDef(def_id, args)` (already `skip_binder`d by the caller) to
@@ -918,7 +907,7 @@ fn offset_of_ty_from_func<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> Opti
     let TyKind::FnDef(def_id, _) = c.const_.ty().kind() else {
         return None;
     };
-    if !tcx.is_lang_item(*def_id, LangItem::OffsetOf) {
+    if !lang_api::matches(tcx, *def_id, LangItem::OffsetOf) {
         return None;
     }
     fn_def_first_type_arg(func)
@@ -1167,9 +1156,10 @@ pub(crate) fn eval_array_len<'tcx>(
         promoted: None,
     };
     if let Ok(val) = tcx.const_eval_global_id(TypingEnv::fully_monomorphized(), cid, DUMMY_SP)
-        && let Some(scalar) = val.try_to_scalar_int() {
-            return Some(scalar.to_target_usize(tcx));
-        }
+        && let Some(scalar) = val.try_to_scalar_int()
+    {
+        return Some(scalar.to_target_usize(tcx));
+    }
     None
 }
 
@@ -1502,44 +1492,41 @@ pub fn collect_all_const_bytes_worklist<'tcx>(
                     args,
                     ..
                 } = &terminator.kind
-                {
-                    let dlocal = destination.local;
-                    if dlocal != local {
-                        continue;
-                    }
-                    if !destination.projection.is_empty() {
-                        continue;
-                    }
-                    let did = dep_callee_def_id(func);
-                    if did.is_some_and(|d| other_api::as_ptr_like_fns().contains(&d)) {
-                        for arg in args {
-                            if let Some(bytes) =
-                                trace_const_bytes_from_operand(tcx, body, &arg.node)
-                            {
-                                results.push(bytes);
-                            }
+            {
+                let dlocal = destination.local;
+                if dlocal != local {
+                    continue;
+                }
+                if !destination.projection.is_empty() {
+                    continue;
+                }
+                let did = dep_callee_def_id(func);
+                if did.is_some_and(|d| other_api::as_ptr_like_fns().contains(&d)) {
+                    for arg in args {
+                        if let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &arg.node) {
+                            results.push(bytes);
                         }
-                    }
-                    if did.is_some_and(|d| other_api::ptr_add_fns().contains(&d))
-                        && let Some(offset) =
-                            args.get(1).and_then(|a| operand_scalar_int(&a.node))
-                        && let Some(base) = args.first()
-                        && let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &base.node)
-                    {
-                        let start = offset as usize;
-                        if start < bytes.len() {
-                            results.push(bytes[start..].to_vec());
-                        }
-                    }
-                    #[cfg(rapx_ge_99)]
-                    if did.is_some_and(|d| other_api::box_assume_init_into_vec_unsafe() == Some(d))
-                        && let Some(box_op) = args.first()
-                        && let Operand::Copy(p) | Operand::Move(p) = &box_op.node
-                        && p.projection.is_empty()
-                    {
-                        worklist.push(p.local);
                     }
                 }
+                if did.is_some_and(|d| other_api::ptr_add_fns().contains(&d))
+                    && let Some(offset) = args.get(1).and_then(|a| operand_scalar_int(&a.node))
+                    && let Some(base) = args.first()
+                    && let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &base.node)
+                {
+                    let start = offset as usize;
+                    if start < bytes.len() {
+                        results.push(bytes[start..].to_vec());
+                    }
+                }
+                #[cfg(rapx_ge_99)]
+                if did.is_some_and(|d| other_api::box_assume_init_into_vec_unsafe() == Some(d))
+                    && let Some(box_op) = args.first()
+                    && let Operand::Copy(p) | Operand::Move(p) = &box_op.node
+                    && p.projection.is_empty()
+                {
+                    worklist.push(p.local);
+                }
+            }
         }
     }
 
@@ -1595,15 +1582,14 @@ fn collect_as_ptr_const_bytes<'tcx>(
     for data in body.basic_blocks.iter() {
         if let Some(terminator) = &data.terminator
             && let TerminatorKind::Call { func, args, .. } = &terminator.kind
-                && dep_callee_def_id(func)
-                    .is_some_and(|d| other_api::as_ptr_like_fns().contains(&d))
-                {
-                    for arg in args {
-                        if let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &arg.node) {
-                            results.push(bytes);
-                        }
-                    }
+            && dep_callee_def_id(func).is_some_and(|d| other_api::as_ptr_like_fns().contains(&d))
+        {
+            for arg in args {
+                if let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &arg.node) {
+                    results.push(bytes);
                 }
+            }
+        }
     }
 }
 
@@ -1639,20 +1625,18 @@ fn const_bytes_from_call_dest<'tcx>(
                 args,
                 ..
             } = &terminator.kind
-            {
-                if destination.local != local || !destination.projection.is_empty() {
-                    continue;
-                }
-                if dep_callee_def_id(func)
-                    .is_some_and(|d| other_api::as_ptr_like_fns().contains(&d))
-                {
-                    for arg in args {
-                        if let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &arg.node) {
-                            return Some(bytes);
-                        }
+        {
+            if destination.local != local || !destination.projection.is_empty() {
+                continue;
+            }
+            if dep_callee_def_id(func).is_some_and(|d| other_api::as_ptr_like_fns().contains(&d)) {
+                for arg in args {
+                    if let Some(bytes) = trace_const_bytes_from_operand(tcx, body, &arg.node) {
+                        return Some(bytes);
                     }
                 }
             }
+        }
     }
     None
 }
@@ -1697,9 +1681,10 @@ pub fn const_bytes_for_local<'tcx>(
             if let Rvalue::Cast(_, operand, _) = rvalue {
                 if let Operand::Copy(p) | Operand::Move(p) = operand
                     && p.projection.is_empty()
-                        && let Some(bytes) = const_bytes_for_local(tcx, body, p.local) {
-                            return Some(bytes);
-                        }
+                    && let Some(bytes) = const_bytes_for_local(tcx, body, p.local)
+                {
+                    return Some(bytes);
+                }
                 continue;
             }
             return rvalue_const_bytes(tcx, rvalue);
@@ -1726,9 +1711,11 @@ fn aggregate_op_is_nonzero<'tcx>(
                     && let TerminatorKind::Call {
                         destination, func, ..
                     } = &terminator.kind
-                        && destination.local == p.local && destination.projection.is_empty() {
-                            return fn_always_returns_nonzero(tcx, func);
-                        }
+                    && destination.local == p.local
+                    && destination.projection.is_empty()
+                {
+                    return fn_always_returns_nonzero(tcx, func);
+                }
             }
             false
         }
@@ -1750,9 +1737,10 @@ fn fn_always_returns_nonzero<'tcx>(tcx: TyCtxt<'tcx>, func: &Operand<'tcx>) -> b
     let mut has_return = false;
     for bb_data in callee_body.basic_blocks.iter() {
         if let Some(terminator) = &bb_data.terminator
-            && matches!(terminator.kind, TerminatorKind::Return) {
-                has_return = true;
-            }
+            && matches!(terminator.kind, TerminatorKind::Return)
+        {
+            has_return = true;
+        }
         for stmt in &bb_data.statements {
             let StatementKind::Assign(assign) = &stmt.kind else {
                 continue;

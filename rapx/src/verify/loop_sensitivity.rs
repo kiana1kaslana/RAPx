@@ -28,14 +28,15 @@
 //!   state, and the planner estimates the first iteration that can witness a
 //!   range violation.
 //!
-//! `RepeatPlan` is the single product consumed by the driver.  It calibrates
-//! both hint kinds into the `PathEnumerator`'s `allow_repeat` budget and picks
-//! the maximum, so detector-specific details stay inside this module.
+//! Both hint kinds are calibrated into the `PathEnumerator`'s `allow_repeat`
+//! budget, keeping detector-specific details inside this module.
 
 use crate::analysis::path::graph::PathGraph;
 use crate::compat::{FxHashMap, FxHashSet};
 use crate::helpers::mir_utils;
 use rustc_hir::def_id::DefId;
+#[cfg(rapx_const_ext)]
+use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::{
     mir::{
         AggregateKind, BasicBlock, BinOp, Body, Local, Operand, Place, ProjectionElem, Rvalue,
@@ -43,8 +44,6 @@ use rustc_middle::{
     },
     ty::{TyCtxt, TyKind, TypingEnv},
 };
-#[cfg(rapx_const_ext)]
-use rustc_middle::ty::consts::ConstExt;
 
 use super::{
     contract::{ContractExpr, NumericPredicate, Property, PropertyArg, PropertyKind, RelOp},
@@ -63,7 +62,7 @@ use crate::limit::{
 ///
 /// `Fixed(n)` preserves the explicit CLI behavior: the driver checks all
 /// rounds `0..=n`.  `Auto` delegates the upper bound to this module and checks
-/// `0..=plan.repeat`, because the current SCC path enumerator is not strictly
+/// `0..=repeat`, because the current SCC path enumerator is not strictly
 /// monotonic across repeat depths when path limits and branch order interact.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RepeatStrategy {
@@ -71,37 +70,6 @@ pub(crate) enum RepeatStrategy {
     Auto,
     /// Use the concrete repeat count supplied by `--postfix-repeat N`.
     Fixed(usize),
-}
-
-/// Unified product of the auto loop-sensitivity pass for one function target.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct RepeatPlan {
-    /// Repeat count that should be passed to `VerifyDriver::new_with_repeat`.
-    pub repeat: usize,
-}
-
-impl RepeatPlan {
-    /// Merge both detector streams into the path-enumerator repeat budget.
-    fn from_hints(
-        dataflow_hints: Vec<DataflowDistanceHint>,
-        numeric_hints: Vec<NumericRangeHint>,
-        exact_range_repeat: usize,
-    ) -> Self {
-        let repeat = dataflow_hints
-            .iter()
-            .map(DataflowDistanceHint::calibrated_repeat)
-            .chain(
-                numeric_hints
-                    .iter()
-                    .map(NumericRangeHint::calibrated_repeat),
-            )
-            .max()
-            .unwrap_or(0)
-            .min(MAX_AUTO_REPEAT)
-            .max(exact_range_repeat);
-
-        Self { repeat }
-    }
 }
 
 /// A loop-carried dataflow hint.
@@ -187,14 +155,14 @@ impl<'tcx> LoopSensitivityAnalyzer<'tcx> {
     /// This is a conservative planner: it may choose a deeper repeat for loops
     /// that turn out to be safe, but it avoids adding tag-specific verifier
     /// reruns or new user-visible output.
-    pub(crate) fn analyze(&self, target: &FunctionTarget<'tcx>) -> RepeatPlan {
+    pub(crate) fn analyze(&self, target: &FunctionTarget<'tcx>) -> usize {
         if !self.tcx.is_mir_available(target.def_id) {
-            return RepeatPlan::default();
+            return 0;
         }
 
         let sinks = self.collect_sinks(target);
         if sinks.is_empty() {
-            return RepeatPlan::default();
+            return 0;
         }
 
         let mut graph = PathGraph::new(self.tcx, target.def_id);
@@ -235,7 +203,18 @@ impl<'tcx> LoopSensitivityAnalyzer<'tcx> {
             &dependencies,
         ));
 
-        RepeatPlan::from_hints(dataflow_hints, numeric_hints, exact_range_repeat)
+        dataflow_hints
+            .iter()
+            .map(DataflowDistanceHint::calibrated_repeat)
+            .chain(
+                numeric_hints
+                    .iter()
+                    .map(NumericRangeHint::calibrated_repeat),
+            )
+            .max()
+            .unwrap_or(0)
+            .min(MAX_AUTO_REPEAT)
+            .max(exact_range_repeat)
     }
 
     /// Compute loop-carried dataflow hints for every safety sink.
@@ -403,19 +382,27 @@ fn inclusive_range_repeat<'tcx>(
     sinks: &[SafetySink<'_, '_>],
     dependencies: &LocalDependencyIndex,
 ) -> usize {
-    if !sinks.iter().any(|sink| matches!(sink.property.kind(), Some(PropertyKind::InBound))) {
+    if !sinks
+        .iter()
+        .any(|sink| matches!(sink.property.kind(), Some(PropertyKind::InBound)))
+    {
         return 0;
     }
     let mut bound_roots = FxHashSet::default();
     for block in body.basic_blocks.iter() {
-        let TerminatorKind::Call { destination, args, .. } = &block.terminator().kind else {
+        let TerminatorKind::Call {
+            destination, args, ..
+        } = &block.terminator().kind
+        else {
             continue;
         };
         let TyKind::Adt(adt, _) = body.local_decls[destination.local].ty.kind() else {
             continue;
         };
-        if matches!(mir_utils::range_kind(tcx, adt.did()), mir_utils::RangeKind::RangeInclusive)
-            && let Some(end) = args.get(1)
+        if matches!(
+            mir_utils::range_kind(tcx, adt.did()),
+            mir_utils::RangeKind::RangeInclusive
+        ) && let Some(end) = args.get(1)
         {
             collect_operand_sources(&end.node, &mut bound_roots);
         }
@@ -424,7 +411,8 @@ fn inclusive_range_repeat<'tcx>(
         return 0;
     }
     let sources = dependencies.closure_from(&bound_roots);
-    sources.iter()
+    sources
+        .iter()
         .filter_map(|local| match body.local_decls[*local].ty.kind() {
             TyKind::Array(_, len) => len.try_to_target_usize(tcx),
             _ => None,

@@ -4,17 +4,12 @@
 //! offset) against the expected type; `Size` checks `sized`/`unsized`/exact
 //! size assertions.
 
+use crate::def_ids::lang_api::{self, LangItem};
 use crate::helpers::mir_utils;
 use crate::verify::checkpoint::Checkpoint;
 use crate::verify::contract::{ContractExpr, Property, PropertyArg};
 use crate::verify::report::{CheckResult, UnknownReason};
 use crate::verify::vm::state::VmState;
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
 use rustc_middle::ty::{Ty, TyKind};
 use z3::{
     SatResult, Solver,
@@ -95,74 +90,76 @@ impl PropertyChecker {
                     }
                     if let TyKind::Adt(adt_def, substs) = elem_ty.kind()
                         && crate::verify::api_classify::is_maybe_uninit_type(adt_def.did())
-                            && matches!(value.ty.kind(), TyKind::RawPtr(..))
-                            && let Some(inner) = substs.first().and_then(|s| s.as_type())
-                                && inner == expected_ty
-                                    && crate::verify::api_classify::is_mem_copy_or_write(
-                                        checkpoint.callee,
-                                    ) {
+                        && matches!(value.ty.kind(), TyKind::RawPtr(..))
+                        && let Some(inner) = substs.first().and_then(|s| s.as_type())
+                        && inner == expected_ty
+                        && crate::verify::api_classify::is_mem_copy_or_write(checkpoint.callee)
+                    {
+                        return CheckResult::ProvedByRule;
+                    }
+                    if let TyKind::Adt(adt_def, substs) = elem_ty.kind()
+                        && !adt_def.is_enum()
+                    {
+                        let off_u64 = value
+                            .provenance
+                            .as_ref()
+                            .and_then(|p| p.offset.simplify().as_u64());
+                        let variant = adt_def.non_enum_variant();
+                        let mut accum: u64 = 0;
+                        for (i, field_def) in variant.fields.iter().enumerate() {
+                            let field_off = vm_state.field_offset_in_bytes(elem_ty, i);
+                            if i > 0 && field_off == 0 {
+                                accum = 0;
+                            }
+                            let field_ty: Ty<'tcx> =
+                                mir_utils::field_ty(vm_state.tcx, field_def, substs);
+                            if field_ty == expected_ty {
+                                if off_u64 == Some(accum) {
+                                    if value.facts.init {
                                         return CheckResult::ProvedByRule;
                                     }
-                    if let TyKind::Adt(adt_def, substs) = elem_ty.kind()
-                        && !adt_def.is_enum() {
-                            let off_u64 = value
-                                .provenance
-                                .as_ref()
-                                .and_then(|p| p.offset.simplify().as_u64());
-                            let variant = adt_def.non_enum_variant();
-                            let mut accum: u64 = 0;
-                            for (i, field_def) in variant.fields.iter().enumerate() {
-                                let field_off = vm_state.field_offset_in_bytes(elem_ty, i);
-                                if i > 0 && field_off == 0 {
-                                    accum = 0;
+                                    return CheckResult::Failed;
                                 }
-                                let field_ty: Ty<'tcx> = mir_utils::field_ty(
-                                    vm_state.tcx,
-                                    field_def,
-                                    substs,
-                                );
-                                if field_ty == expected_ty {
-                                    if off_u64 == Some(accum) {
-                                        if value.facts.init {
-                                            return CheckResult::ProvedByRule;
-                                        }
-                                        return CheckResult::Failed;
+                            } else if off_u64 == Some(accum) {
+                                if let TyKind::Adt(wrap_adt, wrap_substs) = field_ty.kind()
+                                    && !wrap_adt.is_enum()
+                                    && (lang_api::matches(
+                                        vm_state.tcx,
+                                        wrap_adt.did(),
+                                        LangItem::ManuallyDrop,
+                                    ) || lang_api::matches(
+                                        vm_state.tcx,
+                                        wrap_adt.did(),
+                                        LangItem::UnsafeCell,
+                                    ))
+                                    && wrap_substs.first().and_then(|s| s.as_type())
+                                        == Some(expected_ty)
+                                {
+                                    if vm_state.content(alloc_id).facts.initialized {
+                                        return CheckResult::ProvedByRule;
                                     }
-                                } else if off_u64 == Some(accum) {
-                                    if let TyKind::Adt(wrap_adt, wrap_substs) = field_ty.kind()
-                                        && !wrap_adt.is_enum()
-                                            && (vm_state.tcx.is_lang_item(
-                                                wrap_adt.did(),
-                                                LangItem::ManuallyDrop,
-                                            ) || vm_state
-                                                .tcx
-                                                .is_lang_item(wrap_adt.did(), LangItem::UnsafeCell))
-                                                && wrap_substs.first().and_then(|s| s.as_type())
-                                                    == Some(expected_ty)
-                                            {
-                                                if vm_state.content(alloc_id).facts.initialized {
-                                                    return CheckResult::ProvedByRule;
-                                                }
-                                                return CheckResult::Failed;
-                                            }
+                                    return CheckResult::Failed;
                                 }
-                                accum += vm_state.size_of_ty(field_ty).max(1);
                             }
+                            accum += vm_state.size_of_ty(field_ty).max(1);
                         }
+                    }
                     if property.for_each().is_some()
                         && let TyKind::RawPtr(inner, _) = elem_ty.kind()
-                            && *inner == expected_ty {
-                                return CheckResult::ProvedByRule;
-                            }
+                        && *inner == expected_ty
+                    {
+                        return CheckResult::ProvedByRule;
+                    }
                     // A single pointer loaded from a container whose
                     // `Typed(container.iter(), T)` invariant established the
                     // element target type (`let cur = buckets[i]`). The fact comes
                     // from the invariant, so this does not bless dangling pointers
                     // in containers that carry no such invariant.
                     if let Some(target) = vm_state.alloc(alloc_id).facts.for_each.target_ty
-                        && target == expected_ty {
-                            return CheckResult::ProvedByRule;
-                        }
+                        && target == expected_ty
+                    {
+                        return CheckResult::ProvedByRule;
+                    }
                     // Transmute to an all-bit-valid destination type
                     // (integers, floats, raw pointers): any byte pattern is
                     // a valid value, so a reinterpretation from a
@@ -188,11 +185,11 @@ impl PropertyChecker {
 
             if value.facts.init
                 && vm_state.size_of_ty(value_elem_ty) > 0
-                    && vm_state.size_of_ty(expected_ty) > 0
-                    && vm_state.size_of_ty(value_elem_ty) == vm_state.size_of_ty(expected_ty)
-                {
-                    return CheckResult::ProvedByRule;
-                }
+                && vm_state.size_of_ty(expected_ty) > 0
+                && vm_state.size_of_ty(value_elem_ty) == vm_state.size_of_ty(expected_ty)
+            {
+                return CheckResult::ProvedByRule;
+            }
 
             // For ForEach (for_each) properties, the invariant applies to
             // individual elements loaded from a container. The VM may not track
@@ -200,11 +197,11 @@ impl PropertyChecker {
             // match, trust the type.
             if property.for_each().is_some()
                 && vm_state.size_of_ty(value_elem_ty) > 0
-                    && vm_state.size_of_ty(expected_ty) > 0
-                    && vm_state.size_of_ty(value_elem_ty) == vm_state.size_of_ty(expected_ty)
-                {
-                    return CheckResult::ProvedByRule;
-                }
+                && vm_state.size_of_ty(expected_ty) > 0
+                && vm_state.size_of_ty(value_elem_ty) == vm_state.size_of_ty(expected_ty)
+            {
+                return CheckResult::ProvedByRule;
+            }
 
             // When we have provenance but the element type doesn't match and
             // sizes match, assume the type is correct. This handles pointers
@@ -213,9 +210,10 @@ impl PropertyChecker {
             let es = vm_state.size_of_ty(expected_ty);
             if let Some(alloc_id) = value.provenance_alloc_id()
                 && vs == es
-                && !vm_state.alloc(alloc_id).element_ty.is_generic() {
-                    return CheckResult::ProvedByRule;
-                }
+                && !vm_state.alloc(alloc_id).element_ty.is_generic()
+            {
+                return CheckResult::ProvedByRule;
+            }
 
             if vs > 0 && es > 0 && vs != es {
                 return CheckResult::Failed;
@@ -356,8 +354,7 @@ impl PropertyChecker {
                 let variant = adt_def.non_enum_variant();
                 let mut sum = 0u64;
                 for field_def in variant.fields.iter() {
-                    let field_ty: Ty<'tcx> =
-                        mir_utils::field_ty(tcx, field_def, substs);
+                    let field_ty: Ty<'tcx> = mir_utils::field_ty(tcx, field_def, substs);
                     match self.type_has_no_padding(vm_state, field_ty) {
                         Some(true) => sum += vm_state.size_of_ty(field_ty),
                         Some(false) => return Some(false),

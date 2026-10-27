@@ -1,20 +1,15 @@
 #[cfg(not(rapx_has_skip_norm_wip))]
 use crate::compat::SkipNormWip;
+use crate::def_ids::lang_api::{self, LangItem};
 use crate::limit::FUZZABLE_MAX_DEPTH;
 #[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), not(rapx_ge_100)))]
-use rustc_hir::LangItem;
-#[cfg(all(not(rapx_has_attr_ir), rapx_ge_100))]
-use rustc_hir::attrs::lang_items::LangItem;
+use rustc_attr_ir::AttributeKind;
 #[cfg(rapx_has_attr_ir)]
 use rustc_attr_ir::find_attr;
-#[cfg(rapx_has_attr_ir)]
-use rustc_attr_ir::AttributeKind;
-#[cfg(not(rapx_has_attr_ir))]
-use rustc_hir::find_attr;
 #[cfg(not(rapx_has_attr_ir))]
 use rustc_hir::attrs::AttributeKind;
+#[cfg(not(rapx_has_attr_ir))]
+use rustc_hir::find_attr;
 #[cfg(rapx_const_ext)]
 use rustc_middle::ty::consts::ConstExt;
 use rustc_middle::ty::{self, Ty, TyCtxt, TyKind};
@@ -24,7 +19,7 @@ use rustc_type_ir::TypeVisitable;
 fn is_fuzzable_std_ty<'tcx>(ty: Ty<'tcx>, tcx: TyCtxt<'tcx>, depth: usize) -> bool {
     match ty.kind() {
         ty::Adt(def, args) => {
-            if tcx.is_lang_item(def.did(), LangItem::String) {
+            if lang_api::matches(tcx, def.did(), LangItem::String) {
                 return true;
             }
             if tcx.is_diagnostic_item(sym::Vec, def.did())
