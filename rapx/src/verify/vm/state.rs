@@ -655,6 +655,10 @@ pub(crate) struct VmState<'z3, 'tcx> {
     pub(crate) tcx: TyCtxt<'tcx>,
     root_def_id: DefId,
     instance_body: Option<&'tcx Body<'tcx>>,
+    /// MIR for the active frame when it was instantiated at a callsite.
+    pub(crate) frame_body: Option<&'tcx Body<'tcx>>,
+    /// Body overrides parked by `save_frame` for path and recursive inlining.
+    saved_frame_bodies: Vec<Option<&'tcx Body<'tcx>>>,
 
     // ── Frame-scoped state (swapped on inline entry/exit; the exact set
     //    captured by [`Self::save_frame`])
@@ -725,6 +729,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             tcx,
             root_def_id: caller_def_id,
             instance_body,
+            frame_body: instance_body,
+            saved_frame_bodies: Vec::new(),
             current_frame: FrameState {
                 current_def_id: caller_def_id,
                 local_alloc: FxHashMap::default(),
@@ -752,11 +758,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     }
 
     pub(crate) fn body_for(&self, def_id: DefId) -> &'tcx Body<'tcx> {
-        if def_id == self.root_def_id && let Some(body) = &self.instance_body {
+        if def_id == self.current_frame.current_def_id && let Some(body) = self.frame_body {
+            body
+        } else if def_id == self.root_def_id && let Some(body) = &self.instance_body {
             body
         } else {
             self.tcx.optimized_mir(def_id)
         }
+    }
+
+    pub(crate) fn has_instantiated_root(&self) -> bool {
+        self.instance_body.is_some()
     }
 
     pub(crate) fn record_unsupported(&mut self, operation: &str) {
@@ -778,6 +790,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Both inline mechanisms (`handle_callee_entry` in path replay and
     /// `exec_inline_call`) call this, so they can no longer drift apart.
     pub(crate) fn save_frame(&mut self) -> FrameState {
+        self.saved_frame_bodies.push(self.frame_body.take());
         FrameState {
             current_def_id: self.current_frame.current_def_id,
             local_alloc: std::mem::take(&mut self.current_frame.local_alloc),
@@ -787,6 +800,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Restore the frame-scoped state after an inlined callee returns.
     pub(crate) fn restore_frame(&mut self, frame: FrameState) {
         self.current_frame = frame;
+        self.frame_body = self.saved_frame_bodies.pop().expect("saved frame body");
     }
 
     /// Look up the whole value bound to a MIR local (its `path == []` slot in

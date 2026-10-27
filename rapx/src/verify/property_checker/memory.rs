@@ -15,12 +15,39 @@ use rustc_hash::FxHashSet;
 use rustc_middle::mir::{Local, Operand, Rvalue, StatementKind};
 use rustc_middle::ty::TyKind;
 use z3::{
-    SatResult, Solver,
+    DeclKind, SatResult, Solver,
     ast::{Ast, Int},
 };
 
 use super::PropertyChecker;
 use super::util::maybe_uninit_inner;
+
+/// Prove divisibility from the expression tree of a pointer offset.
+/// Unknown forms return false, so they continue to the SMT check.
+fn multiple_of(term: &Int<'_>, divisor: u64, depth: usize) -> bool {
+    if divisor == 0 {
+        return false;
+    }
+    if let Some(n) = term.as_u64() {
+        return n % divisor == 0;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let child = |index| term.nth_child(index).and_then(|ast| ast.as_int());
+    match term.decl().kind() {
+        DeclKind::ADD | DeclKind::SUB => (0..term.num_children())
+            .all(|i| child(i).is_some_and(|c| multiple_of(&c, divisor, depth - 1))),
+        DeclKind::MUL => (0..term.num_children())
+            .any(|i| child(i).is_some_and(|c| multiple_of(&c, divisor, depth - 1))),
+        DeclKind::UMINUS => child(0).is_some_and(|c| multiple_of(&c, divisor, depth - 1)),
+        DeclKind::ITE => {
+            child(1).is_some_and(|c| multiple_of(&c, divisor, depth - 1))
+                && child(2).is_some_and(|c| multiple_of(&c, divisor, depth - 1))
+        }
+        _ => false,
+    }
+}
 
 impl PropertyChecker {
     pub(super) fn check_align<'z3, 'tcx>(
@@ -121,6 +148,34 @@ impl PropertyChecker {
             }
         if let Some(ref prov) = value.provenance {
             let alloc = vm_state.alloc(prov.alloc_id);
+            // `MaybeUninit<T>` and T share alignment; an array has its
+            // element's alignment. A live stack local carries that guarantee
+            // even when the full generic layout is symbolic.
+            if !alloc.is_external()
+                && let Some(required) = align.simplify().as_u64()
+                && let Some(local) = vm_state.current_frame.local_alloc.iter().find_map(|(local, id)| {
+                    (*id == prov.alloc_id).then_some(*local)
+                })
+            {
+                let mut local_ty = vm_state.body().local_decls[local].ty;
+                let mut peeled = false;
+                loop {
+                    if let Some(inner) = maybe_uninit_inner(local_ty) {
+                        local_ty = inner;
+                    } else if let TyKind::Array(elem, _) = local_ty.kind() {
+                        local_ty = *elem;
+                    } else {
+                        break;
+                    }
+                    peeled = true;
+                }
+                if peeled
+                    && vm_state.align_of_ty(local_ty) >= required
+                    && multiple_of(&prov.offset, required, 24)
+                {
+                    return CheckResult::ProvedByRule;
+                }
+            }
             let off_u64 = prov
                 .offset
                 .as_u64()

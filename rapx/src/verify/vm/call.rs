@@ -12,7 +12,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{
     BasicBlock, Local, Operand, Rvalue, StatementKind, Terminator, TerminatorKind,
 };
-use rustc_middle::ty::TyKind;
+use rustc_middle::ty::{EarlyBinder, Instance, InstanceKind, TyKind, TypingEnv};
 use z3::ast::{Ast, Bool, Int};
 use z3::{SatResult, Solver};
 
@@ -243,7 +243,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         } else if let Some(c) = callee
             && self.tcx.is_mir_available(c)
         {
-            self.exec_inline_call(c, &arg_values, &caller_arg_locals, destination);
+            let instance = (self.has_instantiated_root()
+                && mir_utils::dep_callee_def_id(func)
+                    == crate::def_ids::nomir_api::clone())
+                .then(|| mir_utils::resolve_callee_instance(self.tcx, caller_def_id, func))
+                .flatten()
+                .filter(|instance| {
+                    matches!(instance.def, InstanceKind::Item(_))
+                        && instance.def_id() == c
+                        && instance.args.types().all(|ty| !mir_utils::ty_has_type_param(ty))
+                });
+            self.exec_inline_call(c, instance, &arg_values, &caller_arg_locals, destination);
         } else if let Some(c) = callee {
             // `assert!` panic exits contain this diverging call. It cannot
             // change the caller's state before the unwind invariant check.
@@ -265,6 +275,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     fn exec_inline_call(
         &mut self,
         callee_def_id: DefId,
+        instance: Option<Instance<'tcx>>,
         arg_values: &[VmValue<'z3, 'tcx>],
         caller_arg_locals: &[Option<Local>],
         dest: Local,
@@ -305,7 +316,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             std::mem::replace(&mut self.inline.arg_referents, inline_arg_referents);
         let saved_deferred_field_writes = std::mem::take(&mut self.inline.deferred_field_writes);
 
+        let caller_def_id = self.current_frame.current_def_id;
         self.current_frame.current_def_id = callee_def_id;
+        if let Some(instance) = instance {
+            let body = self.tcx.optimized_mir(callee_def_id).clone();
+            let body = instance.instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                TypingEnv::post_analysis(self.tcx, caller_def_id),
+                EarlyBinder::bind(self.tcx, body),
+            );
+            self.frame_body = Some(&*self.tcx.arena.alloc(body));
+        }
 
         for (i, arg_val) in arg_values.iter().enumerate() {
             let callee_local = Local::from_usize(i + 1);

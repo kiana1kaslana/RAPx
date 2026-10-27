@@ -9,7 +9,7 @@ use rustc_hir::attrs::InlineAttr;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{BasicBlock, Body, Operand, Terminator, TerminatorKind},
-    ty::{EarlyBinder, Instance, TyCtxt, TypingEnv},
+    ty::{EarlyBinder, Instance, InstanceKind, TyCtxt, TypingEnv},
 };
 
 /// Maps callsites to callee block identities and argument bindings.
@@ -136,6 +136,24 @@ impl<'tcx> CallSiteIndex<'tcx> {
                 } else {
                     base_callee
                 };
+                // An instantiated root can resolve Clone at this callsite.
+                // Leave the call in the path so the VM executes that exact MIR.
+                if self.bodies.contains_key(&0)
+                    && crate::def_ids::nomir_api::clone() == Some(base_callee)
+                    && mir_utils::resolve_callee_instance(self.tcx, caller, func).is_some_and(
+                        |instance| {
+                            matches!(instance.def, InstanceKind::Item(_))
+                                && instance.def_id() == callee
+                                && instance
+                                    .args
+                                    .types()
+                                    .all(|ty| !mir_utils::ty_has_type_param(ty))
+                        },
+                    )
+                    && self.tcx.is_mir_available(callee)
+                {
+                    continue;
+                }
                 if is_trait_method {
                     let is_virtual = mir_utils::resolve_callee_instance(self.tcx, caller, func)
                         .is_some_and(|instance| mir_utils::instance_def_id(self.tcx, instance).1);
