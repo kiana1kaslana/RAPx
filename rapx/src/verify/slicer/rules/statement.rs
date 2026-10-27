@@ -80,11 +80,9 @@ impl<'tcx> BackwardSlicer<'tcx> {
             }
         };
 
-        // A statement that writes an iterator's `ptr` field (`(*self).0 = ...`,
-        // the inlined `post_inc_start`) must be kept even when it is not
-        // *value*-relevant to the property: the forward VM tracks the iterator's
-        // cumulative offset from this write (`track_iter_ptr_update`), which is
-        // what makes the loop-carried `i < n` invariant provable.
+        // Keep an iterator's `ptr` write even when the current property does
+        // not read it directly. A later `next` call reads this field to decide
+        // whether the iterator has reached its end.
         let is_iter_ptr_write = {
             let mut proj = place.projection.iter();
             if !matches!(
@@ -102,15 +100,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                     false
                 } else {
                     let base_ty = self.body_for(def_id).local_decls[place.local].ty;
-                    match base_ty.kind() {
-                        rustc_middle::ty::TyKind::Ref(_, pointee, _) => match pointee.kind() {
-                            rustc_middle::ty::TyKind::Adt(adt_def, _) => {
-                                crate::verify::api_classify::is_std_iter_or_itermut(adt_def.did())
-                            }
-                            _ => false,
-                        },
-                        _ => false,
-                    }
+                    crate::verify::api_classify::has_pointer_pair_iter_layout(base_ty)
                 }
             }
         };

@@ -587,6 +587,9 @@ pub(crate) struct TermCaches<'z3, 'tcx> {
     /// consistent so that SMT can cancel the `S` factor in `InBound`.
     pub(crate) sizes: FxHashMap<Ty<'tcx>, Int<'z3>>,
 
+    /// Positive size terms already proved on this path. Assertions only accumulate.
+    pub(crate) non_zst: FxHashSet<Int<'z3>>,
+
     /// `align_T` for each generic type, one symbolic constant per type; linked
     /// to the size by the layout constraint `sizeof_T % align_T == 0`.
     pub(crate) aligns: FxHashMap<Ty<'tcx>, Int<'z3>>,

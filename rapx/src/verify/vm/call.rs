@@ -12,7 +12,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{
     BasicBlock, Local, Operand, Rvalue, StatementKind, Terminator, TerminatorKind,
 };
-use rustc_middle::ty::{EarlyBinder, Instance, InstanceKind, Ty, TyKind, TypingEnv};
+use rustc_middle::ty::{EarlyBinder, Instance, InstanceKind, TyKind, TypingEnv};
 use z3::ast::{Ast, Bool, Int};
 use z3::{SatResult, Solver};
 
@@ -243,13 +243,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         } else if let Some(c) = callee
             && self.tcx.is_mir_available(c)
         {
-            // The pointer-pair iterator effect maintains a relation between
-            // successive `next` calls and the original length. Inlining an
-            // unregistered iterator can lose that relation across a loop,
-            // even when each individual call has MIR available.
-            let unmodeled_iter_next = arg_values
-                .first()
-                .is_some_and(|receiver| self.is_unmodeled_pointer_pair_next(c, receiver.ty));
             let instance = (self.has_instantiated_root()
                 && mir_utils::dep_callee_def_id(func)
                     == crate::def_ids::nomir_api::clone())
@@ -261,12 +254,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         && instance.args.types().all(|ty| !mir_utils::ty_has_type_param(ty))
                 });
             self.exec_inline_call(c, instance, &arg_values, &caller_arg_locals, destination);
-            if unmodeled_iter_next {
-                self.record_unsupported(&format!(
-                    "{}: pointer-pair iterator next state is not modeled",
-                    self.tcx.def_path_str(c)
-                ));
-            }
         } else if let Some(c) = callee {
             // `assert!` panic exits contain this diverging call. It cannot
             // change the caller's state before the unwind invariant check.
@@ -968,28 +955,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             },
             _ => None,
         }
-    }
-
-    pub(crate) fn is_unmodeled_pointer_pair_next(&self, callee: DefId, receiver: Ty<'tcx>) -> bool {
-        if self.tcx.item_name(callee).as_str() != "next"
-            || api_classify::is_iter_next(Some(callee))
-        {
-            return false;
-        }
-        let TyKind::Ref(_, pointee, _) = receiver.kind() else {
-            return false;
-        };
-        let TyKind::Adt(adt, _) = pointee.kind() else {
-            return false;
-        };
-        if !adt.is_struct() || api_classify::is_std_iter_or_itermut(adt.did()) {
-            return false;
-        }
-        let mut fields = adt.non_enum_variant().fields.iter();
-        fields.next().is_some_and(|field| field.name.as_str() == "ptr")
-            && fields
-                .next()
-                .is_some_and(|field| field.name.as_str() == "end_or_len")
     }
 
     fn is_slice_iter_next_receiver(&self, receiver: &VmValue<'z3, 'tcx>) -> bool {

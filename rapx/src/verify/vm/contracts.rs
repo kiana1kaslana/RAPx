@@ -732,15 +732,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
-    /// When `lhs op rhs` compares an iterator's `ptr` and `end_or_len` pointers
-    /// (the inlined form of `is_empty`: `ptr == end`), express the comparison
-    /// element-wise as `iter_ptr_offset == base_len`. The operands may be plain
-    /// temporaries (from the `as_ptr`/cast/field-read lowering), so the iterator
-    /// is located via the shared buffer allocation (the `end` field's provenance
-    /// alloc id). Returns `None` when this is not an iterator emptiness
-    /// comparison.
+    /// Compare an iterator's `ptr` and `end_or_len` by their element indices
+    /// when both pointers carry them. This preserves the relation established
+    /// by MIR field writes across repeated `next` calls. The existing tracked
+    /// offset remains a fallback when direct indices are unavailable.
     pub(crate) fn iter_ptr_comparison(
-        &self,
+        &mut self,
         op: rustc_middle::mir::BinOp,
         lhs: &VmValue<'z3, 'tcx>,
         rhs: &VmValue<'z3, 'tcx>,
@@ -756,29 +753,55 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if lp.alloc_id != rp.alloc_id {
             return None;
         }
-        let mut candidates = self
-            .constraints
-            .term_caches
-            .iter_ptr_offset
-            .values()
-            .filter(|(buffer, _, _)| *buffer == lp.alloc_id);
-        let (_, offset, base_len) = candidates.next()?;
-        if candidates.next().is_some() {
-            return None;
-        }
-        let is_iter_comparison = self.current_frame.local_alloc.keys().any(|local| {
+        let elem_ty = self.current_frame.local_alloc.keys().find_map(|local| {
+            if !self.local_value(*local).is_some_and(|value| {
+                api_classify::has_pointer_pair_iter_layout(value.ty)
+            }) {
+                return None;
+            }
             let Some((ptr, end)) = self.iter_ptr_end(*local) else {
-                return false;
+                return None;
             };
-            (ptr.z3_term.simplify() == lhs.z3_term.simplify()
+            let ptr_elem = mir_utils::pointee_ty(ptr.ty)?;
+            if Some(ptr_elem) != mir_utils::pointee_ty(end.ty) {
+                return None;
+            }
+            ((ptr.z3_term.simplify() == lhs.z3_term.simplify()
                 && end.z3_term.simplify() == rhs.z3_term.simplify())
                 || (ptr.z3_term.simplify() == rhs.z3_term.simplify()
-                    && end.z3_term.simplify() == lhs.z3_term.simplify())
-        });
-        if !is_iter_comparison {
-            return None;
+                    && end.z3_term.simplify() == lhs.z3_term.simplify()))
+                .then_some(ptr_elem)
+        })?;
+        let element = |prov: &Provenance<'z3>| match &prov.offset_kind {
+            Some(OffsetKind::Element(index)) => Some(index.clone()),
+            None if prov.offset.simplify().as_u64() == Some(0) => {
+                Some(Int::from_u64(self.z3_ctx, 0))
+            }
+            _ => None,
+        };
+        let size = self.size_sym_read(elem_ty);
+        let non_zst = self.constraints.term_caches.non_zst.contains(&size)
+            || self.path_implies(&size.gt(&Int::from_u64(self.z3_ctx, 0)));
+        if non_zst {
+            self.constraints.term_caches.non_zst.insert(size);
         }
-        let eq = offset._eq(base_len.as_ref()?);
+        let direct = non_zst
+            .then(|| element(lp).zip(element(rp)))
+            .flatten()
+            .map(|(left, right)| left._eq(&right));
+        let eq = direct.or_else(|| {
+            let mut candidates = self
+                .constraints
+                .term_caches
+                .iter_ptr_offset
+                .values()
+                .filter(|(buffer, _, _)| *buffer == lp.alloc_id);
+            let (_, offset, base_len) = candidates.next()?;
+            if candidates.next().is_some() {
+                return None;
+            }
+            Some(offset._eq(base_len.as_ref()?))
+        })?;
         Some(if matches!(op, rustc_middle::mir::BinOp::Eq) {
             eq
         } else {

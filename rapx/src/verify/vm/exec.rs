@@ -73,16 +73,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         arg_consts: &[(usize, crate::analysis::path::CallConstArg)],
         arg_field_offsets: &[usize],
     ) {
-        if arg_locals
-            .first()
-            .and_then(|arg| self.local_value(Local::from_usize(*arg)))
-            .is_some_and(|receiver| self.is_unmodeled_pointer_pair_next(callee, receiver.ty))
-        {
-            self.record_unsupported(&format!(
-                "{}: pointer-pair iterator next state is not modeled",
-                self.tcx.def_path_str(callee)
-            ));
-        }
         let method_call = arg_locals.first().and_then(|arg| {
             self.local_value(Local::from_usize(*arg))
                 .and_then(|receiver| self.begin_method_call(callee, receiver, Some(Local::from_usize(*arg))))
@@ -91,8 +81,20 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let arg_referents: Vec<Option<Local>> = arg_locals
             .iter()
             .map(|arg| {
-                self.local_value(Local::from_usize(*arg))
-                    .and_then(|value| self.find_local_by_address(&value.z3_term))
+                let arg_local = Local::from_usize(*arg);
+                self.local_value(arg_local).and_then(|value| {
+                    self.find_local_by_address(&value.z3_term).or_else(|| {
+                        self.find_whole_reborrow_referent(arg_local)
+                            .or_else(|| self.find_copy_root(arg_local))
+                            .filter(|root| {
+                                self.local_value(*root).is_some_and(|source| {
+                                    value.provenance_alloc_id().is_some_and(|id| {
+                                        source.provenance_alloc_id() == Some(id)
+                                    })
+                                }) && self.field_value(*root, &[0]).is_some()
+                            })
+                    })
+                })
             })
             .collect();
         let saved_referents = std::mem::replace(&mut self.inline.arg_referents, arg_referents);

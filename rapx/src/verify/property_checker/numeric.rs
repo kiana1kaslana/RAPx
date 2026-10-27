@@ -148,14 +148,8 @@ impl PropertyChecker {
         };
         solver.push();
         vm_state.assert_all(solver);
-        // Bridge the iter_ptr_offset (tracked by post_inc_start) to the
-        // predicate's LHS (typically the loop counter `i` in position).
-        // At the assert_unchecked(i < n) point, tracked_offset == i + 1
-        // because post_inc_start(1) was just called before the check.
-        for (_, off, _) in vm_state.constraints.term_caches.iter_ptr_offset.values() {
-            let one = Int::from_u64(vm_state.z3_ctx, 1);
-            solver.assert(&off._eq(&Int::add(vm_state.z3_ctx, &[&lhs, &one])));
-        }
+        // A predicate argument can be a boolean, so it cannot be equated with
+        // an iterator's numeric offset. Use only relations from the VM path.
         // NIA helper: inject Euclidean division identity for div operands
         // to help Z3 prove (X/N)*N <= X via X = (X/N)*N + X%N, X%N >= 0.
         self.inject_nia_axioms(vm_state, solver, checkpoint, &pred.lhs);
