@@ -80,31 +80,6 @@ impl<'tcx> BackwardSlicer<'tcx> {
             }
         };
 
-        // Keep an iterator's `ptr` write even when the current property does
-        // not read it directly. A later `next` call reads this field to decide
-        // whether the iterator has reached its end.
-        let is_iter_ptr_write = {
-            let mut proj = place.projection.iter();
-            if !matches!(
-                proj.next().map(|p| p.kind()),
-                Some(rustc_middle::mir::ProjectionElem::Deref)
-            ) {
-                false
-            } else {
-                let is_field0 = matches!(
-                    (proj.next().map(|p| p.kind()), proj.next()),
-                    (Some(rustc_middle::mir::ProjectionElem::Field(f, _)), None)
-                        if f.as_usize() == 0
-                );
-                if !is_field0 {
-                    false
-                } else {
-                    let base_ty = self.body_for(def_id).local_decls[place.local].ty;
-                    crate::verify::api_classify::has_pointer_pair_iter_layout(base_ty)
-                }
-            }
-        };
-
         // A write into a `[u8; N]`/`[u8]` buffer (e.g. `box [a, b, 0]`'s element
         // store `((*_8).1).0 = [a, b, 0]`) must be kept even when it is not
         // *value*-relevant to the property: the forward VM records these stores
@@ -122,7 +97,6 @@ impl<'tcx> BackwardSlicer<'tcx> {
 
         if defs.intersects(relevant)
             || is_provenance_carrier
-            || is_iter_ptr_write
             || is_byte_write
             || is_pointee_write
         {

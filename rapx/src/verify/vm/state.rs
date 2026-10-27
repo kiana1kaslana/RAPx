@@ -38,9 +38,9 @@ pub(crate) struct AllocId(pub usize);
 pub(crate) enum OffsetKind<'z3> {
     /// Compile-time field offset (`offset_of!`), including a first field at 0.
     Field,
-    /// Element index from element-strided arithmetic (`ptr.add(k)`); the byte
-    /// offset is `element · S`.
-    Element(Int<'z3>),
+    /// Element index and byte stride from pointer arithmetic. The byte offset
+    /// is `index · stride`.
+    Element { index: Int<'z3>, stride: Int<'z3> },
     /// A byte-strided or otherwise unclassifiable offset (`byte_add`).
     Byte,
 }

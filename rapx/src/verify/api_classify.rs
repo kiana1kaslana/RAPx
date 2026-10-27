@@ -634,28 +634,6 @@ pub fn is_std_iter_or_itermut(def_id: DefId) -> bool {
     type_ids::iter_types().contains(&def_id)
 }
 
-/// Recognize iterator state with a current pointer and an end pointer.
-/// The VM still derives each pointer update from the executed MIR write.
-pub(crate) fn has_pointer_pair_iter_layout(ty: Ty<'_>) -> bool {
-    let rustc_middle::ty::TyKind::Ref(_, pointee, _) = ty.kind() else {
-        return false;
-    };
-    let rustc_middle::ty::TyKind::Adt(adt, _) = pointee.kind() else {
-        return false;
-    };
-    if is_std_iter_or_itermut(adt.did()) {
-        return true;
-    }
-    if !adt.is_struct() {
-        return false;
-    }
-    let mut fields = adt.non_enum_variant().fields.iter();
-    fields.next().is_some_and(|field| field.name.as_str() == "ptr")
-        && fields
-            .next()
-            .is_some_and(|field| field.name.as_str() == "end_or_len")
-}
-
 pub fn is_std_ordering(def_id: DefId) -> bool {
     type_ids::ordering_types().contains(&def_id)
 }

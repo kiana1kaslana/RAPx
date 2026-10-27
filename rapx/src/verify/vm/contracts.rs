@@ -732,10 +732,9 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
-    /// Compare an iterator's `ptr` and `end_or_len` by their element indices
-    /// when both pointers carry them. This preserves the relation established
-    /// by MIR field writes across repeated `next` calls. The existing tracked
-    /// offset remains a fallback when direct indices are unavailable.
+    /// Compare pointers by their MIR-derived element indices when they use the
+    /// same positive byte stride. The tracked std iterator offset remains a
+    /// fallback when an element index is unavailable.
     pub(crate) fn iter_ptr_comparison(
         &mut self,
         op: rustc_middle::mir::BinOp,
@@ -753,43 +752,82 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if lp.alloc_id != rp.alloc_id {
             return None;
         }
-        let elem_ty = self.current_frame.local_alloc.keys().find_map(|local| {
-            if !self.local_value(*local).is_some_and(|value| {
-                api_classify::has_pointer_pair_iter_layout(value.ty)
-            }) {
-                return None;
-            }
-            let Some((ptr, end)) = self.iter_ptr_end(*local) else {
-                return None;
-            };
-            let ptr_elem = mir_utils::pointee_ty(ptr.ty)?;
-            if Some(ptr_elem) != mir_utils::pointee_ty(end.ty) {
-                return None;
-            }
-            ((ptr.z3_term.simplify() == lhs.z3_term.simplify()
-                && end.z3_term.simplify() == rhs.z3_term.simplify())
-                || (ptr.z3_term.simplify() == rhs.z3_term.simplify()
-                    && end.z3_term.simplify() == lhs.z3_term.simplify()))
-                .then_some(ptr_elem)
-        })?;
+        let Some(pointee) = mir_utils::pointee_ty(lhs.ty) else {
+            return None;
+        };
+        if Some(pointee) != mir_utils::pointee_ty(rhs.ty)
+            || !pointee.is_sized(
+                self.tcx,
+                rustc_middle::ty::TypingEnv::post_analysis(
+                    self.tcx,
+                    self.current_frame.current_def_id,
+                ),
+            )
+        {
+            return None;
+        }
         let element = |prov: &Provenance<'z3>| match &prov.offset_kind {
-            Some(OffsetKind::Element(index)) => Some(index.clone()),
-            None if prov.offset.simplify().as_u64() == Some(0) => {
+            Some(OffsetKind::Element { index, .. }) => Some(index.clone()),
+            None | Some(OffsetKind::Field) if prov.offset.simplify().as_u64() == Some(0) => {
                 Some(Int::from_u64(self.z3_ctx, 0))
             }
             _ => None,
         };
-        let size = self.size_sym_read(elem_ty);
-        let non_zst = self.constraints.term_caches.non_zst.contains(&size)
-            || self.path_implies(&size.gt(&Int::from_u64(self.z3_ctx, 0)));
-        if non_zst {
-            self.constraints.term_caches.non_zst.insert(size);
+        let stride = match (&lp.offset_kind, &rp.offset_kind) {
+            (
+                Some(OffsetKind::Element { stride: left, .. }),
+                Some(OffsetKind::Element { stride: right, .. }),
+            ) if left.simplify() == right.simplify() => Some(left.clone()),
+            (Some(OffsetKind::Element { stride, .. }), None | Some(OffsetKind::Field))
+                if element(rp).is_some() => {
+                Some(stride.clone())
+            }
+            (None | Some(OffsetKind::Field), Some(OffsetKind::Element { stride, .. }))
+                if element(lp).is_some() => {
+                Some(stride.clone())
+            }
+            _ => None,
+        };
+        if let Some(stride) = stride
+            && let Some((left, right)) = element(lp).zip(element(rp))
+        {
+            let positive = self.constraints.term_caches.non_zst.contains(&stride)
+                || self.path_implies(&stride.gt(&Int::from_u64(self.z3_ctx, 0)));
+            if positive {
+                self.constraints.term_caches.non_zst.insert(stride);
+                let eq = left._eq(&right);
+                return Some(if matches!(op, rustc_middle::mir::BinOp::Eq) {
+                    eq
+                } else {
+                    eq.not()
+                });
+            }
         }
-        let direct = non_zst
-            .then(|| element(lp).zip(element(rp)))
-            .flatten()
-            .map(|(left, right)| left._eq(&right));
-        let eq = direct.or_else(|| {
+        let is_std_iter_comparison = self.current_frame.local_alloc.keys().any(|local| {
+            let Some(value) = self.local_value(*local) else {
+                return false;
+            };
+            let rustc_middle::ty::TyKind::Ref(_, pointee, _) = value.ty.kind() else {
+                return false;
+            };
+            let rustc_middle::ty::TyKind::Adt(adt, _) = pointee.kind() else {
+                return false;
+            };
+            if !api_classify::is_std_iter_or_itermut(adt.did()) {
+                return false;
+            }
+            let Some((ptr, end)) = self.iter_ptr_end(*local) else {
+                return false;
+            };
+            (ptr.z3_term.simplify() == lhs.z3_term.simplify()
+                && end.z3_term.simplify() == rhs.z3_term.simplify())
+                || (ptr.z3_term.simplify() == rhs.z3_term.simplify()
+                    && end.z3_term.simplify() == lhs.z3_term.simplify())
+        });
+        if !is_std_iter_comparison {
+            return None;
+        }
+        let eq = {
             let mut candidates = self
                 .constraints
                 .term_caches
@@ -800,8 +838,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             if candidates.next().is_some() {
                 return None;
             }
-            Some(offset._eq(base_len.as_ref()?))
-        })?;
+            offset._eq(base_len.as_ref()?)
+        };
         Some(if matches!(op, rustc_middle::mir::BinOp::Eq) {
             eq
         } else {
@@ -850,7 +888,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         .field_value(iter_local, &[1])
                         .and_then(|end| end.provenance.as_ref())
                         .and_then(|ep| match &ep.offset_kind {
-                            Some(OffsetKind::Element(e)) => Some(e.clone()),
+                            Some(OffsetKind::Element { index, .. }) => Some(index.clone()),
                             _ => None,
                         });
                     (one.clone(), base)

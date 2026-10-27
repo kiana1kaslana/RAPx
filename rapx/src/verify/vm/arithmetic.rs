@@ -379,12 +379,26 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// The byte stride for a pointer add/sub: the fixed `stride`, or the pointee's
     /// symbolic size when the stride is element-sized (a generic `T`).
-    fn pointer_stride_term(&mut self, dest: Local, stride: Option<u64>) -> Int<'z3> {
+    fn pointer_stride_term(
+        &mut self,
+        dest: Local,
+        base: &VmValue<'z3, 'tcx>,
+        stride: Option<u64>,
+    ) -> Int<'z3> {
         match stride {
             Some(s) => Int::from_u64(self.z3_ctx, s),
             None => {
                 let dest_ty = self.body().local_decls[dest].ty;
-                let pointee = mir_utils::pointee_ty(dest_ty).unwrap_or(dest_ty);
+                let dest_pointee = mir_utils::pointee_ty(dest_ty).unwrap_or(dest_ty);
+                let base_pointee = mir_utils::pointee_ty(base.ty).unwrap_or(base.ty);
+                // A generic callee can name the caller's element type with a
+                // distinct Ty::Param. Pointer arithmetic uses the incoming
+                // pointer's element size when both types are generic.
+                let generic_pointer = matches!(
+                    (base_pointee.kind(), dest_pointee.kind()),
+                    (TyKind::Param(_), TyKind::Param(_))
+                );
+                let pointee = if generic_pointer { base_pointee } else { dest_pointee };
                 self.size_sym(pointee)
             }
         }
@@ -414,7 +428,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         } else {
             (offset.z3_term.clone(), false)
         };
-        let stride_term = self.pointer_stride_term(dest, stride);
+        let stride_term = self.pointer_stride_term(dest, base, stride);
         let adjusted_offset = if stride == Some(1) {
             offset_term.clone()
         } else {
@@ -437,7 +451,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             None
         } else {
             match base.provenance.as_ref().and_then(|p| match &p.offset_kind {
-                Some(OffsetKind::Element(e)) => Some(e.clone()),
+                Some(OffsetKind::Element { index, stride })
+                    if stride.simplify() == stride_term.simplify() => Some(index.clone()),
                 _ => None,
             }) {
                 Some(e) => Some(combine(&e, &offset_term)),
@@ -458,7 +473,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         let offset_kind = if is_field_offset {
             Some(OffsetKind::Field)
         } else if let Some(e) = element_offset {
-            Some(OffsetKind::Element(e))
+            Some(OffsetKind::Element {
+                index: e,
+                stride: stride_term.clone(),
+            })
         } else {
             Some(OffsetKind::Byte)
         };

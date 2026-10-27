@@ -174,7 +174,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             return false;
         }
         let index = match &provenance.offset_kind {
-            Some(super::state::OffsetKind::Element(index)) => Some(index.clone()),
+            Some(super::state::OffsetKind::Element { index, stride })
+                if stride.simplify() == Int::from_u64(self.z3_ctx, element_size).simplify() =>
+            {
+                Some(index.clone())
+            }
             _ => provenance.offset.simplify().as_u64().and_then(|offset| {
                 (offset % element_size == 0)
                     .then(|| Int::from_u64(self.z3_ctx, offset / element_size))

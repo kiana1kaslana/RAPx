@@ -417,7 +417,7 @@ impl PropertyChecker {
             VmState::term_involves(terms, &p.offset)
                 || matches!(
                     &p.offset_kind,
-                    Some(OffsetKind::Element(e)) if VmState::term_involves(terms, e)
+                    Some(OffsetKind::Element { index, .. }) if VmState::term_involves(terms, index)
                 )
         })
     }

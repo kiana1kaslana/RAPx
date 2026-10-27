@@ -1839,12 +1839,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 let pp = ptr.provenance.as_ref().unwrap();
                 let ep = end.provenance.as_ref().unwrap();
                 let buffer = ep.alloc_id;
-                let ep_elem = match &ep.offset_kind {
-                    Some(OffsetKind::Element(e)) => Some(e.clone()),
-                    _ => None,
-                };
                 let dest_ty = self.body().local_decls[dest].ty;
                 let sz = self.iter_elem_size(&ptr);
+                let ep_elem = match &ep.offset_kind {
+                    Some(OffsetKind::Element { index, .. }) => Some(index.clone()),
+                    _ => None,
+                };
                 let ep_offset = ep.offset.clone();
                 let remaining = self
                     .iter_remaining_len_from_ptrs(&ptr, &end, Some(&iter_key))
@@ -1909,7 +1909,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 next_ptr.provenance = Some(Provenance {
                     alloc_id: pp.alloc_id,
                     offset: next_off,
-                    offset_kind: Some(OffsetKind::Element(is_empty.ite(&old_offset, &new_offset))),
+                    offset_kind: Some(OffsetKind::Element {
+                        index: is_empty.ite(&old_offset, &new_offset),
+                        stride: sz.clone(),
+                    }),
                 });
                 let ptr_path = if self
                     .field_value(local, &[0])

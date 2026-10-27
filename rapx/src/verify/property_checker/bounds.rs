@@ -102,7 +102,7 @@ impl PropertyChecker {
                     .provenance
                     .as_ref()
                     .and_then(|p| match &p.offset_kind {
-                        Some(OffsetKind::Element(e)) => Some(e.clone()),
+                        Some(OffsetKind::Element { index, .. }) => Some(index.clone()),
                         _ => None,
                     }),
             ) {

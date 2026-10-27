@@ -151,7 +151,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     provenance: Some(Provenance {
                         alloc_id: existing_alloc,
                         offset: prost_offset.clone(),
-                        offset_kind: Some(OffsetKind::Element(len_term.clone())),
+                        offset_kind: Some(OffsetKind::Element {
+                            index: len_term.clone(),
+                            stride: elem_size.clone(),
+                        }),
                     }),
                     facts: invariants,
                     source: ValueSource::None,

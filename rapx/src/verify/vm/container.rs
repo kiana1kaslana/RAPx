@@ -458,7 +458,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
         let elem_of = |p: &Provenance<'z3>| -> Option<Int<'z3>> {
             match &p.offset_kind {
-                Some(OffsetKind::Element(e)) => Some(e.clone()),
+                Some(OffsetKind::Element { index, .. }) => Some(index.clone()),
                 Some(OffsetKind::Field) | None => Some(Int::from_u64(self.z3_ctx, 0)),
                 _ => None,
             }
