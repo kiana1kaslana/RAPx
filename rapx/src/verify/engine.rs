@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{BasicBlock, Local, Operand, Rvalue, StatementKind};
+use rustc_middle::mir::Body;
 use rustc_middle::ty::TyCtxt;
 
 use crate::analysis::path::PathTree;
@@ -34,14 +35,22 @@ enum LocalAccess {
 pub(crate) struct VerifyEngine<'tcx> {
     tcx: TyCtxt<'tcx>,
     slicer: BackwardSlicer<'tcx>,
+    caller_def_id: DefId,
+    instance_body: Option<&'tcx Body<'tcx>>,
 }
 
 impl<'tcx> VerifyEngine<'tcx> {
     /// Construct a fresh engine wired to `tcx`.
-    pub(crate) fn new(tcx: TyCtxt<'tcx>) -> Self {
+    pub(crate) fn new(
+        tcx: TyCtxt<'tcx>,
+        caller_def_id: DefId,
+        instance_body: Option<&'tcx Body<'tcx>>,
+    ) -> Self {
         Self {
             tcx,
-            slicer: BackwardSlicer::new(tcx),
+            slicer: BackwardSlicer::new(tcx, caller_def_id, instance_body),
+            caller_def_id,
+            instance_body,
         }
     }
 
@@ -702,7 +711,13 @@ impl<'tcx> VerifyEngine<'tcx> {
                     &local_to_global,
                     checkpoint.caller,
                 );
-                let vm_state = super::vm::execute_goal(&z3_ctx, self.tcx, goal);
+                let vm_state = super::vm::execute_goal(
+                    &z3_ctx,
+                    self.tcx,
+                    self.caller_def_id,
+                    self.instance_body,
+                    goal,
+                );
                 let result =
                     PropertyChecker.check(&vm_state, checkpoint, property, tree.is_structural());
                 (result, path_desc)

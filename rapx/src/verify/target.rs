@@ -82,10 +82,8 @@ pub(crate) struct FunctionTarget<'tcx> {
     /// The function being verified.
     pub def_id: DefId,
 
-    /// An optional monomorphized instance; when set, path extraction and
-    /// verification run against the instance's instantiated body (used to
-    /// verify generic functions per concrete impl).
-    pub instance: Option<Instance<'tcx>>,
+    /// Instantiated MIR shared by path extraction, slicing, and symbolic replay.
+    pub body: Option<&'tcx rustc_middle::mir::Body<'tcx>>,
 
     /// Owning struct when this function is an associated method (e.g.
     /// `impl MyStruct { fn foo(...) }`).  `None` for free functions.
@@ -717,6 +715,14 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
         def_id: DefId,
         instance: Option<Instance<'tcx>>,
     ) -> FunctionTarget<'tcx> {
+        let body = instance.map(|inst| -> &'tcx rustc_middle::mir::Body<'tcx> {
+            let mir = self.tcx.optimized_mir(def_id);
+            &*self.tcx.arena.alloc(inst.instantiate_mir_and_normalize_erasing_regions(
+                self.tcx,
+                rustc_middle::ty::TypingEnv::post_analysis(self.tcx, def_id),
+                rustc_middle::ty::EarlyBinder::bind(self.tcx, mir.clone()),
+            ))
+        });
         let checkpoints = collect_unsafe_callsites(self.tcx, def_id);
         let unsafe_callees: HashSet<_> = checkpoints
             .iter()
@@ -766,7 +772,7 @@ impl<'tcx> VerifyTargetCollector<'tcx> {
 
         FunctionTarget {
             def_id,
-            instance,
+            body,
             owner_struct_def_id,
             checkpoints,
             callee_requires,
@@ -1375,8 +1381,7 @@ impl<'tcx> PrepareTargets<'tcx> {
             return path_map;
         }
 
-        let tree =
-            PathExtractor::new_with_instance(self.tcx, target.def_id, 0, target.instance).run();
+        let tree = PathExtractor::new_with_body(self.tcx, target.def_id, 0, target.body).run();
 
         for checkpoint in &target.checkpoints {
             if let Some(callee_def_id) = checkpoint.callee {

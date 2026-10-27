@@ -24,6 +24,8 @@ pub(crate) mod rules;
 pub(crate) mod state;
 
 use rustc_middle::ty::TyCtxt;
+use rustc_middle::mir::Body;
+use rustc_hir::def_id::DefId;
 use z3::Context;
 
 use crate::verify::slicer::ProofGoal;
@@ -34,9 +36,11 @@ pub(crate) use self::state::VmState;
 pub(crate) fn execute_goal<'z3, 'tcx>(
     z3_ctx: &'z3 Context,
     tcx: TyCtxt<'tcx>,
+    caller_def_id: DefId,
+    instance_body: Option<&'tcx Body<'tcx>>,
     goal: ProofGoal<'tcx>,
 ) -> VmState<'z3, 'tcx> {
-    let mut state = VmState::new(z3_ctx, tcx, goal.path.target.caller);
+    let mut state = VmState::new(z3_ctx, tcx, caller_def_id, instance_body);
     state.execute_items(&goal.items);
     state
 }

@@ -91,7 +91,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
             .map(Checkpoint::location)
             .collect::<Vec<_>>();
         let path_tree =
-            PathExtractor::new_with_instance(tcx, target.def_id, allow_repeat, target.instance)
+            PathExtractor::new_with_body(tcx, target.def_id, allow_repeat, target.body)
                 .with_checkpoints(&locations)
                 .run();
         Self {
@@ -99,7 +99,7 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
             target,
             path_tree,
             checkpoints,
-            engine: VerifyEngine::new(tcx),
+            engine: VerifyEngine::new(tcx, target.def_id, target.body),
         }
     }
 
@@ -618,7 +618,7 @@ impl<'tcx> VerifyRun<'tcx> {
 
         FunctionTarget {
             def_id: read_def_id,
-            instance: read_target.instance,
+            body: read_target.body,
             owner_struct_def_id: read_target.owner_struct_def_id,
             checkpoints: read_target.checkpoints.clone(),
             callee_requires: read_target.callee_requires.clone(),
@@ -691,7 +691,7 @@ impl<'tcx> VerifyRun<'tcx> {
         } else if all_results.is_empty() {
             rap_info!("  result: SOUND (no unsafe checkpoints)");
         } else {
-            emit_results_and_verdict(self.tcx, &all_results);
+            emit_results_and_verdict(self.tcx, &all_results, false);
         }
         rap_info!("");
     }
@@ -722,8 +722,10 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
 
         // Verify every target, then merge results per function so that a
         // generic function's monomorphized instances are reported once.
-        let mut by_fn: FxHashMap<DefId, (Vec<PropertyCheckResult<'tcx>>, Option<String>, bool)> =
-            FxHashMap::default();
+        let mut by_fn: FxHashMap<
+            DefId,
+            (Vec<PropertyCheckResult<'tcx>>, Option<String>, bool, bool),
+        > = FxHashMap::default();
 
         for target in &collector.function_targets {
             let target_path = fmt_fn_path_with_bounds(self.tcx, target.def_id);
@@ -799,18 +801,20 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
 
             let entry = by_fn
                 .entry(target.def_id)
-                .or_insert_with(|| (Vec::new(), None, false));
+                .or_insert_with(|| (Vec::new(), None, false, false));
             entry.0.extend(all_results);
             if fn_crashed.is_some() {
                 entry.1 = fn_crashed;
             }
             entry.2 |= no_checkpoints;
+            entry.3 |= target.body.is_some();
         }
 
         let mut ordered: Vec<DefId> = by_fn.keys().copied().collect();
         ordered.sort_by_key(|d| self.tcx.def_path_str(*d));
         for def_id in ordered {
-            let (all_results, fn_crashed, no_checkpoints) = by_fn.remove(&def_id).unwrap();
+            let (all_results, fn_crashed, no_checkpoints, mono_limited) =
+                by_fn.remove(&def_id).unwrap();
             let target_path = fmt_fn_path_with_bounds(self.tcx, def_id);
 
             if let Some(msg) = &fn_crashed {
@@ -854,6 +858,7 @@ impl<'tcx> Analysis for VerifyRun<'tcx> {
                 def_id,
                 &all_results,
                 self.skip_invariant,
+                mono_limited,
             );
         }
 

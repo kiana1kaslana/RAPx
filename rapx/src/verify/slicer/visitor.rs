@@ -11,7 +11,7 @@ use rustc_middle::ty::TyCtxt;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::analysis::dataflow::graph::build_dataflow_graph;
+use crate::analysis::dataflow::graph::{build_dataflow_graph, build_dataflow_graph_from_body};
 use crate::analysis::dataflow::types::DataflowGraph;
 
 use super::super::{contract, path_extractor::Path, relevance::bind_callsite_roots};
@@ -32,12 +32,26 @@ type LeafItem<'tcx> = (
 /// Entry point for backward path visiting.
 pub(crate) struct BackwardSlicer<'tcx> {
     pub(in crate::verify::slicer) tcx: TyCtxt<'tcx>,
+    caller_def_id: DefId,
+    instance_body: Option<&'tcx Body<'tcx>>,
 }
 
 impl<'tcx> BackwardSlicer<'tcx> {
     /// Create a backward visitor over the current compiler type context.
-    pub(crate) fn new(tcx: TyCtxt<'tcx>) -> Self {
-        Self { tcx }
+    pub(crate) fn new(
+        tcx: TyCtxt<'tcx>,
+        caller_def_id: DefId,
+        instance_body: Option<&'tcx Body<'tcx>>,
+    ) -> Self {
+        Self { tcx, caller_def_id, instance_body }
+    }
+
+    pub(in crate::verify::slicer) fn body_for(&self, def_id: DefId) -> &'tcx Body<'tcx> {
+        if def_id == self.caller_def_id && let Some(body) = self.instance_body {
+            body
+        } else {
+            self.tcx.optimized_mir(def_id)
+        }
     }
 
     /// Visit a path tree in post-order, sharing backward analysis across
@@ -110,8 +124,13 @@ impl<'tcx> BackwardSlicer<'tcx> {
         let mut def_ids: HashSet<DefId> = tree.block_fns().iter().map(|(d, _)| *d).collect();
         def_ids.insert(caller);
         for d in def_ids {
-            bodies.insert(d, self.tcx.optimized_mir(d));
-            flows.insert(d, build_dataflow_graph(self.tcx, d));
+            if d == self.caller_def_id && let Some(body) = self.instance_body {
+                bodies.insert(d, body);
+                flows.insert(d, build_dataflow_graph_from_body(d, body));
+            } else {
+                bodies.insert(d, self.body_for(d));
+                flows.insert(d, build_dataflow_graph(self.tcx, d));
+            }
         }
 
         let leaf_results = Self::build_leaf_items(

@@ -653,6 +653,8 @@ pub(crate) struct VmState<'z3, 'tcx> {
 
     /// Compiler type context.
     pub(crate) tcx: TyCtxt<'tcx>,
+    root_def_id: DefId,
+    instance_body: Option<&'tcx Body<'tcx>>,
 
     // ── Frame-scoped state (swapped on inline entry/exit; the exact set
     //    captured by [`Self::save_frame`])
@@ -703,7 +705,12 @@ pub(crate) struct VmState<'z3, 'tcx> {
 
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     /// Create a fresh VM state for executing a path.
-    pub(crate) fn new(z3_ctx: &'z3 Context, tcx: TyCtxt<'tcx>, caller_def_id: DefId) -> Self {
+    pub(crate) fn new(
+        z3_ctx: &'z3 Context,
+        tcx: TyCtxt<'tcx>,
+        caller_def_id: DefId,
+        instance_body: Option<&'tcx Body<'tcx>>,
+    ) -> Self {
         // The `UNINIT` sentinel is created once and shared by every byte array:
         // an unwritten offset reads it back, so `select != UNINIT` decides
         // whether a byte was written.
@@ -716,6 +723,8 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         Self {
             z3_ctx,
             tcx,
+            root_def_id: caller_def_id,
+            instance_body,
             current_frame: FrameState {
                 current_def_id: caller_def_id,
                 local_alloc: FxHashMap::default(),
@@ -737,9 +746,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
     }
 
-    /// The MIR body of the current function, derived from `current_def_id`.
+    /// The MIR body of the current function, using the instantiated caller body when available.
     pub(crate) fn body(&self) -> &'tcx Body<'tcx> {
-        self.tcx.optimized_mir(self.current_frame.current_def_id)
+        self.body_for(self.current_frame.current_def_id)
+    }
+
+    pub(crate) fn body_for(&self, def_id: DefId) -> &'tcx Body<'tcx> {
+        if def_id == self.root_def_id && let Some(body) = &self.instance_body {
+            body
+        } else {
+            self.tcx.optimized_mir(def_id)
+        }
     }
 
     pub(crate) fn record_unsupported(&mut self, operation: &str) {
@@ -1024,7 +1041,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// The declared type of `local` in `frame`'s body.
     fn frame_local_ty(&self, frame: &FrameState, local: Local) -> Ty<'tcx> {
-        self.tcx.optimized_mir(frame.current_def_id).local_decls[local].ty
+        self.body_for(frame.current_def_id).local_decls[local].ty
     }
 
     /// Enumerate the field paths materialized for `local` in a saved caller

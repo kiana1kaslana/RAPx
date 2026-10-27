@@ -32,7 +32,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         block.as_usize(),
                         statement_index,
                     ));
-                    let body = self.tcx.optimized_mir(*def_id);
+                    let body = self.body_for(*def_id);
                     let statement = &body.basic_blocks[*block].statements[*statement_index];
                     crate::verify::vm::rules::exec_statement(self, statement);
                 }
@@ -42,7 +42,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         self.tcx.def_path_str(*def_id),
                         block.as_usize(),
                     ));
-                    let body = self.tcx.optimized_mir(*def_id);
+                    let body = self.body_for(*def_id);
                     let terminator = body.basic_blocks[*block].terminator();
                     crate::verify::vm::rules::exec_terminator(self, terminator, *switch_succ);
                 }

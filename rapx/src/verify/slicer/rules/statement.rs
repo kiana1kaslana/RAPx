@@ -29,7 +29,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
         // Keep the definition of a `needs_drop` local (an owner's construction
         // chain) so `Owning` can trace its field provenance.
         if keep_owner {
-            let body = self.tcx.optimized_mir(def_id);
+            let body = self.body_for(def_id);
             let ty = body.local_decls[place.local].ty;
             let typing_env = rustc_middle::ty::TypingEnv::non_body_analysis(self.tcx, def_id);
             if ty.needs_drop(self.tcx, typing_env) {
@@ -54,7 +54,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
         // `propagate_single_assign` fill-in.
         let is_provenance_carrier = {
             let dest_is_ptr = matches!(
-                self.tcx.optimized_mir(def_id).local_decls[place.local]
+                self.body_for(def_id).local_decls[place.local]
                     .ty
                     .kind(),
                 rustc_middle::ty::TyKind::RawPtr(..) | rustc_middle::ty::TyKind::Ref(..)
@@ -101,7 +101,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
                 if !is_field0 {
                     false
                 } else {
-                    let base_ty = self.tcx.optimized_mir(def_id).local_decls[place.local].ty;
+                    let base_ty = self.body_for(def_id).local_decls[place.local].ty;
                     match base_ty.kind() {
                         rustc_middle::ty::TyKind::Ref(_, pointee, _) => match pointee.kind() {
                             rustc_middle::ty::TyKind::Adt(adt_def, _) => {
@@ -123,7 +123,7 @@ impl<'tcx> BackwardSlicer<'tcx> {
         // `Box`/`Vec` → buffer indirection), so this structural keep is what
         // preserves the byte-level dataflow.
         let is_byte_write =
-            mir_utils::is_u8_array_or_slice(place.ty(self.tcx.optimized_mir(def_id), self.tcx).ty);
+            mir_utils::is_u8_array_or_slice(place.ty(self.body_for(def_id), self.tcx).ty);
 
         let is_pointee_write = place
             .projection

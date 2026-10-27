@@ -15,7 +15,7 @@
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{BasicBlock, TerminatorKind},
-    ty::{EarlyBinder, Instance, TyCtxt, TypingEnv},
+    ty::TyCtxt,
 };
 
 use super::call_index::CallSiteIndex;
@@ -45,31 +45,30 @@ pub(crate) struct PathExtractor<'tcx> {
     def_id: DefId,
     /// Number of extra SCC postfix repetitions allowed (default 0).
     allow_repeat: usize,
-    /// An optional monomorphized instance; when set, `run` verifies the
-    /// instance's instantiated body instead of `optimized_mir(def_id)`.
-    instance: Option<Instance<'tcx>>,
+    /// Instantiated caller MIR, shared with the slicer and VM when available.
+    body: Option<&'tcx rustc_middle::mir::Body<'tcx>>,
     coverage_targets: FxHashSet<usize>,
 }
 impl<'tcx> PathExtractor<'tcx> {
     /// Create a path extractor that verifies `def_id`, optionally against a
-    /// monomorphized instance body (when `instance` is `Some`).
+    /// monomorphized body.
     ///
     /// Path extraction (SCC detection, enumeration, filtering) is deferred
     /// until [`run`] is called.
     ///
     /// `allow_repeat` controls how many times a repeated SCC postfix segment
     /// is allowed beyond the first occurrence. Default is 0 (no extra repeats).
-    pub(crate) fn new_with_instance(
+    pub(crate) fn new_with_body(
         tcx: TyCtxt<'tcx>,
         def_id: DefId,
         allow_repeat: usize,
-        instance: Option<Instance<'tcx>>,
+        body: Option<&'tcx rustc_middle::mir::Body<'tcx>>,
     ) -> Self {
         Self {
             tcx,
             def_id,
             allow_repeat,
-            instance,
+            body,
             coverage_targets: FxHashSet::default(),
         }
     }
@@ -86,15 +85,7 @@ impl<'tcx> PathExtractor<'tcx> {
     ///
     /// Returns a composed [`PathTree`] with block-function metadata attached.
     pub(crate) fn run(self) -> PathTree {
-        let body = self.instance.map(|inst| {
-            let mir = self.tcx.optimized_mir(self.def_id);
-            inst.instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                TypingEnv::post_analysis(self.tcx, self.def_id),
-                EarlyBinder::bind(self.tcx, mir.clone()),
-            )
-        });
-        let mut caller_graph = match &body {
+        let mut caller_graph = match self.body {
             Some(body) => PathGraph::new_with_body(self.tcx, self.def_id, body),
             None => PathGraph::new(self.tcx, self.def_id),
         };
@@ -102,7 +93,7 @@ impl<'tcx> PathExtractor<'tcx> {
         let caller_paths = PathEnumerator::new(&caller_graph)
             .with_coverage_targets(self.coverage_targets)
             .enumerate_paths_repeat(self.allow_repeat);
-        let mut call_index = CallSiteIndex::new(self.tcx, self.def_id, body);
+        let mut call_index = CallSiteIndex::new(self.tcx, self.def_id, self.body.cloned());
         call_index.collect();
         let mut tree = PathComposer::new(&call_index, self.allow_repeat).compose(&caller_paths);
         tree.mark_structural();

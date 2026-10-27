@@ -34,3 +34,19 @@ pub fn generic_ptr<I: PtrSource>(x: &I) {
         require_nonnull(p);
     }
 }
+
+pub trait SafePtrSource {
+    fn ptr(&self) -> *const u8;
+}
+
+struct KnownNonNull;
+impl SafePtrSource for KnownNonNull {
+    fn ptr(&self) -> *const u8 {
+        std::ptr::NonNull::<u8>::dangling().as_ptr()
+    }
+}
+
+#[rapx::verify]
+pub fn generic_known_impl<I: SafePtrSource>(x: &I) {
+    unsafe { require_nonnull(x.ptr()) }
+}

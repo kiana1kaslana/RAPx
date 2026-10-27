@@ -1008,6 +1008,8 @@ fn generic_mono() {
     // so the merged verdict is UNSOUND (a generic function must be sound for
     // every impl).
     assert_function_result(&output, "generic_ptr", "UNSOUND");
+    let block = extract_block_after(&output, "function: generic_known_impl");
+    assert_contain(block, "result: SOUND (with mono limit)");
 }
 
 // Module/Crate Filter Tests

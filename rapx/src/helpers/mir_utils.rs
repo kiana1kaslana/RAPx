@@ -362,8 +362,8 @@ pub(crate) fn enumerate_mono_instances<'tcx>(
 }
 
 /// Whether `def_id`'s body (or any callee it would inline) contains a
-/// trait-method call whose `Instance` resolution returns `None` (a still-generic
-/// `T: Bound`) *and* that has no symbolic model — i.e. a call whose opaque
+/// trait-method call with no executable MIR (a still-generic `T: Bound` or
+/// virtual dispatch) *and* no symbolic model — i.e. a call whose opaque
 /// fallback would lose dataflow and therefore benefits from caller
 /// monomorphization.
 pub(crate) fn has_unmodeled_generic_call<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId) -> bool {
@@ -395,10 +395,11 @@ fn has_unmodeled_generic_call_rec<'tcx>(
             .and_then(|a| a.trait_container(tcx))
             .is_some();
         if is_trait_method {
-            // `Some(_)` means the call resolves (concrete impl or virtual), so it
-            // needs no monomorphization; only a `None` (uninstantiated `T: Bound`)
-            // with no model is a candidate.
-            if resolve_callee_instance(tcx, def_id, func).is_none()
+            // A resolved `Instance` may still be virtual or name the trait
+            // method itself. What matters is whether the actual target has
+            // executable MIR after resolving this call.
+            if dep_callee_resolved_def_id(tcx, def_id, func)
+                .is_none_or(|target| !tcx.is_mir_available(target))
                 && !crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee))
             {
                 return true;

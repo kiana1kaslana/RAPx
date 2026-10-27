@@ -421,6 +421,7 @@ pub(crate) fn emit_verify_summary<'tcx>(
     def_id: rustc_hir::def_id::DefId,
     all_results: &[PropertyCheckResult<'tcx>],
     skip_invariant: bool,
+    mono_limited: bool,
 ) {
     rap_info!("============================================================");
     rap_info!("[rapx::verify] function: {target_path}");
@@ -433,24 +434,32 @@ pub(crate) fn emit_verify_summary<'tcx>(
         }
     }
 
-    emit_results_and_verdict(tcx, all_results);
+    emit_results_and_verdict(tcx, all_results, mono_limited);
     rap_info!("");
 }
 
 pub(crate) fn emit_results_and_verdict<'tcx>(
     tcx: TyCtxt<'tcx>,
     all_results: &[PropertyCheckResult<'tcx>],
+    mono_limited: bool,
 ) {
     let (failed, unknown) = emit_results_counts_and_checkpoints(tcx, all_results);
 
     if failed == 0 && unknown == 0 {
-        if all_results
+        let path_limited = all_results
             .iter()
-            .any(|result| result.path_description == super::report::PATH_LIMIT_DESCRIPTION)
-        {
-            rap_info!(green, "  result: SOUND (with path limit)");
-        } else {
+            .any(|result| result.path_description == super::report::PATH_LIMIT_DESCRIPTION);
+        let mut limits = Vec::new();
+        if path_limited {
+            limits.push("path limit");
+        }
+        if mono_limited {
+            limits.push("mono limit");
+        }
+        if limits.is_empty() {
             rap_info!(green, "  result: SOUND");
+        } else {
+            rap_info!(green, "  result: SOUND (with {})", limits.join(", "));
         }
     } else if failed > 0 {
         rap_warn!("  result: UNSOUND ({failed} failed, {unknown} unknown)");
