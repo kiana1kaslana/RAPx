@@ -73,6 +73,16 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         arg_consts: &[(usize, crate::analysis::path::CallConstArg)],
         arg_field_offsets: &[usize],
     ) {
+        if arg_locals
+            .first()
+            .and_then(|arg| self.local_value(Local::from_usize(*arg)))
+            .is_some_and(|receiver| self.is_unmodeled_pointer_pair_next(callee, receiver.ty))
+        {
+            self.record_unsupported(&format!(
+                "{}: pointer-pair iterator next state is not modeled",
+                self.tcx.def_path_str(callee)
+            ));
+        }
         let method_call = arg_locals.first().and_then(|arg| {
             self.local_value(Local::from_usize(*arg))
                 .and_then(|receiver| self.begin_method_call(callee, receiver, Some(Local::from_usize(*arg))))
