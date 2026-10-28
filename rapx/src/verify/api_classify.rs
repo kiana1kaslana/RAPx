@@ -656,9 +656,6 @@ pub fn is_align_to_local(callee: Option<DefId>) -> bool {
 pub fn is_iter_position(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::iter_position_fns())
 }
-pub fn is_strlen(callee: Option<DefId>) -> bool {
-    any_def(callee, other_api::strlen_fns())
-}
 pub fn is_slice_get_unchecked(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::slice_get_unchecked_fns())
 }

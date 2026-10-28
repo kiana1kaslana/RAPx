@@ -1054,19 +1054,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     self.set_field_value(dest, vec![0], payload);
                 }
             }
-            CallEffect::ReturnScanLength => {
-                // `strlen(ptr)` returns the byte length before the NUL
-                // terminator. The `ValidCStr` invariant guarantees the NUL is
-                // within `isize::MAX` bytes, so `len < isize::MAX`, and
-                // `len + 1` (the length with the terminator) fits in
-                // `isize::MAX` — discharging `from_raw_parts`'s
-                // `ValidNum(size_of(T)*(len+1) <= isize::MAX)`.
-                let len = self.fresh_int(&format!("strlen_{}", dest.as_usize()));
-                let max = Int::from_i64(self.z3_ctx, i64::MAX);
-                self.constraints.assertions.push(len.lt(&max));
-                let dest_ty = self.body().local_decls[dest].ty;
-                self.set_local(dest, VmValue::new(len, dest_ty));
-            }
             CallEffect::ReturnNonZeroIff { arg } => {
                 if let Some(a) = args.get(*arg) {
                     let dest_ty = self.body().local_decls[dest].ty;

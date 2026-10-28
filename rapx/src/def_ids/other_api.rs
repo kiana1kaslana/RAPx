@@ -96,7 +96,6 @@ struct Methods {
     split_at: Vec<DefId>,
     align_to_local: Vec<DefId>,
     iter_position: Vec<DefId>,
-    strlen: Vec<DefId>,
     slice_get_unchecked: Vec<DefId>,
     slice_get: Vec<DefId>,
     sliceindex_get_unchecked: Vec<DefId>,
@@ -138,7 +137,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         split_at: Vec::new(),
         align_to_local: Vec::new(),
         iter_position: Vec::new(),
-        strlen: Vec::new(),
         slice_get_unchecked: Vec::new(),
         slice_get: Vec::new(),
         sliceindex_get_unchecked: Vec::new(),
@@ -240,9 +238,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                 || name.contains("Iterator::rposition")
             {
                 methods.iter_position.push(did);
-            }
-            if name == "strlen" || name.ends_with("::strlen") {
-                methods.strlen.push(did);
             }
             if (name.contains("::get_unchecked") || name.contains("::get_unchecked_mut"))
                 && (name.contains("::<impl [T]>::get_unchecked")
@@ -416,7 +411,6 @@ method_fns! {
     split_at_fns => split_at,
     align_to_local_fns => align_to_local,
     iter_position_fns => iter_position,
-    strlen_fns => strlen,
     slice_get_unchecked_fns => slice_get_unchecked,
     slice_get_fns => slice_get,
     sliceindex_get_unchecked_fns => sliceindex_get_unchecked,

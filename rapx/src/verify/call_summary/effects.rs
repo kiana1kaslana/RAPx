@@ -106,7 +106,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_layout_align, eff_layout_align),
     ED!(api_classify::is_align_to_local, eff_align_to),
     ED!(api_classify::is_iter_position, eff_option_scan_index),
-    ED!(api_classify::is_strlen, eff_scan_length),
     // ── MIR available — deliberately opaque ─────────────────────────
     // `eff_none` keeps the call in the registry so the path graph does not inline.
     ED!(api_classify::is_maybe_uninit_uninit, eff_none),
@@ -351,10 +350,6 @@ fn eff_align_to(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 fn eff_option_scan_index(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::ReturnOptionSomeScanIndex { self_arg: 0 }]
-}
-
-fn eff_scan_length(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnScanLength]
 }
 
 fn eff_align_offset(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

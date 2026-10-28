@@ -154,11 +154,6 @@ pub(crate) enum CallEffect {
     /// payload (field 0).  Models the `?` operator's `if let Some(..) = expr?`
     /// unwrap so the payload's provenance survives the branch.
     ReturnBranchPayload { arg: usize },
-    /// The call returns the length of a nul-terminated string (models
-    /// `strlen`): `0 <= len < isize::MAX`, so `len + 1` (the byte length with
-    /// the terminator) fits in `isize::MAX` — discharging the
-    /// `from_raw_parts` `ValidNum(size_of(T)*(len+1) <= isize::MAX)` bound.
-    ReturnScanLength,
     /// `ptr.align_offset(align)` returns an offset such that
     /// `(ptr + offset) % align == 0` and `0 <= offset < align` (or `usize::MAX`
     /// when no such offset exists). Models `*const T::align_offset` /
