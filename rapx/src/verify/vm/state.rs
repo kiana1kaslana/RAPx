@@ -452,6 +452,8 @@ pub(crate) enum ValueSource<'z3> {
     None,
     /// A literal bound to an inlined callee parameter at this call site.
     CallsiteConst,
+    /// Bytes carried by a constant byte-array reference through generic calls.
+    ConstBytes(Vec<u8>),
     /// A compile-time `offset_of!` field offset.
     FieldOffset,
     /// A symbolic enum discriminant (variant index).
@@ -779,6 +781,11 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     pub(crate) fn has_instantiated_root(&self) -> bool {
         self.instance_body.is_some()
+    }
+
+    pub(crate) fn root_body(&self) -> &rustc_middle::mir::Body<'tcx> {
+        self.instance_body
+            .unwrap_or_else(|| self.tcx.optimized_mir(self.root_def_id))
     }
 
     pub(crate) fn record_unsupported(&mut self, operation: &str) {

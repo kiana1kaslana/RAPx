@@ -247,7 +247,19 @@ impl PropertyChecker {
         }
 
         let zero = Int::from_u64(vm_state.z3_ctx, 0);
-        let size_u64 = alloc_size.as_u64();
+        let size_u64 = alloc_size.as_u64().or_else(|| {
+            // A preceding exact slice comparison can fix a symbolic length on
+            // this path. Only use a concrete length when every alternative is
+            // unsatisfiable; a merely possible length proves nothing.
+            byte_pairs.iter().find_map(|(offset, _)| {
+                let candidate = u64::try_from(*offset).ok()?.checked_add(1)?;
+                solver.push();
+                solver.assert(&alloc_size._eq(&Int::from_u64(vm_state.z3_ctx, candidate)).not());
+                let implied = solver.check() == z3::SatResult::Unsat;
+                solver.pop(1);
+                implied.then_some(candidate)
+            })
+        });
 
         if size_u64.is_none() {
             // Symbolic size: a C string has exactly one NUL (at the end), so two

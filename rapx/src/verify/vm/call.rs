@@ -151,8 +151,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
 
     /// Execute a call terminator, dispatching by precision:
     ///
-    ///  1. pre-inline side effect (`Eq` const-byte propagation) — always runs
-    ///     and falls through;
+    ///  1. an exact simulator for supported calls;
     ///  2. a registry / transparent-deref summary effect;
     ///  3. inline of the callee's MIR when there is no summary.
     ///
@@ -183,6 +182,14 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                 )
             })
         });
+
+        if callee.is_some_and(|id| !self.tcx.is_mir_available(id))
+            && self.try_simulate_eq(callee, &arg_values, destination)
+        {
+            let result = self.local_value(destination).cloned();
+            self.finish_method_call(method_call, result.as_ref());
+            return;
+        }
 
         // `assert_unsafe_precondition!` gates are disabled under release
         // semantics; bind them to `false` so their branchy panic bodies are not

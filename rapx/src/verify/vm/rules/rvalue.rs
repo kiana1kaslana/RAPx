@@ -28,6 +28,11 @@ pub(crate) fn eval_use<'z3, 'tcx>(
         state.materialize_const_adt(place.local, &c.const_);
     }
     state.try_materialize_const_bytes(&mut val, operand);
+    if let Operand::Constant(_) = operand
+        && let Some(bytes) = mir_utils::const_operand_bytes(state.tcx, operand)
+    {
+        val.source = ValueSource::ConstBytes(bytes);
+    }
     state.inject_layout_constraints(operand, &val);
     state.try_emit_gcd_divisibility(operand, &val);
     val

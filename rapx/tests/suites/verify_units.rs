@@ -510,9 +510,11 @@ sound_tests_multi! {
 #[test]
 fn nonoverlap_indices() {
     let output = run_with_args("verify_units/nonoverlap_indices", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [15, 14, 8]);
+    assert_result_counts(&output, [16, 15, 8]);
     assert_function_result(&output, "sound_checked_slice_iter_indices", "UNKNOWN");
     assert_function_result(&output, "unsound_reversed_slice_iter_guard", "UNKNOWN");
+    assert_function_result(&output, "sound_ref_guard", "SOUND");
+    assert_function_result(&output, "unsound_reversed_ref_guard", "UNSOUND");
     assert_contain(&output, "MIR unavailable: std::cmp::PartialEq::eq");
 }
 
@@ -568,10 +570,9 @@ unsound_tests_multi! {
 #[test]
 fn validcstring_std_sound_05() {
     let output = run_with_args("verify_units/validcstring_std_sound_05", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [0, 0, 2]);
-    assert_function_result(&output, "sound_input_slice_exact_match", "UNKNOWN");
-    assert_function_result(&output, "unsound_input_slice_mismatch", "UNKNOWN");
-    assert_contain(&output, "MIR unavailable: std::cmp::PartialEq::eq");
+    assert_result_counts(&output, [1, 1, 0]);
+    assert_function_result(&output, "sound_input_slice_exact_match", "SOUND");
+    assert_function_result(&output, "unsound_input_slice_mismatch", "UNSOUND");
 }
 
 sound_tests! {

@@ -181,6 +181,22 @@ pub fn unsound_reversed_slice_iter_guard<const N: usize>(indices: [usize; N]) {
 }
 
 #[rapx::verify]
+pub fn sound_ref_guard(a: &usize, b: &usize) {
+    if a == b {
+        return;
+    }
+    unsafe { use_indices([*a, *b]) }
+}
+
+#[rapx::verify]
+pub fn unsound_reversed_ref_guard(a: &usize, b: &usize) {
+    if a != b {
+        return;
+    }
+    unsafe { use_indices([*a, *b]) }
+}
+
+#[rapx::verify]
 pub fn sound_empty_inner_iterator<const N: usize>(indices: [usize; N]) {
     for _ in &indices[..0] {
         unsafe { use_generic_indices(indices) }
