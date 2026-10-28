@@ -44,6 +44,9 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
     let uninit_source = source_place
         .and_then(|source| state.current_frame.local_alloc.get(&source.local))
         .is_some_and(|id| state.possible_uninit_allocs.contains(id));
+    let inner_uninit_source = source_place
+        .and_then(|source| state.current_frame.local_alloc.get(&source.local))
+        .is_some_and(|id| state.content(*id).facts.inner_uninit);
     let source_fields = source_place.map(|source| {
         let prefix = source.projection.iter().filter_map(|projection| {
             match projection.kind() {
@@ -111,6 +114,9 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
         state.set_local(place.local, value);
         if uninit_source && let Some(id) = state.current_frame.local_alloc.get(&place.local) {
             state.possible_uninit_allocs.insert(*id);
+        }
+        if inner_uninit_source && let Some(&id) = state.current_frame.local_alloc.get(&place.local) {
+            state.content_mut(id).facts.inner_uninit = true;
         }
         // On a whole-place move (`_3 = move _4`), the destination is a fresh
         // container slot: re-point its whole-value provenance from the source's

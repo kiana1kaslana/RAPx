@@ -101,6 +101,7 @@ pub(crate) fn eval_ref<'z3, 'tcx>(
                 init: true,
                 in_bounds: src_in_bounds,
                 align_n: slice_elem_align.or(alloc_align),
+                dangling: false,
             },
             source: ValueSource::None,
         };
@@ -388,6 +389,7 @@ pub(crate) fn eval_cast<'z3, 'tcx>(
         provenance: src_val.provenance,
         facts: ValueFacts {
             non_null: src_val.facts.non_null,
+            dangling: src_val.facts.dangling,
             init: src_val.facts.init,
             in_bounds: src_val.facts.in_bounds,
             align_n: if mir_utils::pointee_ty(src_ty).is_some_and(|t| t.is_unit()) {

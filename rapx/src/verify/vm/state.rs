@@ -75,6 +75,7 @@ pub(crate) struct Provenance<'z3> {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ValueFacts<'z3> {
     pub non_null: bool,
+    pub dangling: bool,
     pub init: bool,
     pub in_bounds: bool,
     /// If Some(n), the value's term is known to satisfy `z3_term % n == 0`.
@@ -268,6 +269,9 @@ pub(crate) struct ContentFacts<'tcx> {
     /// Stays `false` for uninitialized memory (`Box::new_uninit`,
     /// `MaybeUninit::uninit`).
     pub initialized: bool,
+    /// The inner `T` was explicitly created by `MaybeUninit::uninit` and has
+    /// not yet been replaced by a complete `T` write.
+    pub inner_uninit: bool,
     /// Type of a complete initialized write at the allocation's start;
     /// cleared when a later write invalidates that evidence.
     pub written_pointee_ty: Option<Ty<'tcx>>,
@@ -865,6 +869,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             if crate::verify::api_classify::is_maybe_uninit_type(def.did()))
         {
             self.clear_write_evidence(alloc_id);
+            self.content_mut(alloc_id).facts.inner_uninit = false;
         }
         self.store_value(alloc_id, view_ty, vec![], value);
     }

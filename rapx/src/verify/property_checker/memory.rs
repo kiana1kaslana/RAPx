@@ -417,6 +417,9 @@ impl PropertyChecker {
         }
 
         let Some(alloc_id) = value.provenance_alloc_id() else {
+            if value.facts.dangling {
+                return CheckResult::Failed;
+            }
             if crate::verify::api_classify::is_manually_drop_drop(checkpoint.callee) {
                 return CheckResult::ProvedByRule;
             }

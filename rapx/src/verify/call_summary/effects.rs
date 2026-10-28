@@ -47,6 +47,10 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_iter_len, eff_iter_len),
     ED!(api_classify::is_iter_is_empty, eff_iter_is_empty),
     ED!(api_classify::is_nonnull_checked_new, eff_nonnull_new),
+    ED!(
+        |callee| other_api::matches_any(callee, &[other_api::nonnull_dangling()]),
+        eff_dangling_ptr
+    ),
     ED!(api_classify::is_iter_next, eff_iter_next),
     ED!(api_classify::is_range_next, eff_range_next),
     // ── Layout and intrinsic effects ───────────────────────────────
@@ -85,8 +89,13 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
     ED!(api_classify::is_checked_next_pow2, eff_return_option_some_nonzero),
-    // Raw-pointer `cast` is excluded (`is_as_ptr_valid`) — left to inlining.
-    ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
+    ED!(
+        |callee| other_api::matches_any(
+            callee,
+            &[other_api::vec_as_mut_ptr(), other_api::nonnull_as_ptr()],
+        ),
+        eff_alias_ptr
+    ),
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
     ED!(api_classify::is_slice_get_unchecked, eff_alias_ptr),
     // `SliceIndex::get_unchecked(self, slice)` returns `slice + self` (receiver
@@ -105,9 +114,8 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_mem_replace, eff_mem_replace),
     ED!(api_classify::is_layout_align, eff_layout_align),
     ED!(api_classify::is_iter_position, eff_option_scan_index),
-    // ── MIR available — deliberately opaque ─────────────────────────
-    // `eff_none` keeps the call in the registry so the path graph does not inline.
-    ED!(api_classify::is_maybe_uninit_uninit, eff_none),
+    // ── MIR available — summarized instead of inlined ───────────────
+    ED!(api_classify::is_maybe_uninit_uninit, eff_uninit_wrapper),
     ED!(api_classify::is_maybe_uninit_assume_init, eff_return_arg_value),
     ED!(api_classify::is_maybe_uninit_write, eff_write_mem),
 ];
@@ -148,8 +156,12 @@ pub(crate) fn lookup_effect<'tcx>(
 
 // ── Effect builders — one small function per API semantic ──────────────
 
-fn eff_none(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    Vec::new()
+fn eff_uninit_wrapper(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnUninitWrapper]
+}
+
+fn eff_dangling_ptr(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnDanglingPointer]
 }
 
 fn eff_return_arg_value(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

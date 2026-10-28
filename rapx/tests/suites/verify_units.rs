@@ -332,7 +332,9 @@ unsound_weak_tests! {
 #[test]
 fn typed_cases() {
     let output = run_with_args("verify_units/typed_cases", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [8, 8, 0]);
+    assert_result_counts(&output, [9, 8, 0]);
+    assert_function_result(&output, "sound_maybeuninit_new_as_ptr", "SOUND");
+    assert_function_result(&output, "unsound_uninit_memory_as_u32", "UNSOUND");
     assert_contain(&output, "Typed | Failed");
 }
 

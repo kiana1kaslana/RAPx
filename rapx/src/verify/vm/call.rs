@@ -794,6 +794,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if path.is_empty() && self.write_provenance_allocation(pointer, value.clone()) {
             if let Some((id, ty)) = full_inner_write {
                 self.content_mut(id).facts.written_pointee_ty = Some(ty);
+                self.content_mut(id).facts.inner_uninit = false;
             }
             return true;
         }
@@ -801,6 +802,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             self.write_local_path(local, path, value);
             if let Some((id, ty)) = full_inner_write {
                 self.content_mut(id).facts.written_pointee_ty = Some(ty);
+                self.content_mut(id).facts.inner_uninit = false;
             }
             true
         } else if path.is_empty() {

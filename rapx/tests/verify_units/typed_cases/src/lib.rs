@@ -110,6 +110,13 @@ pub fn sound_maybeuninit_after_write(value: u32) {
     }
 }
 
+// SOUND: `new` initializes the inner `u32`; `as_ptr` only exposes its address.
+#[rapx::verify]
+pub fn sound_maybeuninit_new_as_ptr(value: u32) {
+    let slot = MaybeUninit::new(value);
+    unsafe { require_typed_u32(slot.as_ptr()) }
+}
+
 // SOUND: `align_to::<u32>` keeps the middle view typed as `u32` when source and target match.
 #[rapx::verify]
 pub fn sound_align_to_same_type(data: &[u32]) -> usize {

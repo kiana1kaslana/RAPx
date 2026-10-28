@@ -68,6 +68,14 @@ impl PropertyChecker {
                 let alloc = vm_state.alloc(alloc_id);
                 if let Some(mut elem_ty) = alloc.element_ty.as_ty() {
                     elem_ty = self.resolve_ty_params(vm_state, checkpoint, elem_ty);
+                    if let TyKind::Adt(def, args) = elem_ty.kind()
+                        && crate::verify::api_classify::is_maybe_uninit_type(def.did())
+                        && args.first().and_then(|arg| arg.as_type()) == Some(expected_ty)
+                        && vm_state.content(alloc_id).facts.inner_uninit
+                        && vm_state.content(alloc_id).facts.written_pointee_ty != Some(expected_ty)
+                    {
+                        return CheckResult::Failed;
+                    }
                     if matches!(elem_ty.kind(), TyKind::Param(_)) {
                         let resolved = self.instantiate_callsite_ty(vm_state, checkpoint, elem_ty);
                         if resolved != elem_ty {

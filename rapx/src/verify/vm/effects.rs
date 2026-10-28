@@ -305,6 +305,22 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         func: &Operand<'tcx>,
     ) {
         match effect {
+            CallEffect::ReturnDanglingPointer => {
+                if let Some(ty) = mir_utils::fn_def_first_type_arg(func) {
+                    let term = self.align_sym(ty);
+                    let dest_ty = self.body().local_decls[dest].ty;
+                    let mut value = VmValue::new(term, dest_ty);
+                    value.facts.non_null = true;
+                    value.facts.dangling = true;
+                    self.set_local(dest, value);
+                }
+            }
+            CallEffect::ReturnUninitWrapper => {
+                self.ensure_local_allocation(dest);
+                if let Some(&id) = self.current_frame.local_alloc.get(&dest) {
+                    self.content_mut(id).facts.inner_uninit = true;
+                }
+            }
             CallEffect::ReturnLayoutSymbolic { is_size } => {
                 let ty = mir_utils::fn_def_first_type_arg(func)
                     .expect("layout effect built from a FnDef");
@@ -581,6 +597,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             facts: ValueFacts {
                                 init: true,
                                 non_null: true,
+                                dangling: false,
                                 in_bounds: true,
                                 align_n: Some(field_alloc_align),
                             },
@@ -1233,6 +1250,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                                 init: true,
                                 in_bounds: true,
                                 align_n: result_align_n.clone(),
+                                dangling: false,
                             },
                             source: ValueSource::None,
                         },
@@ -1249,6 +1267,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                                 init: true,
                                 in_bounds: true,
                                 align_n: result_align_n,
+                                dangling: false,
                             },
                             source: ValueSource::None,
                         };
@@ -1329,6 +1348,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             init: true,
                             in_bounds: true,
                             align_n,
+                            dangling: false,
                         },
                         source: ValueSource::None,
                     },

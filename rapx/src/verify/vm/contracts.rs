@@ -362,6 +362,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }),
             facts: ValueFacts {
                 non_null: true,
+                dangling: false,
                 init: true,
                 in_bounds: true,
                 align_n: heap_align_n,

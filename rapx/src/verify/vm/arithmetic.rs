@@ -495,6 +495,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             provenance: adjusted_provenance,
             facts: ValueFacts {
                 non_null: base.facts.non_null,
+                dangling: base.facts.dangling,
                 in_bounds: dereferenceable,
                 align_n,
                 init: base.facts.init,

@@ -557,6 +557,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             init: true,
                             in_bounds: false,
                             align_n: None,
+                            dangling: false,
                         };
                     }
                 }

@@ -114,35 +114,6 @@ pub fn is_as_ptr(callee: Option<DefId>) -> bool {
     )
 }
 
-/// Whether `callee` is a raw-pointer `cast`/`cast_mut`/`cast_const`. These only
-/// *reinterpret* the address — they preserve null-ness and provenance, but do
-/// not establish that the result is non-null, aligned, or points at initialized
-/// memory. Distinguished from [`is_as_ptr`] so [`is_as_ptr_valid`] can keep
-/// them on the MIR-inlining path rather than the `ReturnPointerFromArg` model
-/// (which asserts those facts).
-pub(crate) fn is_raw_ptr_cast(callee: Option<DefId>) -> bool {
-    other_api::matches_any(
-        callee,
-        &[
-            other_api::const_ptr_cast(),
-            other_api::const_ptr_cast_mut(),
-            other_api::const_ptr_cast_array(),
-            other_api::mut_ptr_cast(),
-            other_api::mut_ptr_cast_const(),
-            other_api::mut_ptr_cast_array(),
-        ],
-    )
-}
-
-/// [`is_as_ptr`] restricted to the *pointer-validity-establishing* subset:
-/// `as_ptr`/`as_mut_ptr`, `into_raw`, and `NonNull::cast` — which expose a
-/// non-null, aligned, initialized backing pointer. Raw-pointer `cast`/
-/// `cast_mut`/`cast_const` are excluded because they only reinterpret the
-/// address (preserving null-ness) and are left to MIR inlining.
-pub fn is_as_ptr_valid(callee: Option<DefId>) -> bool {
-    is_as_ptr(callee) && !is_raw_ptr_cast(callee)
-}
-
 /// `str::as_bytes`: reinterprets `&str` as `&[u8]` — same data pointer and
 /// byte length, so the result aliases the argument.
 pub fn is_str_as_bytes(callee: Option<DefId>) -> bool {
