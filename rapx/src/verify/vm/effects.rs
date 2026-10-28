@@ -2,7 +2,7 @@
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand};
-use rustc_middle::ty::{Ty, TyKind};
+use rustc_middle::ty::TyKind;
 use z3::ast::{Ast, Bool, Int};
 
 use super::state::{
@@ -592,121 +592,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             }
             CallEffect::ReturnRange { bounds_arg } => {
                 self.apply_range_effect(*bounds_arg, args, caller_arg_locals, dest);
-            }
-            CallEffect::ReturnAlignTo { receiver_arg } => {
-                let Some(self_val) = args.get(*receiver_arg).cloned() else {
-                    return;
-                };
-                let dest_ty = self.body().local_decls[dest].ty;
-                let TyKind::Tuple(elem_tys) = dest_ty.kind() else {
-                    return;
-                };
-                if elem_tys.len() < 3 {
-                    return;
-                }
-
-                let body_elem_ty = match elem_tys[1].kind() {
-                    TyKind::Ref(_, inner, _) => match inner.kind() {
-                        TyKind::Slice(u) => *u,
-                        _ => return,
-                    },
-                    _ => return,
-                };
-                let size_u = self.size_of_ty(body_elem_ty).max(1);
-                let align_u = self.align_sym(body_elem_ty);
-
-                let Some(src_prov) = self_val.provenance.clone() else {
-                    return;
-                };
-                let alloc = self.alloc(src_prov.alloc_id);
-                let (elem_ty, elem_sz, len_bytes) = {
-                    let ty = alloc.element_ty.as_ty();
-                    let sz = self.size_of_ty(ty.unwrap_or(self_val.ty)).max(1);
-                    (ty, sz, alloc.size.clone())
-                };
-
-                let elem_sz_term = Int::from_u64(self.z3_ctx, elem_sz);
-                let size_u_term = Int::from_u64(self.z3_ctx, size_u);
-
-                // Fresh aligned offset: (ptr + offset) % align_u == 0 and
-                // 0 <= offset < align_u.
-                let offset = self.fresh_int(&format!("align_to_offset_{}", dest.as_usize()));
-                let zero = Int::from_u64(self.z3_ctx, 0);
-                let ptr_plus_offset = Int::add(self.z3_ctx, &[&self_val.z3_term, &offset]);
-                self.constraints
-                    .assertions
-                    .push(ptr_plus_offset.rem(&align_u)._eq(&zero));
-                self.constraints.assertions.push(offset.ge(&zero));
-                self.constraints.assertions.push(offset.lt(&align_u));
-
-                // body = len_bytes - offset bytes split into size_u chunks; the
-                // remainder is the suffix. Record the Euclidean identity so that
-                // `len - offset - suffix = body_len * size_u` (a multiple of
-                // align_u) is derivable downstream.
-                let body_bytes = Int::sub(self.z3_ctx, &[&len_bytes, &offset]);
-                let body_len = body_bytes.div(&size_u_term);
-                let suffix_bytes = body_bytes.rem(&size_u_term);
-                let mul_term = Int::mul(self.z3_ctx, &[&body_len, &size_u_term]);
-                let sum_term = Int::add(self.z3_ctx, &[&mul_term, &suffix_bytes]);
-                self.constraints.assertions.push(body_bytes._eq(&sum_term));
-                self.constraints.assertions.push(suffix_bytes.ge(&zero));
-                self.constraints
-                    .assertions
-                    .push(suffix_bytes.lt(&size_u_term));
-
-                let prefix_len = offset.div(&elem_sz_term);
-                let suffix_len = suffix_bytes.div(&elem_sz_term);
-
-                let body_byte_len = Int::mul(self.z3_ctx, &[&body_len, &size_u_term]);
-                let suffix_ptr = Int::add(self.z3_ctx, &[&ptr_plus_offset, &body_byte_len]);
-
-                let base_align = self.alloc(src_prov.alloc_id).align.clone();
-
-                let fields: Vec<(Int<'z3>, Int<'z3>, Ty<'tcx>, u64, Int<'z3>)> = vec![
-                    (
-                        prefix_len,
-                        self_val.z3_term.clone(),
-                        elem_tys[0],
-                        elem_sz,
-                        base_align.clone(),
-                    ),
-                    (body_len, ptr_plus_offset, elem_tys[1], size_u, align_u),
-                    (suffix_len, suffix_ptr, elem_tys[2], elem_sz, base_align),
-                ];
-
-                for (f, (f_len, f_ptr, f_ty, f_elem_sz, f_align)) in fields.into_iter().enumerate()
-                {
-                    let f_elem_ty = if f == 1 { Some(body_elem_ty) } else { elem_ty };
-                    let (alloc_id, _) = self.allocate_slice(
-                        f_len.clone(),
-                        Int::from_u64(self.z3_ctx, f_elem_sz),
-                        f_align.clone(),
-                        f_elem_ty,
-                    );
-                    self.content_mut(alloc_id).facts.initialized = true;
-                    self.alloc_mut(alloc_id).parent = Some(src_prov.alloc_id);
-                    let field_val = VmValue {
-                        z3_term: f_ptr,
-                        ty: f_ty,
-                        provenance: Some(Provenance {
-                            alloc_id,
-                            offset: Int::from_u64(self.z3_ctx, 0),
-                            offset_kind: None,
-                        }),
-                        facts: ValueFacts {
-                            init: true,
-                            non_null: true,
-                            in_bounds: true,
-                            align_n: if f_align.simplify().as_u64() != Some(1) {
-                                Some(f_align)
-                            } else {
-                                None
-                            },
-                        },
-                        source: ValueSource::None,
-                    };
-                    self.set_field_value(dest, vec![f], field_val);
-                }
             }
             CallEffect::ReturnPointerFromArg { arg } => {
                 if let Some(arg_val) = args.get(*arg) {

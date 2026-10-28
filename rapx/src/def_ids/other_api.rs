@@ -94,7 +94,6 @@ struct Methods {
     checked_next_pow2: Vec<DefId>,
     layout_align: Vec<DefId>,
     split_at: Vec<DefId>,
-    align_to_local: Vec<DefId>,
     iter_position: Vec<DefId>,
     slice_get_unchecked: Vec<DefId>,
     slice_get: Vec<DefId>,
@@ -135,7 +134,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         checked_next_pow2: Vec::new(),
         layout_align: Vec::new(),
         split_at: Vec::new(),
-        align_to_local: Vec::new(),
         iter_position: Vec::new(),
         slice_get_unchecked: Vec::new(),
         slice_get: Vec::new(),
@@ -229,9 +227,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
             }
             if name.contains("::split_at") {
                 methods.split_at.push(did);
-            }
-            if name.ends_with("align_to_ext") || name.ends_with("align_to_mut_ext") {
-                methods.align_to_local.push(did);
             }
             if name.contains("Iterator::position")
                 || name.contains("Iterator::find")
@@ -409,7 +404,6 @@ method_fns! {
     checked_next_pow2_fns => checked_next_pow2,
     layout_align_fns => layout_align,
     split_at_fns => split_at,
-    align_to_local_fns => align_to_local,
     iter_position_fns => iter_position,
     slice_get_unchecked_fns => slice_get_unchecked,
     slice_get_fns => slice_get,

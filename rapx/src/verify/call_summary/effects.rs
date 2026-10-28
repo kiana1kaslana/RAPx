@@ -104,7 +104,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_slice_range, eff_slice_range),
     ED!(api_classify::is_mem_replace, eff_mem_replace),
     ED!(api_classify::is_layout_align, eff_layout_align),
-    ED!(api_classify::is_align_to_local, eff_align_to),
     ED!(api_classify::is_iter_position, eff_option_scan_index),
     // ── MIR available — deliberately opaque ─────────────────────────
     // `eff_none` keeps the call in the registry so the path graph does not inline.
@@ -342,10 +341,6 @@ fn eff_ownership_recon(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
 
 fn eff_drop_memory(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::DropMemory { pointer_arg: 0 }]
-}
-
-fn eff_align_to(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    vec![CallEffect::ReturnAlignTo { receiver_arg: 0 }]
 }
 
 fn eff_option_scan_index(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {

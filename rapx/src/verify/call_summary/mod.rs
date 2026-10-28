@@ -160,13 +160,6 @@ pub(crate) enum CallEffect {
     /// `*mut T::align_offset` by recording the alignment path-condition so
     /// downstream `ptr.add(offset)` dereferences can discharge `Align`.
     ReturnAlignOffset { ptr_arg: usize, align_arg: usize },
-    /// A local `align_to`-style wrapper (`align_to_ext`/`align_to_mut_ext`)
-    /// returns `(prefix, body, suffix)` where `body` is `align_of::<U>()`-aligned.
-    /// Models the tuple by creating three sub-slices whose lengths/offsets obey
-    /// `prefix.len() = offset` and `len - suffix.len() = offset + k*size_of::<U>()`,
-    /// and records `(ptr + offset) % align_of::<U>() == 0` so downstream
-    /// `ptr.add(offset - k)` dereferences can discharge `Align`.
-    ReturnAlignTo { receiver_arg: usize },
     /// `<ManuallyDrop<T> as Deref>::deref` / `MaybeDangling::as_ref` return a
     /// reference to the inner value at the *same* address (transparent
     /// wrappers).  The return aliases `arg` (a `&T` pointing at `arg`'s
