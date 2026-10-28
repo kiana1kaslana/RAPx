@@ -752,7 +752,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         pointer: &VmValue<'z3, 'tcx>,
         path: Vec<usize>,
         value: VmValue<'z3, 'tcx>,
-    ) {
+    ) -> bool {
         let full_inner_write = pointer.provenance.as_ref().and_then(|prov| {
             let ty = self.alloc(prov.alloc_id).element_ty.as_ty()?;
             match ty.kind() {
@@ -789,21 +789,25 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             if let Some((id, ty)) = full_inner_write {
                 self.content_mut(id).facts.written_pointee_ty = Some(ty);
             }
-            return;
+            return false;
         }
         if path.is_empty() && self.write_provenance_allocation(pointer, value.clone()) {
             if let Some((id, ty)) = full_inner_write {
                 self.content_mut(id).facts.written_pointee_ty = Some(ty);
             }
-            return;
+            return true;
         }
         if let Some(local) = self.find_local_by_address(&pointer.z3_term) {
             self.write_local_path(local, path, value);
             if let Some((id, ty)) = full_inner_write {
                 self.content_mut(id).facts.written_pointee_ty = Some(ty);
             }
+            true
         } else if path.is_empty() {
             self.invalidate_provenance_allocation(pointer);
+            false
+        } else {
+            false
         }
     }
 

@@ -77,6 +77,14 @@ impl PropertyChecker {
                     if elem_ty == expected_ty {
                         return CheckResult::ProvedByRule;
                     }
+                    if value.provenance.as_ref().is_some_and(|prov| {
+                        prov.offset.simplify().as_u64() == Some(0)
+                    })
+                        && value.facts.init
+                        && vm_state.content(alloc_id).facts.written_pointee_ty == Some(expected_ty)
+                    {
+                        return CheckResult::ProvedByRule;
+                    }
                     // An allocation of `T` elements is also "typed" when
                     // accessed through a slice/array pointer `[T]`/`[T; N]`
                     // (a slice is just N contiguous `T` elements, e.g. a `u8`

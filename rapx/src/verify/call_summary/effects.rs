@@ -109,7 +109,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_strlen, eff_scan_length),
     // ── MIR available — deliberately opaque ─────────────────────────
     // `eff_none` keeps the call in the registry so the path graph does not inline.
-    ED!(api_classify::is_nonnull_new_unchecked, eff_return_pointer_arg),
     ED!(api_classify::is_maybe_uninit_uninit, eff_none),
     ED!(api_classify::is_maybe_uninit_assume_init, eff_return_arg_value),
     ED!(api_classify::is_maybe_uninit_write, eff_write_mem),

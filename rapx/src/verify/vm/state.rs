@@ -268,6 +268,8 @@ pub(crate) struct ContentFacts<'tcx> {
     /// Stays `false` for uninitialized memory (`Box::new_uninit`,
     /// `MaybeUninit::uninit`).
     pub initialized: bool,
+    /// Type of a complete initialized write at the allocation's start;
+    /// cleared when a later write invalidates that evidence.
     pub written_pointee_ty: Option<Ty<'tcx>>,
 
     /// Whether this allocation was asserted valid C string via a `ValidCStr`

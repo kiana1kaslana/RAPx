@@ -30,7 +30,39 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if self.write_indexed_allocation(pointer, value.clone()) {
             return true;
         }
-        self.write_field_allocation(pointer, value)
+        if self.write_field_allocation(pointer, value.clone()) {
+            return true;
+        }
+        self.write_reinterpreted_byte_allocation(pointer, value)
+    }
+
+    /// A typed whole-object write through a cast pointer replaces the bytes at
+    /// the start of a byte buffer. Keep the allocation's byte element type;
+    /// only the written object acquires a typed view.
+    fn write_reinterpreted_byte_allocation(
+        &mut self,
+        pointer: &VmValue<'z3, 'tcx>,
+        value: VmValue<'z3, 'tcx>,
+    ) -> bool {
+        let Some(prov) = pointer.provenance.as_ref() else {
+            return false;
+        };
+        if prov.offset.simplify().as_u64() != Some(0)
+            || mir_utils::pointee_ty(pointer.ty) != Some(value.ty)
+            || !value.facts.init
+            || !matches!(self.alloc(prov.alloc_id).kind, AllocKind::Slice { .. })
+            || self.alloc(prov.alloc_id).element_ty.as_ty() != Some(self.tcx.types.u8)
+        {
+            return false;
+        }
+        let content = self.content_mut(prov.alloc_id);
+        content.values.clear();
+        content.indexed_elements.clear();
+        content.indexed_elements_modified = true;
+        content.byte_array = None;
+        content.byte_written.clear();
+        self.store_value(prov.alloc_id, value.ty, Vec::new(), value);
+        true
     }
 
     pub(crate) fn invalidate_provenance_allocation(

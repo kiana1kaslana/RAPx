@@ -5,7 +5,7 @@ use rustc_middle::mir::{CopyNonOverlapping, Local, Operand, Place, ProjectionEle
 use rustc_middle::ty::consts::ConstExt;
 use z3::ast::{Ast, Bool, Int};
 
-use super::super::state::{Provenance, VmState, VmValue};
+use super::super::state::{AllocKind, Provenance, VmState, VmValue};
 use super::eval_rvalue;
 use crate::helpers::mir_utils;
 
@@ -190,9 +190,31 @@ pub(crate) fn exec_assign<'z3, 'tcx>(
             if field_indices.is_empty() {
                 let pointed = state.local_value(place.local).cloned();
                 if let Some(pointed) = pointed {
-                    state.write_through_pointer(&pointed, Vec::new(), value);
+                    let written_ty = value.ty;
+                    let fully_initialized = value.facts.init;
+                    let byte_buffer = pointed.provenance_alloc_id().filter(|&id| {
+                        matches!(state.alloc(id).kind, AllocKind::Slice { .. })
+                            && state.alloc(id).element_ty.as_ty() == Some(state.tcx.types.u8)
+                    });
+                    let wrote_object = state.write_through_pointer(&pointed, Vec::new(), value);
                     for (path, field) in source_fields {
-                        state.write_through_pointer(&pointed, path, field);
+                        state.write_through_pointer(&pointed, path.clone(), field.clone());
+                        if wrote_object && let Some(id) = byte_buffer {
+                            state.store_value(id, written_ty, path, field);
+                        }
+                    }
+                    // A whole-object write through a reinterpreted byte buffer
+                    // establishes the type at this address, without changing
+                    // the element type of the entire allocation.
+                    if wrote_object
+                        && fully_initialized
+                        && mir_utils::pointee_ty(pointed.ty) == Some(written_ty)
+                        && pointed.provenance.as_ref().is_some_and(|prov| {
+                            prov.offset.simplify().as_u64() == Some(0)
+                        })
+                        && let Some(alloc_id) = pointed.provenance_alloc_id()
+                    {
+                        state.content_mut(alloc_id).facts.written_pointee_ty = Some(written_ty);
                     }
                 }
                 return;
