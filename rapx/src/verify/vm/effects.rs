@@ -639,6 +639,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                             offset: Int::from_u64(self.z3_ctx, 0),
                             offset_kind: None,
                         });
+                        val.facts.align_n = Self::non_trivial_align(self.alloc(data_alloc).align.clone());
                     }
                     if src_non_null {
                         let zero = Int::from_u64(self.z3_ctx, 0);

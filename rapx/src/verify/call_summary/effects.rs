@@ -194,12 +194,8 @@ fn eff_select_unpredictable(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
     vec![CallEffect::SelectUnpredictable]
 }
 
-fn eff_alias_ptr(ctx: &EffCtx<'_, '_>) -> Vec<CallEffect> {
-    let mut eff = vec![CallEffect::ReturnPointerFromArg { arg: 0 }];
-    if pointee_alignment(ctx.tcx, ctx.caller, ctx.dest).is_some() {
-        eff.push(CallEffect::ReturnAligned);
-    }
-    eff
+fn eff_alias_ptr(_: &EffCtx<'_, '_>) -> Vec<CallEffect> {
+    vec![CallEffect::ReturnPointerFromArg { arg: 0 }]
 }
 
 /// `SliceIndex::get_unchecked(self, slice)` / `get_unchecked_mut`: returns an

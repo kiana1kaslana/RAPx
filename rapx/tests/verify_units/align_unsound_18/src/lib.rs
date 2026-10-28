@@ -16,3 +16,12 @@ pub fn unsound_unbounded_generic_cross_cast<T>(data: &[u8]) {
         require_align::<T>(ptr);
     }
 }
+
+#[rapx::requires(Align(_ptr, u64), kind = "precond")]
+unsafe fn require_u64_alignment(_ptr: *const u64) {}
+
+#[rapx::verify]
+pub fn unsound_vec_u8_buffer_alignment() {
+    let mut bytes = vec![0u8; 16];
+    unsafe { require_u64_alignment(bytes.as_mut_ptr().cast::<u64>()) }
+}

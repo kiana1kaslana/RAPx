@@ -18,6 +18,7 @@ pub(crate) struct CallSiteIndex<'tcx> {
     tcx: TyCtxt<'tcx>,
     blocks: Vec<(DefId, usize)>,
     bodies: FxHashMap<usize, Body<'tcx>>,
+    instances: FxHashMap<usize, Instance<'tcx>>,
     callee_bodies: CalleeBodies<'tcx>,
     bindings: FxHashMap<usize, CallBinding>,
     pub(crate) entries: FxHashMap<usize, Vec<usize>>,
@@ -45,6 +46,7 @@ impl<'tcx> CallSiteIndex<'tcx> {
             tcx,
             blocks,
             bodies,
+            instances: FxHashMap::default(),
             callee_bodies,
             bindings: FxHashMap::default(),
             entries: FxHashMap::default(),
@@ -80,6 +82,37 @@ impl<'tcx> CallSiteIndex<'tcx> {
 
     pub(crate) fn has_body_override(&self, entry: usize) -> bool {
         self.bodies.contains_key(&entry)
+    }
+
+    pub(crate) fn unambiguous_bodies(&self) -> CalleeBodies<'tcx> {
+        let mut bodies = self.callee_bodies.clone();
+        let mut chosen = FxHashMap::default();
+        let mut conflicting = FxHashSet::default();
+        for (&entry, &instance) in &self.instances {
+            let callee = self.blocks[entry].0;
+            if let Some(previous) = chosen.insert(callee, (instance, entry))
+                && previous.0 != instance
+            {
+                conflicting.insert(callee);
+            }
+        }
+        for &entry in self.bindings.keys() {
+            let callee = self.blocks[entry].0;
+            if chosen.contains_key(&callee) && !self.instances.contains_key(&entry) {
+                conflicting.insert(callee);
+            }
+        }
+        for (callee, (_, entry)) in chosen {
+            if !conflicting.contains(&callee)
+                && let Some(body) = self.bodies.get(&entry)
+            {
+                bodies.insert(callee, &*self.tcx.arena.alloc(body.clone()));
+            }
+        }
+        for callee in conflicting {
+            bodies.remove(&callee);
+        }
+        bodies
     }
 
     fn terminator(&self, block: usize) -> Option<&Terminator<'tcx>> {
@@ -188,12 +221,22 @@ impl<'tcx> CallSiteIndex<'tcx> {
                         continue;
                     }
                 }
-                let instance =
-                    if cross_crate && crate::def_ids::other_api::is_slice_get(Some(base_callee)) {
-                        mir_utils::resolve_callee_instance(self.tcx, caller, func)
-                    } else {
-                        None
-                    };
+                let instantiate = self.tcx.is_mir_available(callee)
+                    && ((cross_crate
+                        && crate::def_ids::other_api::is_slice_get(Some(base_callee)))
+                        || self.tcx.optimized_mir(callee).basic_blocks.len() == 1);
+                let instance = instantiate
+                    .then(|| mir_utils::resolve_callee_instance(self.tcx, caller, func))
+                    .flatten()
+                    .filter(|instance| {
+                        matches!(instance.def, InstanceKind::Item(_))
+                            && instance.def_id() == callee
+                            && !instance.args.is_empty()
+                            && instance.args.types().all(|ty| !mir_utils::ty_has_type_param(ty))
+                            && instance.args.consts().all(|c| {
+                                !matches!(c.kind(), rustc_middle::ty::ConstKind::Param(_))
+                            })
+                    });
                 let cross_crate_trait_default =
                     cross_crate && is_trait_method && self.tcx.is_mir_available(base_callee);
                 if crate::def_ids::intrinsic_api::is_intrinsic(self.tcx, callee)
@@ -293,20 +336,22 @@ impl<'tcx> CallSiteIndex<'tcx> {
         } else {
             actual_parent
         };
-        let instantiated_body = self.callee_bodies.get(&callee).map(|body| (**body).clone())
-            .or_else(|| instance.map(|instance| {
+        let instantiated_body = instance.map(|instance| {
                 let mir = self.tcx.optimized_mir(instance.def_id());
                 instance.instantiate_mir_and_normalize_erasing_regions(
                     self.tcx,
                     TypingEnv::post_analysis(self.tcx, parent),
                     EarlyBinder::bind(self.tcx, mir.clone()),
                 )
-            }));
+            }).or_else(|| self.callee_bodies.get(&callee).map(|body| (**body).clone()));
         let block_count = instantiated_body
             .as_ref()
             .map(|body| body.basic_blocks.len())
             .unwrap_or_else(|| self.tcx.optimized_mir(callee).basic_blocks.len());
         let entry = self.blocks.len();
+        if let Some(instance) = instance {
+            self.instances.insert(entry, instance);
+        }
         self.blocks
             .extend((0..block_count).map(|local| (callee, local)));
         if let Some(body) = instantiated_body {

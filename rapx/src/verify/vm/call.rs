@@ -785,11 +785,17 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                         .and_then(|_| *referent)
                 });
         if let Some(local) = caller_referent {
+            let wrote_object = path.is_empty()
+                && pointer.provenance.as_ref().is_some_and(|prov| {
+                    self.alloc(prov.alloc_id).is_external()
+                        && self.alloc(prov.alloc_id).element_ty.as_ty() != Some(value.ty)
+                })
+                && self.write_provenance_allocation(pointer, value.clone());
             self.inline.deferred_field_writes.push((local, path, value));
             if let Some((id, ty)) = full_inner_write {
                 self.content_mut(id).facts.written_pointee_ty = Some(ty);
             }
-            return false;
+            return wrote_object;
         }
         if path.is_empty() && self.write_provenance_allocation(pointer, value.clone()) {
             if let Some((id, ty)) = full_inner_write {

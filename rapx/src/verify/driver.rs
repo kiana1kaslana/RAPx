@@ -90,17 +90,17 @@ impl<'target, 'tcx> VerifyDriver<'target, 'tcx> {
             .iter()
             .map(Checkpoint::location)
             .collect::<Vec<_>>();
-        let path_tree =
+        let (path_tree, callee_bodies) =
             PathExtractor::new_with_body(tcx, target.def_id, allow_repeat, target.body)
                 .with_callee_bodies(target.callee_bodies.clone())
                 .with_checkpoints(&locations)
-                .run();
+                .run_with_bodies();
         Self {
             tcx,
             target,
             path_tree,
             checkpoints,
-            engine: VerifyEngine::new(tcx, target.def_id, target.body, target.callee_bodies.clone()),
+            engine: VerifyEngine::new(tcx, target.def_id, target.body, callee_bodies),
         }
     }
 

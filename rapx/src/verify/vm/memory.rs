@@ -33,13 +33,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if self.write_field_allocation(pointer, value.clone()) {
             return true;
         }
-        self.write_reinterpreted_byte_allocation(pointer, value)
+        self.write_reinterpreted_integer_allocation(pointer, value)
     }
 
-    /// A typed whole-object write through a cast pointer replaces the bytes at
-    /// the start of a byte buffer. Keep the allocation's byte element type;
-    /// only the written object acquires a typed view.
-    fn write_reinterpreted_byte_allocation(
+    /// A typed whole-object write through a cast pointer replaces the start of
+    /// an integer buffer while keeping its original allocation element type.
+    fn write_reinterpreted_integer_allocation(
         &mut self,
         pointer: &VmValue<'z3, 'tcx>,
         value: VmValue<'z3, 'tcx>,
@@ -50,8 +49,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         if prov.offset.simplify().as_u64() != Some(0)
             || mir_utils::pointee_ty(pointer.ty) != Some(value.ty)
             || !value.facts.init
-            || !matches!(self.alloc(prov.alloc_id).kind, AllocKind::Slice { .. })
-            || self.alloc(prov.alloc_id).element_ty.as_ty() != Some(self.tcx.types.u8)
+            || !matches!(self.alloc(prov.alloc_id).kind, AllocKind::Slice { .. } | AllocKind::External)
+            || !self.alloc(prov.alloc_id).element_ty.as_ty().is_some_and(|ty| {
+                ty != value.ty && matches!(ty.kind(), TyKind::Int(_) | TyKind::Uint(_))
+            })
         {
             return false;
         }

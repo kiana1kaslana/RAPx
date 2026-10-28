@@ -47,6 +47,7 @@ pub struct FreeBlock {
 #[rapx::invariant(Alias(heap))]
 #[rapx::invariant(InBound(heap, u8, size))]
 #[rapx::invariant(ValidNum(size <= isize::MAX))]
+#[rapx::invariant(ValidNum(words_len <= isize::MAX / size_of::<usize>()))]
 #[rapx::invariant(Align(head.unwrap_some(), FreeBlock))]
 #[rapx::invariant(Allocated(head.unwrap_some(), FreeBlock, 1))]
 #[rapx::invariant(Typed(head.unwrap_some(), FreeBlock))]
@@ -59,6 +60,8 @@ pub struct FreeListAllocator {
     size: usize,
     /// Head of the singly-linked free list, or `None` if exhausted.
     head: Option<NonNull<FreeBlock>>,
+    words_len: usize,
+    words_cap: usize,
 }
 
 impl FreeListAllocator {
@@ -68,8 +71,12 @@ impl FreeListAllocator {
         assert!(size >= mem::size_of::<FreeBlock>());
         assert!(size <= isize::MAX as usize);
 
-        let mut buf = vec![0u8; size];
-        let heap = NonNull::new(buf.as_mut_ptr()).expect("non-null after vec alloc");
+        assert_eq!(mem::align_of::<FreeBlock>(), mem::align_of::<usize>());
+        let words_len = size.div_ceil(mem::size_of::<usize>());
+        assert!(words_len <= isize::MAX as usize / mem::size_of::<usize>());
+        let mut buf = vec![0usize; words_len];
+        let words_cap = buf.capacity();
+        let heap = NonNull::new(buf.as_mut_ptr().cast::<u8>()).expect("non-null after vec alloc");
         std::mem::forget(buf);
 
         // The entire buffer starts as a single FreeBlock.
@@ -82,6 +89,8 @@ impl FreeListAllocator {
             heap,
             size,
             head: Some(unsafe { NonNull::new_unchecked(block) }),
+            words_len,
+            words_cap,
         }
     }
 
@@ -211,7 +220,11 @@ impl FreeListAllocator {
 impl Drop for FreeListAllocator {
     fn drop(&mut self) {
         unsafe {
-            drop(Vec::from_raw_parts(self.heap.as_ptr(), self.size, self.size));
+            drop(Vec::from_raw_parts(
+                self.heap.as_ptr().cast::<usize>(),
+                self.words_len,
+                self.words_cap,
+            ));
         }
     }
 }

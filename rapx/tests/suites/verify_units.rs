@@ -104,6 +104,13 @@ unsound_tests! {
     align_unsound_18: "verify_units/align_unsound_18" => "unsound_unbounded_generic_cross_cast" => "Align",
 }
 
+#[test]
+fn align_vec_buffer_unsound() {
+    let output = run_with_args("verify_units/align_unsound_18", CMD_VERIFY_TARGETED);
+    assert_function_result(&output, "unsound_vec_u8_buffer_alignment", "UNSOUND");
+    assert_contain(&output, "Align | Failed");
+}
+
 // Allocated
 sound_tests! {
     allocated_sound_01: "verify_units/allocated_sound_01" => "sound_stack_local_allocated",
@@ -512,7 +519,8 @@ sound_tests_multi! {
 #[test]
 fn nonoverlap_indices() {
     let output = run_with_args("verify_units/nonoverlap_indices", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [20, 19, 8]);
+    assert_result_counts(&output, [21, 19, 7]);
+    assert_function_result(&output, "sound_checked_generic_indices", "SOUND");
     assert_function_result(&output, "sound_checked_slice_iter_indices", "UNKNOWN");
     assert_function_result(&output, "unsound_reversed_slice_iter_guard", "UNKNOWN");
     assert_function_result(&output, "sound_ref_guard", "SOUND");

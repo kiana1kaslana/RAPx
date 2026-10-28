@@ -1305,11 +1305,14 @@ impl<'tcx> PathGraph<'tcx> {
                 let const_val = match discr {
                     Operand::Constant(c) => c
                         .const_
-                        .try_eval_target_usize(
+                        .eval(
                             self.cfg.tcx,
                             TypingEnv::post_analysis(self.cfg.tcx, self.cfg.def_id),
+                            rustc_span::DUMMY_SP,
                         )
-                        .map(|v| v as usize),
+                        .ok()
+                        .and_then(|value| value.try_to_scalar_int())
+                        .and_then(|scalar| usize::try_from(scalar.to_bits(scalar.size())).ok()),
                     _ => None,
                 };
 

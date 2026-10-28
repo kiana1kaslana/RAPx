@@ -93,6 +93,10 @@ impl<'tcx> PathExtractor<'tcx> {
     ///
     /// Returns a composed [`PathTree`] with block-function metadata attached.
     pub(crate) fn run(self) -> PathTree {
+        self.run_with_bodies().0
+    }
+
+    pub(crate) fn run_with_bodies(self) -> (PathTree, CalleeBodies<'tcx>) {
         let mut caller_graph = match self.body {
             Some(body) => PathGraph::new_with_body(self.tcx, self.def_id, body),
             None => PathGraph::new(self.tcx, self.def_id),
@@ -108,10 +112,11 @@ impl<'tcx> PathExtractor<'tcx> {
             self.callee_bodies,
         );
         call_index.collect();
+        let bodies = call_index.unambiguous_bodies();
         let mut tree = PathComposer::new(&call_index, self.allow_repeat).compose(&caller_paths);
         tree.mark_structural();
         call_index.attach_metadata(&mut tree);
-        tree
+        (tree, bodies)
     }
 }
 
