@@ -461,17 +461,19 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         );
 
         // Keep a shared symbolic value for an immutable scalar referent. A
-        // dereference and a later `PartialEq::eq` call must observe the same
+        // dereference and a later comparison trait call must observe the same
         // value; the pointer address itself is not the scalar value.
         if matches!(ty.kind(), TyKind::Ref(_, _, rustc_middle::ty::Mutability::Not))
             && matches!(pointee_ty.kind(), TyKind::Uint(_) | TyKind::Int(_) | TyKind::Bool | TyKind::Char)
         {
             let scalar = self.fresh_int(&format!("ref_arg_{local_idx}_value"));
+            let mut value = VmValue::new(scalar, pointee_ty);
+            value.source = ValueSource::SharedScalarReferent;
             self.store_value(
                 pointee_alloc_id,
                 pointee_ty,
                 Vec::new(),
-                VmValue::new(scalar, pointee_ty),
+                value,
             );
         }
 

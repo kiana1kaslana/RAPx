@@ -183,9 +183,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             })
         });
 
-        if callee.is_some_and(|id| !self.tcx.is_mir_available(id))
-            && self.try_simulate_eq(callee, &arg_values, destination)
-        {
+        if self.try_simulate_comparison(callee, &arg_values, destination) {
             let result = self.local_value(destination).cloned();
             self.finish_method_call(method_call, result.as_ref());
             return;

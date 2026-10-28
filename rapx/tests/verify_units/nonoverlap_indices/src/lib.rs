@@ -197,6 +197,66 @@ pub fn unsound_reversed_ref_guard(a: &usize, b: &usize) {
 }
 
 #[rapx::verify]
+pub fn sound_lt_ref_guard(a: &usize, b: &usize) {
+    if a < b {
+        unsafe { use_indices([*a, *b]) }
+    }
+}
+
+#[rapx::verify]
+pub fn sound_le_false_guard(a: &usize, b: &usize) {
+    if a <= b {
+        return;
+    }
+    unsafe { use_indices([*a, *b]) }
+}
+
+#[rapx::verify]
+pub fn sound_gt_ref_guard(a: &usize, b: &usize) {
+    if a > b {
+        unsafe { use_indices([*a, *b]) }
+    }
+}
+
+#[rapx::verify]
+pub fn sound_ge_false_guard(a: &usize, b: &usize) {
+    if a >= b {
+        return;
+    }
+    unsafe { use_indices([*a, *b]) }
+}
+
+#[rapx::verify]
+pub fn unsound_le_ref_guard(a: &usize, b: &usize) {
+    if a <= b {
+        unsafe { use_indices([*a, *b]) }
+    }
+}
+
+#[rapx::verify]
+pub fn unsound_ge_ref_guard(a: &usize, b: &usize) {
+    if a >= b {
+        unsafe { use_indices([*a, *b]) }
+    }
+}
+
+#[rapx::verify]
+pub fn unsound_lt_false_guard(a: &usize, b: &usize) {
+    if a < b {
+        return;
+    }
+    unsafe { use_indices([*a, *b]) }
+}
+
+#[rapx::verify]
+pub fn unsound_gt_false_guard(a: &usize, b: &usize) {
+    if a > b {
+        return;
+    }
+    unsafe { use_indices([*a, *b]) }
+}
+
+#[rapx::verify]
 pub fn sound_empty_inner_iterator<const N: usize>(indices: [usize; N]) {
     for _ in &indices[..0] {
         unsafe { use_generic_indices(indices) }

@@ -14,7 +14,7 @@ pub(crate) mod container;
 pub(crate) mod contracts;
 pub(crate) mod display;
 pub(crate) mod effects;
-pub(crate) mod eq_simulator;
+pub(crate) mod comparison_simulator;
 pub(crate) mod exec;
 pub(crate) mod materialize;
 pub(crate) mod memory;

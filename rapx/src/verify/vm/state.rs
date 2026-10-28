@@ -452,6 +452,8 @@ pub(crate) enum ValueSource<'z3> {
     None,
     /// A literal bound to an inlined callee parameter at this call site.
     CallsiteConst,
+    /// The stored scalar value of a shared primitive reference parameter.
+    SharedScalarReferent,
     /// Bytes carried by a constant byte-array reference through generic calls.
     ConstBytes(Vec<u8>),
     /// A compile-time `offset_of!` field offset.

@@ -510,11 +510,27 @@ sound_tests_multi! {
 #[test]
 fn nonoverlap_indices() {
     let output = run_with_args("verify_units/nonoverlap_indices", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [16, 15, 8]);
+    assert_result_counts(&output, [20, 19, 8]);
     assert_function_result(&output, "sound_checked_slice_iter_indices", "UNKNOWN");
     assert_function_result(&output, "unsound_reversed_slice_iter_guard", "UNKNOWN");
     assert_function_result(&output, "sound_ref_guard", "SOUND");
     assert_function_result(&output, "unsound_reversed_ref_guard", "UNSOUND");
+    for function in [
+        "sound_lt_ref_guard",
+        "sound_le_false_guard",
+        "sound_gt_ref_guard",
+        "sound_ge_false_guard",
+    ] {
+        assert_function_result(&output, function, "SOUND");
+    }
+    for function in [
+        "unsound_le_ref_guard",
+        "unsound_ge_ref_guard",
+        "unsound_lt_false_guard",
+        "unsound_gt_false_guard",
+    ] {
+        assert_function_result(&output, function, "UNSOUND");
+    }
     assert_contain(&output, "MIR unavailable: std::cmp::PartialEq::eq");
 }
 

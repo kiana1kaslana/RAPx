@@ -1,36 +1,98 @@
-//! Exact `PartialEq::eq` models for calls whose MIR is unavailable.
+//! Exact comparison models for supported trait calls.
 //!
 //! A model must describe the returned boolean on both branches. In particular,
 //! equality never writes its operands or makes a fact true unconditionally.
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{BinOp, Local, Operand, Rvalue, StatementKind};
-use rustc_middle::ty::TyKind;
+use rustc_middle::ty::{TyCtxt, TyKind};
 use z3::ast::{Ast, Bool, Int};
 
 use super::state::{AllocKind, ValueSource, VmState, VmValue};
+use crate::def_ids::lang_api::{self, LangItem};
 use crate::helpers::mir_utils;
 
+#[derive(Clone, Copy)]
+enum ComparisonMethod {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl ComparisonMethod {
+    fn from_callee(tcx: TyCtxt<'_>, callee: DefId) -> Option<Self> {
+        let assoc = tcx.opt_associated_item(callee)?;
+        let trait_id = assoc.trait_container(tcx)?;
+        let symbol = assoc.name();
+        let name = symbol.as_str();
+        if lang_api::matches(tcx, trait_id, LangItem::PartialEq) {
+            return match name {
+                "eq" => Some(Self::Eq),
+                "ne" => Some(Self::Ne),
+                _ => None,
+            };
+        }
+        if lang_api::matches(tcx, trait_id, LangItem::PartialOrd) {
+            return match name {
+                "lt" => Some(Self::Lt),
+                "le" => Some(Self::Le),
+                "gt" => Some(Self::Gt),
+                "ge" => Some(Self::Ge),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    fn mir_op(self) -> BinOp {
+        match self {
+            Self::Eq => BinOp::Eq,
+            Self::Ne => BinOp::Ne,
+            Self::Lt => BinOp::Lt,
+            Self::Le => BinOp::Le,
+            Self::Gt => BinOp::Gt,
+            Self::Ge => BinOp::Ge,
+        }
+    }
+
+    fn compare<'z3>(self, left: &Int<'z3>, right: &Int<'z3>) -> Bool<'z3> {
+        match self {
+            Self::Eq => left._eq(right),
+            Self::Ne => left._eq(right).not(),
+            Self::Lt => left.lt(right),
+            Self::Le => left.le(right),
+            Self::Gt => left.gt(right),
+            Self::Ge => left.ge(right),
+        }
+    }
+}
+
 impl<'z3, 'tcx> VmState<'z3, 'tcx> {
-    pub(crate) fn try_simulate_eq(
+    pub(crate) fn try_simulate_comparison(
         &mut self,
         callee: Option<DefId>,
         args: &[VmValue<'z3, 'tcx>],
         destination: Local,
     ) -> bool {
-        let Some(callee) = callee else { return false };
-        if !matches!(
-            self.tcx.def_path_str(callee).as_str(),
-            "core::cmp::PartialEq::eq" | "std::cmp::PartialEq::eq"
-        ) || args.len() != 2
+        let Some(method) = callee.and_then(|id| ComparisonMethod::from_callee(self.tcx, id)) else {
+            return false;
+        };
+        if args.len() != 2
             || !matches!(self.body().local_decls[destination].ty.kind(), TyKind::Bool)
         {
             return false;
         }
 
         let Some(condition) = self
-            .scalar_eq(&args[0], &args[1])
-            .or_else(|| self.byte_slice_eq(&args[0], &args[1]))
+            .scalar_comparison(method, &args[0], &args[1])
+            .or_else(|| match method {
+                ComparisonMethod::Eq => self.byte_slice_eq(&args[0], &args[1]),
+                ComparisonMethod::Ne => self.byte_slice_eq(&args[0], &args[1]).map(|eq| eq.not()),
+                _ => None,
+            })
         else {
             return false;
         };
@@ -40,7 +102,7 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         result.source = ValueSource::Comparison {
             lhs: None,
             rhs: None,
-            op: BinOp::Eq,
+            op: method.mir_op(),
             cond: condition,
         };
         self.set_local(destination, result);
@@ -48,9 +110,10 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
     }
 
     /// A reference to a primitive scalar compares its stored value, not its
-    /// address. Float equality is excluded because NaN is not equal to itself.
-    fn scalar_eq(
+    /// address. Floats are excluded because this integer model cannot express NaN.
+    fn scalar_comparison(
         &self,
+        method: ComparisonMethod,
         left: &VmValue<'z3, 'tcx>,
         right: &VmValue<'z3, 'tcx>,
     ) -> Option<Bool<'z3>> {
@@ -72,7 +135,12 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
         }
         let left_value = self.load_value(left_prov.alloc_id, ty, &[])?;
         let right_value = self.load_value(right_prov.alloc_id, ty, &[])?;
-        Some(left_value.z3_term._eq(&right_value.z3_term))
+        if !matches!(left_value.source, ValueSource::SharedScalarReferent)
+            || !matches!(right_value.source, ValueSource::SharedScalarReferent)
+        {
+            return None;
+        }
+        Some(method.compare(&left_value.z3_term, &right_value.z3_term))
     }
 
     /// Compare a tracked `[u8]` view with a fully materialized constant byte
