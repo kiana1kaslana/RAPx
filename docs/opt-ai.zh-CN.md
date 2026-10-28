@@ -1,6 +1,6 @@
 # opt：静态分析 → AI 复核 → 报告
 
-本分支只实现 opt 的 AI 复核层，基于 `contest` 分支的 `2acce3a`。
+本分支只实现 opt 的 AI 复核层，基于 `agent-dev` 分支的 `2acce3a`。
 原有六类 opt 规则保持原样，也没有修改 verify、
 rcanary、safedrop、scan 或 mir 的实现。`cli.rs`、`lib.rs` 和 cargo-rapx 的改动
 仅用于接入新命令。
@@ -124,11 +124,11 @@ python3 tools/opt/demo_opt_ai.py --cargo-rapx "$PWD/target/debug/cargo-rapx"
 演示脚本默认离线；加 `--api` 才会访问已配置服务。示例比较手工准备的安全重写，
 真实运行前后两套测试和静态分析。讲稿见 [opt 两页展示](opt-ai-demo.zh-CN.md)。
 
-当前演示使用 contest 已有的 Vec 首部删除规则：对照 Vec::remove(0) 与
+当前演示使用 agent-dev 已有的 Vec 首部删除规则：对照 Vec::remove(0) 与
 VecDeque::pop_front 的 FIFO 消费，保持输出顺序。原静态建议和 AI 复核意见分别
 留档；没有引入其他本地实验规则。性能收益仍需单独测量。
 
-2026-10-28 在 `contest` 基线上的本机 WSL 验证：nightly 构建成功，13 项 Python
+2026-10-28 在 `agent-dev` 基线上的本机 WSL 验证：nightly 构建成功，13 项 Python
 协议/真实编译器与 mock API 测试通过，原有 3 项 opt 回归通过，演示前后各 1 项
 Rust 测试通过（每版 345 次结果断言），Vec 首部删除候选从 1 变为 0。
 未执行完整项目测试或性能基准；CI 已增加不依赖 API key 的流程测试与演示。
