@@ -113,7 +113,6 @@ struct Methods {
     known_nonnull: Vec<DefId>,
     null_ptr: Vec<DefId>,
     index_fns: Vec<DefId>,
-    eq_fns: Vec<DefId>,
     exchange_malloc: Option<DefId>,
 }
 
@@ -156,7 +155,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
         known_nonnull: Vec::new(),
         null_ptr: Vec::new(),
         index_fns: Vec::new(),
-        eq_fns: Vec::new(),
         exchange_malloc: None,
     };
 
@@ -189,13 +187,6 @@ fn init_methods(tcx: TyCtxt) -> Methods {
                         && assoc.name().as_str() == "index_mut")
             {
                 methods.index_fns.push(did);
-            }
-
-            // `PartialEq::eq` (the `a == b` comparison): matched by def_path,
-            // since blanket impls (`<impl PartialEq<&B> for &A>::eq`) have no
-            // `trait_container` (their assoc is not a trait-method item).
-            if name.contains("PartialEq") && name.ends_with("::eq") {
-                methods.eq_fns.push(did);
             }
 
             if name.ends_with("::len") {
@@ -453,8 +444,6 @@ method_fns! {
     null_ptr_fns => null_ptr,
     /// `Index::index` / `IndexMut::index_mut` (the `a[b]` indexing sugar).
     index_fns => index_fns,
-    /// `PartialEq::eq` (the `a == b` comparison).
-    eq_fns => eq_fns,
 }
 
 fn init_inner(tcx: TyCtxt) -> KnownItems {

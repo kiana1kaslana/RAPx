@@ -49,7 +49,6 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_nonnull_checked_new, eff_nonnull_new),
     ED!(api_classify::is_iter_next, eff_iter_next),
     ED!(api_classify::is_range_next, eff_range_next),
-    ED!(api_classify::is_eq_call, eff_none),
     // ── Layout and intrinsic effects ───────────────────────────────
     ED!(api_classify::is_layout_constant, eff_layout_const),
     ED!(intrinsic_api::is_select_unpredictable, eff_select_unpredictable),

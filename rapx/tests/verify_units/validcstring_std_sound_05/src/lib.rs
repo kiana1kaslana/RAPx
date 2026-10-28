@@ -14,3 +14,14 @@ pub fn sound_input_slice_exact_match(bytes: &[u8]) -> usize {
         0
     }
 }
+
+// A failed equality check gives no information about NUL termination.
+#[rapx::verify]
+pub fn unsound_input_slice_mismatch(bytes: &[u8]) -> usize {
+    if bytes != b"ok\0" {
+        let cstr = unsafe { CStr::from_bytes_with_nul_unchecked(bytes) };
+        cstr.to_bytes().len()
+    } else {
+        0
+    }
+}

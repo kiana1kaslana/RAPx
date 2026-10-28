@@ -4,7 +4,7 @@ use rustc_middle::mir::{Local, Operand, Place, Rvalue, StatementKind};
 use rustc_middle::ty::{Region, Ty};
 use z3::ast::Int;
 
-use crate::compat::{FxHashMap, FxHashSet, Spanned};
+use crate::compat::{FxHashMap, FxHashSet};
 use crate::helpers::mir_utils;
 
 use super::state::{AllocId, OffsetKind, Provenance, ValueFacts, ValueSource, VmState, VmValue};
@@ -706,38 +706,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
                     .collect()
             }
             _ => vec![],
-        }
-    }
-
-    pub(crate) fn propagate_const_bytes_to_tracked(&mut self, args: &[Spanned<Operand<'tcx>>]) {
-        let mut const_bytes: Option<(Vec<u8>, usize)> = None;
-        let mut tracked_alloc: Option<AllocId> = None;
-        let mut tracked_offset: usize = 0;
-
-        for (i, arg) in args.iter().enumerate() {
-            let arg_val = self.value_of_operand(&arg.node);
-            if const_bytes.is_none() {
-                let bytes_opt = mir_utils::const_operand_bytes(self.tcx, &arg.node)
-                    .or_else(|| self.trace_to_const_bytes(&arg.node));
-                if let Some(bytes) = bytes_opt {
-                    const_bytes = Some((bytes, i));
-                }
-            }
-            if tracked_alloc.is_none()
-                && let Some(alloc_id) = arg_val.provenance_alloc_id() {
-                    tracked_alloc = Some(alloc_id);
-                    if let Some(ref prov) = arg_val.provenance {
-                        tracked_offset = prov.offset.as_u64().map(|v| v as usize).unwrap_or(0);
-                    }
-                }
-        }
-
-        if let (Some((bytes, _)), Some(alloc_id)) = (const_bytes, tracked_alloc) {
-            for (j, &b) in bytes.iter().enumerate() {
-                let off = tracked_offset + j;
-                self.record_byte_value(alloc_id, off, Int::from_u64(self.z3_ctx, b as u64));
-            }
-            self.content_mut(alloc_id).facts.initialized = true;
         }
     }
 

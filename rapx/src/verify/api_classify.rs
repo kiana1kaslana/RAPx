@@ -678,11 +678,6 @@ pub fn is_index_method(callee: Option<DefId>) -> bool {
     any_def(callee, other_api::index_fns())
 }
 
-/// Whether `callee` is the `PartialEq::eq` comparison method.
-pub fn is_eq_call(callee: Option<DefId>) -> bool {
-    any_def(callee, other_api::eq_fns())
-}
-
 /// Whether `callee` is `SliceIndex::get_unchecked`/`get_unchecked_mut` (the
 /// trait method, whose receiver is the *index* and whose first argument is the
 /// slice pointer). Distinct from [`is_slice_get_unchecked`] (the slice-side

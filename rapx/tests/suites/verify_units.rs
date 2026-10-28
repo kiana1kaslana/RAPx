@@ -510,7 +510,10 @@ sound_tests_multi! {
 #[test]
 fn nonoverlap_indices() {
     let output = run_with_args("verify_units/nonoverlap_indices", CMD_VERIFY_TARGETED);
-    assert_result_counts(&output, [16, 14, 6]);
+    assert_result_counts(&output, [15, 14, 8]);
+    assert_function_result(&output, "sound_checked_slice_iter_indices", "UNKNOWN");
+    assert_function_result(&output, "unsound_reversed_slice_iter_guard", "UNKNOWN");
+    assert_contain(&output, "MIR unavailable: std::cmp::PartialEq::eq");
 }
 
 #[test]
@@ -562,12 +565,20 @@ unsound_tests_multi! {
 }
 
 // ValidCStr
+#[test]
+fn validcstring_std_sound_05() {
+    let output = run_with_args("verify_units/validcstring_std_sound_05", CMD_VERIFY_TARGETED);
+    assert_result_counts(&output, [0, 0, 2]);
+    assert_function_result(&output, "sound_input_slice_exact_match", "UNKNOWN");
+    assert_function_result(&output, "unsound_input_slice_mismatch", "UNKNOWN");
+    assert_contain(&output, "MIR unavailable: std::cmp::PartialEq::eq");
+}
+
 sound_tests! {
     validcstring_std_sound_01: "verify_units/validcstring_std_sound_01" => "sound_literal_bytes_with_nul",
     validcstring_std_sound_02: "verify_units/validcstring_std_sound_02" => "sound_variable_bytes_with_guard",
     validcstring_std_sound_03: "verify_units/validcstring_std_sound_03" => "sound_static_from_ptr",
     validcstring_std_sound_04: "verify_units/validcstring_std_sound_04" => "sound_branch_selects_valid_source",
-    validcstring_std_sound_05: "verify_units/validcstring_std_sound_05" => "sound_input_slice_exact_match",
     validcstring_std_sound_06: "verify_units/validcstring_std_sound_06" => "sound_vec_with_nul_from_variables",
     validcstring_std_sound_07: "verify_units/validcstring_std_sound_07" => "sound_loop_builds_valid_c_string",
     validcstring_std_sound_08: "verify_units/validcstring_std_sound_08" => "sound_from_ptr_suffix_after_add",

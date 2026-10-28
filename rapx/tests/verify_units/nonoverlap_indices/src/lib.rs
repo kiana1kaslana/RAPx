@@ -166,6 +166,20 @@ pub fn sound_checked_slice_iter_indices<const N: usize>(indices: [usize; N]) {
     unsafe { use_generic_indices(indices) }
 }
 
+// The opposite guard does not establish distinct indices. Until generic
+// PartialEq calls can be resolved, both iterator paths must remain UNKNOWN.
+#[rapx::verify]
+pub fn unsound_reversed_slice_iter_guard<const N: usize>(indices: [usize; N]) {
+    for (i, idx) in indices.iter().enumerate() {
+        for idx2 in &indices[..i] {
+            if idx != idx2 {
+                return;
+            }
+        }
+    }
+    unsafe { use_generic_indices(indices) }
+}
+
 #[rapx::verify]
 pub fn sound_empty_inner_iterator<const N: usize>(indices: [usize; N]) {
     for _ in &indices[..0] {

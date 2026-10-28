@@ -184,10 +184,6 @@ impl<'z3, 'tcx> VmState<'z3, 'tcx> {
             })
         });
 
-        if api_classify::is_eq_call(callee) {
-            self.propagate_const_bytes_to_tracked(args);
-        }
-
         // `assert_unsafe_precondition!` gates are disabled under release
         // semantics; bind them to `false` so their branchy panic bodies are not
         // inlined (which would otherwise recurse to the depth limit).
