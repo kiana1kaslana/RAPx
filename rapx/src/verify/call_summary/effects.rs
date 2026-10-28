@@ -7,9 +7,7 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{Local, Operand};
 use rustc_middle::ty::{Ty, TyCtxt, TyKind};
 
-use super::{
-    BoundedArithmeticOp, CallDependencySummary, CallEffect, CallEffectSummary, OverflowOp,
-};
+use super::{BoundedArithmeticOp, CallEffect, CallEffectSummary, OverflowOp};
 use crate::def_ids::other_api;
 use crate::def_ids::{intrinsic_api, nomir_api};
 use crate::helpers::mir_utils::{destination_stride, pointee_alignment, pointee_ty, type_layout};
@@ -54,15 +52,9 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_eq_call, eff_none),
     // ── Layout and intrinsic effects ───────────────────────────────
     ED!(api_classify::is_layout_constant, eff_layout_const),
-    ED!(
-        intrinsic_api::is_select_unpredictable,
-        eff_select_unpredictable
-    ),
+    ED!(intrinsic_api::is_select_unpredictable, eff_select_unpredictable),
     ED!(api_classify::is_intrinsic_branch_hint, eff_alias_arg0),
-    ED!(
-        api_classify::is_intrinsic_ptr_offset_from,
-        eff_ptr_offset_from
-    ),
+    ED!(api_classify::is_intrinsic_ptr_offset_from, eff_ptr_offset_from),
     ED!(intrinsic_api::is_arith_offset, eff_arith_offset),
     ED!(intrinsic_api::is_black_box, eff_return_arg_value),
     ED!(api_classify::is_intrinsic_with_overflow, eff_with_overflow),
@@ -76,10 +68,7 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_ptr_copy, eff_copy_memory),
     ED!(intrinsic_api::is_typed_swap_nonoverlapping, eff_swap_memory),
     ED!(intrinsic_api::is_write_bytes, eff_fill_bytes),
-    ED!(
-        api_classify::is_intrinsic_nonzero_preserving,
-        eff_return_nonzero_iff
-    ),
+    ED!(api_classify::is_intrinsic_nonzero_preserving, eff_return_nonzero_iff),
     ED!(intrinsic_api::is_raw_eq, eff_raw_eq),
     ED!(intrinsic_api::is_exact_div, eff_exact_div),
     ED!(intrinsic_api::is_size_of_val, eff_size_of_val),
@@ -92,31 +81,19 @@ static REGISTRY: &[Entry] = &[
     // `slice::to_vec` copies the slice; model like `into_vec` so
     // `String::from(&str)`'s Vec buffer gets provenance.
     ED!(nomir_api::is_slice_to_vec, eff_vec_from_box),
-    ED!(
-        api_classify::is_vec_with_capacity,
-        eff_new_allocation_from_cap
-    ),
+    ED!(api_classify::is_vec_with_capacity, eff_new_allocation_from_cap),
     ED!(api_classify::is_into_boxed_slice, eff_box_from_vec),
     ED!(api_classify::is_vec_push_or_reserve, eff_write_mem),
     // ── MIR available — precise symbolic summary ────────────────────
-    ED!(
-        api_classify::is_checked_next_pow2,
-        eff_return_option_some_nonzero
-    ),
+    ED!(api_classify::is_checked_next_pow2, eff_return_option_some_nonzero),
     // Raw-pointer `cast` is excluded (`is_as_ptr_valid`) — left to inlining.
     ED!(api_classify::is_as_ptr_valid, eff_alias_ptr),
     ED!(api_classify::is_str_as_bytes, eff_alias_arg0),
     ED!(api_classify::is_slice_get_unchecked, eff_alias_ptr),
     // `SliceIndex::get_unchecked(self, slice)` returns `slice + self` (receiver
     // is the index), so model as element-strided add off argument 1.
-    ED!(
-        api_classify::is_sliceindex_get_unchecked,
-        eff_sliceindex_get_unchecked
-    ),
-    ED!(
-        api_classify::is_ownership_reconstruction,
-        eff_ownership_recon
-    ),
+    ED!(api_classify::is_sliceindex_get_unchecked, eff_sliceindex_get_unchecked),
+    ED!(api_classify::is_ownership_reconstruction, eff_ownership_recon),
     ED!(api_classify::is_manually_drop_drop, eff_drop_memory),
     ED!(api_classify::is_std_drop, eff_drop_memory),
     ED!(api_classify::is_drop_in_place, eff_drop_memory),
@@ -133,82 +110,22 @@ static REGISTRY: &[Entry] = &[
     ED!(api_classify::is_strlen, eff_scan_length),
     // ── MIR available — deliberately opaque ─────────────────────────
     // `eff_none` keeps the call in the registry so the path graph does not inline.
-    ED!(
-        api_classify::is_nonnull_new_unchecked,
-        eff_return_pointer_arg
-    ),
+    ED!(api_classify::is_nonnull_new_unchecked, eff_return_pointer_arg),
     ED!(api_classify::is_maybe_uninit_uninit, eff_none),
-    ED!(
-        api_classify::is_maybe_uninit_assume_init,
-        eff_return_arg_value
-    ),
+    ED!(api_classify::is_maybe_uninit_assume_init, eff_return_arg_value),
     ED!(api_classify::is_maybe_uninit_write, eff_write_mem),
 ];
 
-/// True when the VM has a symbolic model for `callee` (any registry entry). The
-/// path graph uses this to keep such calls opaque rather than inlining their
-/// branchy CFG when the VM models their semantics more precisely; a cross-crate
-/// trait method matching here stays opaque instead of resolving to its impl.
-pub(crate) fn is_symbolically_modeled(callee: Option<DefId>) -> bool {
+/// A registry entry keeps the call opaque in the path graph, including entries
+/// with an intentionally empty effect. Operand-dependent fallbacks are checked
+/// later by the VM and cannot be identified by `DefId` alone.
+pub(crate) fn has_registry_entry(callee: Option<DefId>) -> bool {
     REGISTRY.iter().any(|e| (e.matches)(callee))
 }
 
 pub(crate) fn is_unmodeled_intrinsic(tcx: TyCtxt<'_>, callee: Option<DefId>) -> bool {
     callee.is_some_and(|id| intrinsic_api::is_intrinsic(tcx, id))
-        && !is_symbolically_modeled(callee)
-}
-
-pub(crate) fn intrinsic_dependency_summary<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    caller: DefId,
-    callee: Option<DefId>,
-    func: &Operand<'tcx>,
-    destination: Local,
-    arg_count: usize,
-) -> Option<CallDependencySummary> {
-    let id = callee?;
-    if !intrinsic_api::is_intrinsic(tcx, id) && !api_classify::is_ptr_copy(callee) {
-        return None;
-    }
-    let modeled = lookup_effect(tcx, caller, callee, func, destination);
-    let write_args: Vec<usize> = if let Some(ref effects) = modeled {
-        effects
-            .iter()
-            .flat_map(CallEffect::written_args)
-            .filter(|arg| *arg < arg_count)
-            .collect()
-    } else {
-        tcx.fn_sig(id)
-            .skip_binder()
-            .inputs()
-            .skip_binder()
-            .iter()
-            .take(arg_count)
-            .enumerate()
-            .filter_map(|(index, ty)| {
-                matches!(
-                    ty.kind(),
-                    TyKind::RawPtr(_, rustc_middle::ty::Mutability::Mut)
-                        | TyKind::Ref(_, _, rustc_middle::ty::Mutability::Mut)
-                )
-                .then_some(index)
-            })
-            .collect()
-    };
-    let write_inputs = if let Some(ref effects) = modeled {
-        effects
-            .iter()
-            .flat_map(CallEffect::write_inputs)
-            .filter(|arg| *arg < arg_count)
-            .collect()
-    } else {
-        write_args.clone()
-    };
-    Some(CallDependencySummary {
-        return_depends_on_args: (0..arg_count).collect(),
-        write_args,
-        write_inputs,
-    })
+        && !has_registry_entry(callee)
 }
 
 pub(crate) fn lookup_effect<'tcx>(

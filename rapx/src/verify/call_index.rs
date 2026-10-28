@@ -138,10 +138,10 @@ impl<'tcx> CallSiteIndex<'tcx> {
                     .opt_associated_item(base_callee)
                     .and_then(|item| item.trait_container(self.tcx))
                     .is_some();
-                let modeled = crate::verify::call_summary::effects::is_symbolically_modeled(Some(
+                let registry_handled = crate::verify::call_summary::effects::has_registry_entry(Some(
                     base_callee,
                 ));
-                let resolve_to_impl = !cross_crate || !is_trait_method || !modeled;
+                let resolve_to_impl = !cross_crate || !is_trait_method || !registry_handled;
                 if caller.as_local().is_none() && !(is_trait_method && resolve_to_impl) {
                     continue;
                 }
@@ -173,7 +173,7 @@ impl<'tcx> CallSiteIndex<'tcx> {
                     let is_virtual = mir_utils::resolve_callee_instance(self.tcx, caller, func)
                         .is_some_and(|instance| mir_utils::instance_def_id(self.tcx, instance).1);
                     if is_virtual {
-                        if !modeled {
+                        if !registry_handled {
                             for candidate in mir_utils::trait_impl_candidates(self.tcx, base_callee)
                                 .into_iter()
                                 .take(crate::limit::trait_impl_limit())
@@ -199,7 +199,7 @@ impl<'tcx> CallSiteIndex<'tcx> {
                 if crate::def_ids::intrinsic_api::is_intrinsic(self.tcx, callee)
                     || !self.tcx.is_mir_available(callee)
                     || expanded.contains(&callee)
-                    || crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee))
+                    || crate::verify::call_summary::effects::has_registry_entry(Some(callee))
                     || crate::def_ids::other_api::is_ub_check(self.tcx, callee)
                     || cross_crate_trait_default
                 {

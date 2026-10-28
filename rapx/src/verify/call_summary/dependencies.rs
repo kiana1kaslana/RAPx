@@ -1,22 +1,148 @@
-//! Dependency summaries derived from MIR for local callees.
+//! Backward call dependency summaries and MIR-derived argument flows.
 //!
-//! When no hand-written effect exists, this module inspects a callee's own MIR
-//! to approximate its return dependencies and must-write arguments.
+//! Uses registered effects when available and otherwise inspects callee MIR to
+//! approximate return dependencies and arguments the callee may write.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
     mir::{
-        BasicBlock, NonDivergingIntrinsic, Operand, ProjectionElem, Rvalue, StatementKind,
+        BasicBlock, Body, Local, NonDivergingIntrinsic, Operand, ProjectionElem, Rvalue, StatementKind,
         TerminatorKind,
     },
-    ty::TyCtxt,
+    ty::{Mutability, TyCtxt, TyKind},
 };
 
 use crate::analysis::dataflow::{DataflowAnalysis, default::DataflowAnalyzer};
 use crate::analysis::path::graph::{PathEnumerator, PathGraph};
+use crate::compat::Spanned;
+use crate::def_ids::intrinsic_api;
 use crate::helpers::mir_utils as helpers;
+use crate::verify::api_classify;
+
+use super::{CallDependencySummary, CallEffect, callback, effects};
+
+/// Return dependency information for a MIR call terminator.
+pub(crate) fn dependency_summary<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    caller: DefId,
+    func: &Operand<'tcx>,
+    destination: Local,
+    args: &[Spanned<Operand<'tcx>>],
+    body: &Body<'tcx>,
+) -> CallDependencySummary {
+    let arg_count = args.len();
+    let callee = helpers::dep_callee_def_id(func);
+
+    if let Some(callee) = callee {
+        if let Some(summary) = callback::estimate(tcx, callee, args, body) {
+            return summary;
+        }
+        if arg_count > 0
+            && (api_classify::is_iter_next(Some(callee))
+                || api_classify::is_range_next(Some(callee))
+                || crate::def_ids::other_api::iterator_next_trait_fns().contains(&callee))
+        {
+            let mut summary = CallDependencySummary::fallback(arg_count);
+            summary.write_args.push(0);
+            summary.write_inputs.push(0);
+            return summary;
+        }
+        if let Some(summary) = intrinsic_dependency_summary(
+            tcx, caller, Some(callee), func, destination, arg_count,
+        ) {
+            return summary;
+        }
+        if helpers::is_drop_in_place(callee) {
+            return CallDependencySummary::fallback(arg_count);
+        }
+
+        // Writes and return-dependencies are orthogonal. Analyze both even
+        // when a callee writes through an argument.
+        let write_args = match local_write_args(tcx, callee) {
+            Some(args) => args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>(),
+            None => tcx.fn_sig(callee).skip_binder().inputs().skip_binder().iter().enumerate()
+                .filter_map(|(i, ty)| {
+                    (i < arg_count && matches!(ty.kind(), TyKind::Ref(_, _, Mutability::Mut) | TyKind::RawPtr(_, Mutability::Mut)))
+                        .then_some(i)
+                })
+                .collect(),
+        };
+        let write_args = (!write_args.is_empty()).then_some(write_args);
+        let return_deps = if api_classify::is_branch(Some(callee)) {
+            Some(vec![0])
+        } else {
+            local_return_dependencies(tcx, callee)
+                .map(|args| args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>())
+        };
+
+        if write_args.is_some() || return_deps.is_some() {
+            return CallDependencySummary {
+                // An unavailable or failed MIR analysis says nothing about
+                // return flow; preserve all arguments in that case.
+                return_depends_on_args: return_deps.unwrap_or_else(|| (0..arg_count).collect()),
+                write_inputs: write_args.clone().unwrap_or_default(),
+                write_args: write_args.unwrap_or_default(),
+            };
+        }
+    }
+
+    CallDependencySummary::fallback(arg_count)
+}
+
+/// Derive backward dependencies from a registered intrinsic effect.
+fn intrinsic_dependency_summary<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    caller: DefId,
+    callee: Option<DefId>,
+    func: &Operand<'tcx>,
+    destination: Local,
+    arg_count: usize,
+) -> Option<CallDependencySummary> {
+    let id = callee?;
+    if !intrinsic_api::is_intrinsic(tcx, id) && !api_classify::is_ptr_copy(callee) {
+        return None;
+    }
+    let modeled = effects::lookup_effect(tcx, caller, callee, func, destination);
+    let write_args: Vec<usize> = if let Some(ref effects) = modeled {
+        effects
+            .iter()
+            .flat_map(CallEffect::written_args)
+            .filter(|arg| *arg < arg_count)
+            .collect()
+    } else {
+        tcx.fn_sig(id)
+            .skip_binder()
+            .inputs()
+            .skip_binder()
+            .iter()
+            .take(arg_count)
+            .enumerate()
+            .filter_map(|(index, ty)| {
+                matches!(
+                    ty.kind(),
+                    TyKind::RawPtr(_, Mutability::Mut) | TyKind::Ref(_, _, Mutability::Mut)
+                )
+                .then_some(index)
+            })
+            .collect()
+    };
+    let write_inputs = if let Some(ref effects) = modeled {
+        effects
+            .iter()
+            .flat_map(CallEffect::write_inputs)
+            .filter(|arg| *arg < arg_count)
+            .collect()
+    } else {
+        write_args.clone()
+    };
+    Some(CallDependencySummary {
+        return_depends_on_args: (0..arg_count).collect(),
+        write_args,
+        write_inputs,
+    })
+}
 
 /// Trace backward from an operand (inner call arg) through Copy/Move/Cast/
 /// Ref/RawPtr/tuple assignments to the outer callee's argument locals.
@@ -290,7 +416,7 @@ fn write_args_on_path<'tcx>(
         // Wrapper calls: a nested callee that writes its own args maps those
         // writes back onto this callee's args.
         if let Some(nested) = helpers::dep_callee_def_id(func)
-            && let Some(nested_writes) = super::effects::intrinsic_dependency_summary(
+            && let Some(nested_writes) = intrinsic_dependency_summary(
                 tcx,
                 caller,
                 Some(nested),

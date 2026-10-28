@@ -1,24 +1,17 @@
 //! Call summaries for the staged verifier: backward dependency (which call
 //! arguments stay relevant) and forward effect (what facts a call adds).
 pub(crate) mod effects;
-pub(crate) mod dependencies;
+mod dependencies;
 pub(crate) mod callback;
 
-use rustc_middle::{
-    mir::{Body, Operand},
-    ty::TyCtxt,
-};
-
-use crate::compat::Spanned;
-use crate::helpers::mir_utils;
-use crate::verify::api_classify::is_branch;
+pub(crate) use dependencies::dependency_summary;
 
 /// Dependency summary consumed by the backward visitor.
 #[derive(Clone, Debug)]
 pub(crate) struct CallDependencySummary {
     /// If the call destination is relevant, these call arguments are relevant.
     pub return_depends_on_args: Vec<usize>,
-    /// Arguments whose referents the callee writes.
+    /// Arguments whose referents the callee may write.
     pub write_args: Vec<usize>,
     /// Arguments the backward slicer needs to model those writes.
     pub write_inputs: Vec<usize>,
@@ -220,7 +213,7 @@ pub(crate) enum CallEffect {
 }
 
 impl CallEffect {
-    fn written_args(&self) -> Vec<usize> {
+    pub(super) fn written_args(&self) -> Vec<usize> {
         match self {
             Self::WriteMemory { pointer_arg }
             | Self::DropMemory { pointer_arg }
@@ -231,7 +224,7 @@ impl CallEffect {
         }
     }
 
-    fn write_inputs(&self) -> Vec<usize> {
+    pub(super) fn write_inputs(&self) -> Vec<usize> {
         match self {
             Self::FillBytes { pointer_arg, byte_arg, count_arg } => {
                 vec![*pointer_arg, *byte_arg, *count_arg]
@@ -256,76 +249,4 @@ pub(crate) enum BoundedArithmeticOp {
     SaturatingAdd,
     SaturatingSub,
     WrappingSub,
-}
-
-/// Return dependency information for a MIR call terminator.
-pub(crate) fn dependency_summary<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    caller: rustc_hir::def_id::DefId,
-    func: &Operand<'tcx>,
-    destination: rustc_middle::mir::Local,
-    args: &[Spanned<Operand<'tcx>>],
-    body: &Body<'tcx>,
-) -> CallDependencySummary {
-    let arg_count = args.len();
-    let callee = mir_utils::dep_callee_def_id(func);
-
-    // MIR dataflow first: works for local and cross-crate (`#[inline]`)
-    // callees alike, no hand-written table needed.
-    if let Some(callee) = callee {
-        if let Some(summary) = callback::estimate(tcx, callee, args, body) {
-            return summary;
-        }
-        if arg_count > 0
-            && (crate::verify::api_classify::is_iter_next(Some(callee))
-                || crate::verify::api_classify::is_range_next(Some(callee))
-                || crate::def_ids::other_api::iterator_next_trait_fns().contains(&callee))
-        {
-            let mut summary = CallDependencySummary::fallback(arg_count);
-            summary.write_args.push(0);
-            summary.write_inputs.push(0);
-            return summary;
-        }
-        if let Some(summary) = effects::intrinsic_dependency_summary(
-            tcx, caller, Some(callee), func, destination, arg_count,
-        ) {
-            return summary;
-        }
-        if mir_utils::is_drop_in_place(callee) {
-            return CallDependencySummary::fallback(arg_count);
-        }
-
-        // Writes and return-dependencies are orthogonal: a callee can both
-        // write an argument and return a value depending on another, so compute
-        // both rather than clearing `return_depends_on_args` when a write exists.
-        let write_args = match dependencies::local_write_args(tcx, callee) {
-            Some(args) => args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>(),
-            None => tcx.fn_sig(callee).skip_binder().inputs().skip_binder().iter().enumerate()
-                .filter_map(|(i, ty)| {
-                    if i < arg_count && matches!(ty.kind(), rustc_middle::ty::TyKind::Ref(_, _, rustc_middle::ty::Mutability::Mut) | rustc_middle::ty::TyKind::RawPtr(_, rustc_middle::ty::Mutability::Mut)) {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        };
-        let write_args = (!write_args.is_empty()).then_some(write_args);
-        let return_deps = if is_branch(Some(callee)) {
-            Some(vec![0])
-        } else {
-            dependencies::local_return_dependencies(tcx, callee)
-                .map(|args| args.into_iter().filter(|i| *i < arg_count).collect::<Vec<_>>())
-        };
-
-        if write_args.is_some() || return_deps.is_some() {
-            return CallDependencySummary {
-                return_depends_on_args: return_deps.unwrap_or_default(),
-                write_inputs: write_args.clone().unwrap_or_default(),
-                write_args: write_args.unwrap_or_default(),
-            };
-        }
-    }
-
-    CallDependencySummary::fallback(arg_count)
 }

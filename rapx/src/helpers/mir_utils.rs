@@ -394,7 +394,7 @@ pub(crate) fn has_direct_unmodeled_generic_call<'tcx>(
             && dep_callee_resolved_def_id(tcx, def_id, func)
                 .is_none_or(|target| !tcx.is_mir_available(target))
             && !has_callback_effect(tcx, callee, body.local_decls[destination.local].ty)
-            && !crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee))
+            && !crate::verify::call_summary::effects::has_registry_entry(Some(callee))
     })
 }
 
@@ -428,7 +428,7 @@ fn has_unmodeled_generic_call_rec<'tcx>(
             if dep_callee_resolved_def_id(tcx, def_id, func)
                 .is_none_or(|target| !tcx.is_mir_available(target))
                 && !has_callback_effect(tcx, callee, body.local_decls[destination.local].ty)
-                && !crate::verify::call_summary::effects::is_symbolically_modeled(Some(callee))
+                && !crate::verify::call_summary::effects::has_registry_entry(Some(callee))
             {
                 return true;
             }
