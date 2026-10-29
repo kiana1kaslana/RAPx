@@ -494,3 +494,38 @@ fn scan_static_mut() {
     assert_contain(&output, "Unknown");
     assert_contain(&output, "UNSOUND");
 }
+
+// ===============MIR Display Tests==============
+#[test]
+fn mir_demo() {
+    let output = run_with_args("analyze/mir_demo", CMD_ANALYZE_MIR);
+    assert_not_contain(&output, "RAPx|ERROR|");
+    // Every body is labelled with its kind and readable path.
+    assert_contain(&output, "MIR [constant] LIMIT (DefId(");
+    assert_contain(&output, "MIR [static] GREETING (DefId(");
+    assert_contain(&output, "MIR [method] Buf::push (DefId(");
+    assert_contain(&output, "MIR [closure] closure_user::{closure#0} (DefId(");
+    assert_contain(&output, "MIR [tuple_variant] Shape::Circle (DefId(");
+    // Locals carry user variable names; calls carry the callee path and crate.
+    assert_contain(&output, "_2: u8 @ b");
+    assert_contain(&output, "@ Call: std::vec::Vec::<T, A>::push #");
+    assert_contain(&output, "@ Call: <indirect>");
+    assert_contain(&output, "@ Assign(Ref)");
+    // Functions injected by RAPx are not part of the crate.
+    assert_not_contain(&output, "__raw_ptr_deref_dummy");
+    assert_not_contain(&output, "__static_mut_deref_dummy");
+}
+
+#[test]
+fn dot_mir_demo() {
+    // Used to ICE on const items (`optimized_mir` for constants).
+    let output = run_with_args("analyze/mir_demo", CMD_ANALYZE_DOT_MIR);
+    assert_not_contain(&output, "RAPx|ERROR|");
+    assert_not_contain(&output, "panicked");
+    let dir = project_path("analyze/mir_demo").join("MIR_dot_graph");
+    for name in ["LIMIT", "Buf::push", "closure_user", "closure_user::{closure#0}"] {
+        let png = dir.join(format!("{name}.png"));
+        let dot = dir.join(format!("{name}.dot"));
+        assert!(png.exists() || dot.exists(), "missing graph for {name} in {}", dir.display());
+    }
+}

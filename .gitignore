@@ -8,4 +8,4 @@ UPG/
 **/*.dot
 **/*.png
 .rapx-test.lock
-es_*
+es_*MIR_dot_graph/

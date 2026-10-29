@@ -261,6 +261,8 @@ const CMD_ANALYZE_SSA: &[&str] = &["analyze", "ssa"];
 const CMD_ANALYZE_RANGE: &[&str] = &["analyze", "range"];
 const CMD_ANALYZE_CALLGRAPH: &[&str] = &["analyze", "callgraph"];
 const CMD_ANALYZE_ADG: &[&str] = &["analyze", "adg", "--dump", "api_graph.yml"];
+const CMD_ANALYZE_MIR: &[&str] = &["analyze", "mir"];
+const CMD_ANALYZE_DOT_MIR: &[&str] = &["analyze", "dot-mir"];
 const CMD_VERIFY_SCAN: &[&str] = &["verify", "--mode", "scan"];
 
 // ── Verify backend ──────────────────────────────────────────────
