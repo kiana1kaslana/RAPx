@@ -23,6 +23,11 @@ jobs:
       run: ./install.sh
     - name: Test
       run: cd rapx && cargo test -- --test-threads=1 --skip std_challenge_02 --skip std_challenge_05 --skip std_challenge_10 --skip std_challenge_18 --skip std_challenge_20
+    - name: Test MIR statistics
+      run: |
+        export LD_LIBRARY_PATH="$(rustc --print sysroot)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export RAPX_TEST_CARGO_RAPX="$(command -v cargo-rapx)"
+        python3 -m unittest discover -s tools/mir -p test_mir_stats.py -v
 
   asterinas:
     runs-on: ubuntu-22.04
