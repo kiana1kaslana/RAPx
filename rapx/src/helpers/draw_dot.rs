@@ -1,4 +1,4 @@
-use std::fs::{File, remove_file};
+use std::fs::{File, remove_file, rename};
 use std::io::Write;
 use std::process::Command;
 
@@ -10,17 +10,26 @@ fn render_dot_file(dir_name: &str, name: &str, dot_graph: &str) {
     file.write_all(dot_graph.as_bytes())
         .expect("Unable to write data");
 
-    Command::new("dot")
+    let rendered = Command::new("dot")
         .args([
             "-Tpng",
             &file_name,
             "-o",
             &format!("{}/{}.png", dir_name, name),
         ])
-        .output()
-        .expect("Failed to execute Graphviz dot command");
+        .output();
 
-    remove_file(&file_name).expect("Failed to delete .dot file");
+    match rendered {
+        Ok(out) if out.status.success() => {
+            remove_file(&file_name).expect("Failed to delete .dot file");
+        }
+        // Keep the DOT source next to the PNGs so it can be rendered later.
+        _ => {
+            let kept = format!("{}/{}", dir_name, file_name);
+            let _ = rename(&file_name, &kept);
+            rap_warn!("Graphviz `dot` failed or is not installed; kept {}", kept);
+        }
+    }
 }
 
 pub fn render_dot_graphs(dot_graphs: Vec<(String, String)>) {
